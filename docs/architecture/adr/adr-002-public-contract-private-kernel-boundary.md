@@ -1,12 +1,19 @@
 # ADR-002: Public Contract And Private Kernel Boundary
 
-- **Status:** Accepted
+- **Status:** Superseded by [ADR-003](adr-003-public-framework-product.md)
 - **Date:** 2026-03-16
 - **Owners:** Repository / Platform Architecture
 - **Related roadmap:** [REFACTOR.MD](../../../REFACTOR.MD), [REFACTOR-MASTER-PROGRAM.md](../../../REFACTOR-MASTER-PROGRAM.md)
 - **Supersedes:** none
 
 ## Context
+
+This ADR was accepted during the private-kernel split program and remains
+important historical context for why the private-kernel boundary existed.
+
+It is no longer the current architectural direction. The active direction is
+now [ADR-003](adr-003-public-framework-product.md), which changes the end-state
+product model to a public framework with a staged declassification path.
 
 AgenC completed Gate 10 split-readiness proof, but Gate 11 exposed a harder problem than simple repo extraction:
 

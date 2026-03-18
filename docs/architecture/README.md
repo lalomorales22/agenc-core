@@ -4,7 +4,9 @@ Architecture reference for AgenC protocol and runtime surfaces. These docs are i
 
 ## How to Use
 
-- **Planning whole-repository refactor work?** Start with [REFACTOR.MD](../../REFACTOR.MD) and [REFACTOR-MASTER-PROGRAM.md](../../REFACTOR-MASTER-PROGRAM.md)
+- **Understanding the current product contract?** Start with [product-contract.md](product-contract.md) and [adr/adr-003-public-framework-product.md](adr/adr-003-public-framework-product.md)
+- **Understanding the tracked rollout for that contract?** See [product-contract.md](product-contract.md) plus GitHub issues `#4` through `#9` in `tetsuo-ai/agenc-core`
+- **Planning whole-repository refactor work?** Use the historical records only as background: [REFACTOR.MD](../../REFACTOR.MD) and [REFACTOR-MASTER-PROGRAM.md](../../REFACTOR-MASTER-PROGRAM.md)
 - **Reading legacy runtime roadmap material?** Use the relevant phase guide in `phases/` as historical runtime-scoped reference only
 - **Understanding the system?** Read `overview.md` then `runtime-layers.md`
 - **Writing new code?** Check `guides/` for conventions and templates
@@ -17,6 +19,7 @@ Architecture reference for AgenC protocol and runtime surfaces. These docs are i
 | Document | Description |
 |----------|-------------|
 | [overview.md](overview.md) | System component diagram — 5 packages and their relationships |
+| [product-contract.md](product-contract.md) | Public product contract: one daemon, shared TUI/web surfaces, and public install path |
 | [runtime-layers.md](runtime-layers.md) | 7-layer module dependency diagram for the runtime |
 | [interfaces.md](interfaces.md) | Class diagrams for 10 key interfaces |
 
@@ -25,7 +28,8 @@ Architecture reference for AgenC protocol and runtime surfaces. These docs are i
 | Document | Description |
 |----------|-------------|
 | [adr/adr-001-durable-task-runtime.md](adr/adr-001-durable-task-runtime.md) | Canonical durable task runtime contract, lifecycle semantics, and invariants |
-| [adr/adr-002-public-contract-private-kernel-boundary.md](adr/adr-002-public-contract-private-kernel-boundary.md) | Gate 11 boundary decision: public contracts and plugin ABI, private kernel and proving/control plane |
+| [adr/adr-002-public-contract-private-kernel-boundary.md](adr/adr-002-public-contract-private-kernel-boundary.md) | Historical private-kernel boundary decision, now superseded by ADR-003 |
+| [adr/adr-003-public-framework-product.md](adr/adr-003-public-framework-product.md) | Current direction: public framework product, shared daemon, and staged declassification |
 
 ### Flow Diagrams
 
@@ -45,6 +49,7 @@ Architecture reference for AgenC protocol and runtime surfaces. These docs are i
 
 | Document | Description |
 |----------|-------------|
+| [guides/cli-runtime-migration-map.md](guides/cli-runtime-migration-map.md) | Current `agenc` / `agenc-runtime` surface mapping into the public product contract |
 | [guides/new-module-template.md](guides/new-module-template.md) | Standard module structure, error codes, barrel exports |
 | [guides/type-conventions.md](guides/type-conventions.md) | bigint vs BN, Uint8Array vs Buffer, etc. |
 | [guides/testing-patterns.md](guides/testing-patterns.md) | Mock patterns, vitest setup, LiteSVM |
