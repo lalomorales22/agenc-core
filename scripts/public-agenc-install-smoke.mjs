@@ -43,6 +43,12 @@ function runJson(command, args, cwd, env = process.env) {
   return JSON.parse(run(command, args, cwd, env));
 }
 
+function readPackedWrapperPackageJson(tarballPath, cwd) {
+  return JSON.parse(
+    run("tar", ["-xOf", tarballPath, "package/package.json"], cwd),
+  );
+}
+
 function bumpPatchVersion(version) {
   const match = /^v?(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)$/u.exec(version);
   if (!match?.groups) {
@@ -119,6 +125,15 @@ async function packPreparedWrapper(repoRootPath, artifactDir, tempRoot, label) {
     throw new Error("npm pack did not return a tarball filename for agenc");
   }
   const originalTarballPath = path.join(wrapperDir, packed.filename);
+  const packedPackageJson = readPackedWrapperPackageJson(
+    originalTarballPath,
+    repoRootPath,
+  );
+  assert.equal(
+    packedPackageJson.name,
+    "@tetsuo-ai/agenc",
+    "packed wrapper package.json must publish the scoped npm identity",
+  );
   const tarballPath = path.join(tempRoot, `${label}-${packed.filename}`);
   await copyFile(originalTarballPath, tarballPath);
   await unlink(originalTarballPath);

@@ -5,7 +5,7 @@ Public CLI and launcher for the AgenC framework.
 This package owns the user-facing global install surface:
 
 ```bash
-npm install -g agenc
+npm install -g @tetsuo-ai/agenc
 agenc onboard
 agenc start
 agenc
@@ -15,6 +15,9 @@ agenc ui
 It does not expose the runtime source tree directly. Instead, it installs and
 launches the matching AgenC runtime artifact for the current supported
 platform.
+
+The supported npm install identity is `@tetsuo-ai/agenc`. The unscoped
+`agenc` package name is not part of the supported public release contract.
 
 Current public support is intentionally narrow:
 
@@ -28,12 +31,13 @@ Current validated release-gate lanes:
 
 Production release channel:
 
-- npm package: `agenc`
+- npm package: `@tetsuo-ai/agenc`
 - runtime artifact host: GitHub Releases on `tetsuo-ai/agenc-core`
 - trust: embedded signed manifest + embedded public key + embedded trust policy
 
 After the matching runtime artifact is installed, `agenc` can continue to run
-offline against the local install.
+offline against the local install. The npm package name is scoped, but the CLI
+binary remains `agenc`.
 
 `agenc` exposes two primary local operator surfaces against the same daemon:
 

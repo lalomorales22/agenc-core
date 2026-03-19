@@ -30,7 +30,7 @@ async function createFixtureContext(t) {
 
   await writeFile(
     path.join(packageRoot, "package.json"),
-    JSON.stringify({ name: "agenc", version: "0.1.0" }, null, 2),
+    JSON.stringify({ name: "@tetsuo-ai/agenc", version: "0.1.0" }, null, 2),
     "utf8",
   );
 
