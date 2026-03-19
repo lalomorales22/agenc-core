@@ -4,10 +4,13 @@ This guide defines the public release channel for the `agenc` install path.
 
 ## Core contract
 
-The public install surface is the `agenc` npm package.
+The public install surface is the `@tetsuo-ai/agenc` npm package, which exposes
+the `agenc` CLI binary.
+
+The unscoped `agenc` package name is not part of this public release channel.
 
 ```bash
-npm install -g agenc
+npm install -g @tetsuo-ai/agenc
 ```
 
 That package does **not** publish the raw runtime workspace as a normal npm
@@ -27,7 +30,7 @@ bins from there.
 
 The public runtime artifact channel is:
 
-- npm package: `agenc`
+- npm package: `@tetsuo-ai/agenc`
 - runtime artifact host: GitHub Releases on `tetsuo-ai/agenc-core`
 
 Release flow:
@@ -38,7 +41,7 @@ Release flow:
 3. CI signs the manifest for that artifact.
 4. CI attaches the artifact to the corresponding GitHub Release.
 5. CI embeds the signed manifest, signature, public key, and trust policy into
-   the published `agenc` wrapper package.
+   the published `@tetsuo-ai/agenc` wrapper package.
 
 Phase 2 keeps local smoke/rehearsal on `file://` manifests, but the production
 release contract is GitHub Releases.
@@ -82,7 +85,7 @@ Runtime packaging requirement:
   checkout or build step on the user machine
 - the base runtime artifact must include the first-party Telegram connector
   lifecycle surface so `agenc connector add telegram` does not require a second
-  package install after `npm install -g agenc`
+  package install after `npm install -g @tetsuo-ai/agenc`
 
 Release-gate requirement:
 
@@ -103,7 +106,7 @@ The trust model is:
 
 Key rotation model:
 
-- production key rotation is delivered by publishing a new `agenc` wrapper
+- production key rotation is delivered by publishing a new `@tetsuo-ai/agenc` wrapper
   version with a new embedded public key and trust policy
 - local development can override trust assets explicitly through development
   environment variables
@@ -135,4 +138,4 @@ with:
 - `AGENC_RUNTIME_TRUST_POLICY_FILE`
 
 These are development-only escape hatches. Production installs should rely on
-the embedded release assets shipped in the `agenc` package.
+the embedded release assets shipped in the `@tetsuo-ai/agenc` package.

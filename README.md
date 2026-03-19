@@ -19,7 +19,8 @@ This repository currently owns the implementation for:
 Under [ADR-003](docs/architecture/adr/adr-003-public-framework-product.md), the
 product contract is public-framework-first:
 
-- the install surface is `agenc`
+- the npm install surface is `@tetsuo-ai/agenc`
+- the CLI command remains `agenc`
 - one daemon/gateway is the runtime authority
 - TUI and web are sibling clients of that daemon
 
@@ -40,7 +41,8 @@ Implementation packages in this repo remain non-builder surfaces:
 
 ### Public Product Install Surface
 
-The public operator install identity is `agenc`.
+The public operator install identity is the scoped package `@tetsuo-ai/agenc`,
+which installs the `agenc` CLI.
 
 Phase 2 public wrapper support is currently:
 

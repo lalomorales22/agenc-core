@@ -53,7 +53,7 @@ AgenC is a public framework product.
 
 The end state is:
 
-- installable public `agenc` CLI/package
+- installable public `@tetsuo-ai/agenc` package with the `agenc` CLI
 - one local daemon/gateway as runtime authority
 - TUI/operator console and web UI as sibling clients of the same daemon
 - public plugin/add-on model around the same daemon/runtime
@@ -91,11 +91,12 @@ For the public product path:
 
 ### Package/install rule
 
-The public install identity is `agenc`.
+The public install identity is the scoped npm package `@tetsuo-ai/agenc`,
+which installs the `agenc` CLI.
 
-`agenc` is a public wrapper/launcher package around the runtime surface. It is
-not a hand-waved public rename of the current private/transitional runtime
-package.
+`@tetsuo-ai/agenc` is a public wrapper/launcher package around the runtime
+surface. It is not a hand-waved public rename of the current
+private/transitional runtime package.
 
 `@tetsuo-ai/runtime` may remain transitional/internal while the installable
 public product surface is stabilized.
@@ -151,8 +152,8 @@ enforcement, not proof that ADR-003 is invalid.
 ### Tradeoffs
 
 - the old private-kernel posture must be unwound carefully rather than ignored
-- package/install strategy must be explicit because public `agenc` cannot simply
-  depend on a private runtime package
+- package/install strategy must be explicit because public `@tetsuo-ai/agenc`
+  cannot simply depend on a private runtime package
 - declassification is now a real tracked implementation phase, not a future
   hand-wave
 - source visibility is no longer the primary moat assumption
@@ -165,7 +166,7 @@ Required implementation gates:
 
 1. Phase 0: product contract + command/config/package strategy lock
 2. Phase 1: command/config convergence and compatibility handling
-3. Phase 2: public `agenc` install path
+3. Phase 2: public `@tetsuo-ai/agenc` install path
 4. Phase 3: daemon-backed web dashboard via `agenc ui`
 5. Later: task/bid contract, marketplace UX, connector expansion
 6. Final: public-scrub/declassification program for `agenc-core`
@@ -173,7 +174,7 @@ Required implementation gates:
 Tracked implementation issues in `tetsuo-ai/agenc-core`:
 
 - `#4` CLI/config convergence
-- `#5` public `agenc` wrapper and runtime install path
+- `#5` public `@tetsuo-ai/agenc` wrapper and runtime install path
 - `#6` daemon-backed web dashboard and `demo-app` retirement from product path
 - `#7` connector/plugin ABI freeze plus Telegram lifecycle
 - `#8` task/bid daemon contract before marketplace UX

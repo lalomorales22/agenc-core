@@ -68,12 +68,16 @@ The web dashboard is a daemon client, not a separate runtime.
 
 ## Public install surface
 
-The public user-facing install identity is `agenc`.
+The public user-facing install identity is the scoped npm package
+`@tetsuo-ai/agenc`, which installs the `agenc` CLI command.
+
+The unscoped `agenc` package name is not part of the supported public install
+contract.
 
 V1 install flow:
 
 ```bash
-npm install -g agenc
+npm install -g @tetsuo-ai/agenc
 agenc onboard
 agenc
 agenc ui
@@ -95,7 +99,7 @@ minimum floor and Node `20` as the mainline lane.
 
 ## Public package composition
 
-The public `agenc` package is a wrapper/launcher package.
+The public `@tetsuo-ai/agenc` package is a wrapper/launcher package.
 
 It does not depend on a private runtime package as a normal npm dependency.
 
@@ -105,7 +109,7 @@ V1 public package composition:
   existing runtime bins
 - signed public runtime artifacts are published on GitHub Releases for
   `tetsuo-ai/agenc-core`
-- the public `agenc` wrapper installs/updates/launches those runtime artifacts
+- the public `@tetsuo-ai/agenc` wrapper installs/updates/launches those runtime artifacts
 - no end-user install path requires private-registry credentials
 
 See [guides/public-runtime-release-channel.md](guides/public-runtime-release-channel.md)
@@ -151,7 +155,7 @@ incompatible lifecycle model.
 
 V1 means:
 
-- install `agenc`
+- install `@tetsuo-ai/agenc`
 - onboard
 - start/stop/status/logs
 - TUI attach

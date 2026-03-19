@@ -30,14 +30,14 @@ Current package engine floor from
 Current support statement:
 
 - Node `18+` is the minimum supported runtime floor for local CLI/daemon use
-- the public `agenc` install path is currently validated in CI on:
+- the public `@tetsuo-ai/agenc` install path is currently validated in CI on:
   - Node `18` as the supported minimum floor
   - Node `20` as the current mainline release gate
 
 ## Public wrapper install support
 
-The public `agenc` wrapper install path currently supports exactly one validated
-tuple:
+The public `@tetsuo-ai/agenc` wrapper install path currently supports exactly
+one validated tuple:
 
 - Linux `x64`
 - Node `>=18.0.0`
@@ -56,8 +56,8 @@ added.
 
 ### Linux
 
-Status: supported for local CLI/daemon operation and for the public `agenc`
-wrapper install path on `x64`.
+Status: supported for local CLI/daemon operation and for the public
+`@tetsuo-ai/agenc` wrapper install path on `x64`.
 
 Evidence in the current repo:
 
@@ -67,8 +67,8 @@ Evidence in the current repo:
 
 ### macOS
 
-Status: source/runtime development is plausible, but the public `agenc` wrapper
-install path is **not yet** claimed as supported.
+Status: source/runtime development is plausible, but the public
+`@tetsuo-ai/agenc` wrapper install path is **not yet** claimed as supported.
 
 Evidence in the current repo:
 
@@ -148,7 +148,8 @@ Current behavior:
 
 ## Product-install implication
 
-This matrix is the baseline for the public `agenc` install path:
+This matrix is the baseline for the public `@tetsuo-ai/agenc` install path and
+the `agenc` CLI it installs:
 
 - one daemon/gateway authority
 - CLI + TUI + dashboard all attach to that same daemon
@@ -166,7 +167,7 @@ This matrix is the baseline for the public `agenc` install path:
 
 The production public wrapper contract is:
 
-- npm package: `agenc`
+- npm package: `@tetsuo-ai/agenc`
 - runtime artifact host: GitHub Releases on `tetsuo-ai/agenc-core`
 - trust: embedded signed manifest + embedded public key + embedded trust policy
 

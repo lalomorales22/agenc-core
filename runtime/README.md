@@ -3,13 +3,14 @@
 Implementation runtime package for AgenC.
 
 `@tetsuo-ai/runtime` is the current operator/runtime implementation baseline in
-`agenc-core`. It powers the public `agenc` install surface, but it is not
+`agenc-core`. It powers the public `@tetsuo-ai/agenc` install surface and the
+`agenc` CLI, but it is not
 itself the supported end-user install identity and it is not a supported public
 builder target.
 
 The public operator install contract is:
 
-- npm package: `agenc`
+- npm package: `@tetsuo-ai/agenc`
 - runtime artifact channel: GitHub Releases on `tetsuo-ai/agenc-core`
 - canonical local state: `~/.agenc/`
 
