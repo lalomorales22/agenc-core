@@ -111,10 +111,13 @@ function isSharedContextReadOnlyReview(
     return false;
   }
   const first = economics.stepAnalyses[0];
-  if (!first || first.ownedArtifacts.length === 0) return false;
-  return economics.stepAnalyses.slice(1).every((analysis) =>
-    analysis.ownedArtifacts.some((artifact) => first.ownedArtifacts.includes(artifact))
-  );
+  if (!first) return false;
+  const sharedArtifacts = collectSharedReviewArtifacts(first);
+  if (sharedArtifacts.length === 0) return false;
+  return economics.stepAnalyses.slice(1).every((analysis) => {
+    const analysisArtifacts = collectSharedReviewArtifacts(analysis);
+    return analysisArtifacts.some((artifact) => sharedArtifacts.includes(artifact));
+  });
 }
 
 function collectPrimaryOwnedArtifacts(
@@ -125,6 +128,19 @@ function collectPrimaryOwnedArtifacts(
     return targetArtifacts;
   }
   return analysis.ownedArtifacts;
+}
+
+function collectSharedReviewArtifacts(
+  analysis: DelegationStepAnalysis,
+): readonly string[] {
+  const context = analysis.step.executionContext;
+  return [
+    ...analysis.ownedArtifacts,
+    ...analysis.referencedArtifacts,
+    ...(context?.requiredSourceArtifacts ?? []),
+    ...(context?.inputArtifacts ?? []),
+    ...(context?.targetArtifacts ?? []),
+  ].filter((artifact, index, artifacts) => artifacts.indexOf(artifact) === index);
 }
 
 function detectSharedArtifactWriterInline(
@@ -646,6 +662,17 @@ export function assessDelegationAdmission(
     return buildDecision({
       allowed: false,
       reason: "trivial_request",
+      shape,
+      economics,
+      stepAdmissions,
+      diagnostics,
+    });
+  }
+
+  if (isSharedContextReadOnlyReview(input, economics)) {
+    return buildDecision({
+      allowed: false,
+      reason: "shared_context_review",
       shape,
       economics,
       stepAdmissions,
