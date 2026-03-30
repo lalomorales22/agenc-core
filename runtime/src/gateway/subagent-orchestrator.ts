@@ -2555,16 +2555,22 @@ export class SubAgentOrchestrator implements DeterministicPipelineExecutor {
     // requiredToolCapabilities to only include write tools.
     const verificationEnrichment: string[] = [];
     const verificationMode = step.executionContext?.verificationMode;
+    const stepKind = step.executionContext?.stepKind;
     if (verificationMode && verificationMode !== "none") {
       const has = (name: string) =>
         baseRequestedTools.some((t) => t === name);
       if (!has("system.readFile")) {
         verificationEnrichment.push("system.readFile");
       }
-      if (
-        verificationMode !== "grounded_read" &&
-        !has("system.bash")
-      ) {
+      // Coding sub-agents (write/scaffold) always need bash to verify
+      // their work — running tests, checking syntax, building.  The
+      // planner often sets grounded_read but acceptance criteria
+      // require execution evidence.
+      const isCodingStep =
+        stepKind === "delegated_write" ||
+        stepKind === "delegated_scaffold" ||
+        stepKind === "delegated_validation";
+      if (!has("system.bash") && (isCodingStep || verificationMode !== "grounded_read")) {
         verificationEnrichment.push("system.bash");
       }
     }
