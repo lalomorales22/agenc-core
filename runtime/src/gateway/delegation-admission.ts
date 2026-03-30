@@ -425,6 +425,18 @@ function detectShape(
   ) {
     return "bounded_sequential_handoff";
   }
+  // Multi-step workspace implementation: steps target the same workspace
+  // root but write to distinct files.  The orchestrator handles sequencing.
+  // This is the most common coding pattern: scaffold → implement modules →
+  // create tests → run verification.
+  if (
+    input.steps.length >= 2 &&
+    economics.explicitOwnershipCoverage > 0 &&
+    economics.dependencyDepth >= 1 &&
+    analyses.some((analysis) => analysis.mutable)
+  ) {
+    return "bounded_sequential_handoff";
+  }
   return null;
 }
 
