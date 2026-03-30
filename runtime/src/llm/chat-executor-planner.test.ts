@@ -2682,7 +2682,7 @@ describe("chat-executor-planner explicit orchestration requirements", () => {
           acceptanceCriteria: ["Tests pass"],
           requiredToolCapabilities: ["system.bash"],
           contextRequirements: ["implement_core"],
-          maxBudgetHint: "30s",
+          maxBudgetHint: "3m",
           canRunParallel: false,
         },
       ],
@@ -2715,7 +2715,7 @@ describe("chat-executor-planner explicit orchestration requirements", () => {
               allowedReadRoots: ["/tmp/maze-forge-ts"],
               allowedWriteRoots: ["/tmp/maze-forge-ts"],
             },
-            max_budget_hint: "30s",
+            max_budget_hint: "3m",
           },
         ],
       }),
@@ -2724,7 +2724,7 @@ describe("chat-executor-planner explicit orchestration requirements", () => {
     expect(parsed.plan?.steps[0]).toEqual(
       expect.objectContaining({
         stepType: "subagent_task",
-        maxBudgetHint: "30s",
+        maxBudgetHint: "3m",
       }),
     );
     expect(parsed.diagnostics ?? []).not.toEqual(

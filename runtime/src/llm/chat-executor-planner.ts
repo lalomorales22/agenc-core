@@ -583,13 +583,17 @@ function isDialogueOnlyRecallTurn(messageText: string): boolean {
   );
 }
 
+const PYTHON_TOOLING_RE =
+  /\bpython[23]?\b|\bpytest\b|\bunittest\b|\bpip\b|\.py\b/i;
+
 function shouldIncludePlannerHostTooling(
   messageText: string,
   history: readonly LLMMessage[],
 ): boolean {
   if (
     NODE_PACKAGE_TOOLING_RE.test(messageText) ||
-    NODE_PACKAGE_MANIFEST_PATH_RE.test(messageText)
+    NODE_PACKAGE_MANIFEST_PATH_RE.test(messageText) ||
+    PYTHON_TOOLING_RE.test(messageText)
   ) {
     return true;
   }
@@ -603,7 +607,8 @@ function shouldIncludePlannerHostTooling(
             .join(" ");
     return (
       NODE_PACKAGE_TOOLING_RE.test(raw) ||
-      NODE_PACKAGE_MANIFEST_PATH_RE.test(raw)
+      NODE_PACKAGE_MANIFEST_PATH_RE.test(raw) ||
+      PYTHON_TOOLING_RE.test(raw)
     );
   });
 }
@@ -652,6 +657,16 @@ function buildPlannerHostToolingHint(
   } else if (hostToolingProfile.npm?.workspaceProtocolSupport === "supported") {
     fragments.push(
       "Empirical npm probe: local `workspace:*` dependency specifiers are supported on this host.",
+    );
+  }
+
+  if (hostToolingProfile.pythonBinary) {
+    fragments.push(
+      `Host Python binary: \`${hostToolingProfile.pythonBinary}\`${
+        hostToolingProfile.pythonVersion
+          ? ` (${hostToolingProfile.pythonVersion})`
+          : ""
+      }. Use \`${hostToolingProfile.pythonBinary}\` instead of \`python\` in all shell commands.`,
     );
   }
 
