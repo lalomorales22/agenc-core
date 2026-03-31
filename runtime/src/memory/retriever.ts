@@ -652,7 +652,13 @@ export class SemanticMemoryRetriever implements MemoryRetriever {
   }
 
   private formatMemoryBlock(entry: ScoredRetrievalEntry): string {
-    return `<memory source="${attrEscape(entry.source)}" role="${entry.role}" provenance="${attrEscape(entry.provenance)}" confidence="${entry.confidence.toFixed(2)}" salience="${entry.salienceScore.toFixed(2)}" score="${entry.combinedScore.toFixed(2)}">\n${entry.entry.content}\n</memory>`;
+    // Security H-5: sanitize content to prevent <memory> tag injection.
+    // If stored content contains <memory> or </memory>, it could be
+    // interpreted as a memory injection by the LLM.
+    const sanitizedContent = entry.entry.content
+      .replace(/<memory[\s>]/g, "&lt;memory ")
+      .replace(/<\/memory>/g, "&lt;/memory&gt;");
+    return `<memory source="${attrEscape(entry.source)}" role="${entry.role}" provenance="${attrEscape(entry.provenance)}" confidence="${entry.confidence.toFixed(2)}" salience="${entry.salienceScore.toFixed(2)}" score="${entry.combinedScore.toFixed(2)}">\n${sanitizedContent}\n</memory>`;
   }
 
   private packRoleCandidates(

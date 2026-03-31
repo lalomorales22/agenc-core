@@ -65,6 +65,12 @@ export interface SessionEndResult {
 
 export interface TurnIngestionMetadata {
   readonly agentResponseMetadata?: Record<string, unknown>;
+  /** Context scope for memory isolation (Phase 2.4). */
+  readonly workspaceId?: string;
+  readonly agentId?: string;
+  readonly userId?: string;
+  readonly worldId?: string;
+  readonly channel?: string;
 }
 
 // ============================================================================
@@ -224,6 +230,15 @@ export class MemoryIngestionEngine {
     const contentHash = createHash("sha256").update(normalized).digest("hex");
     const salience = scoreTurnSalience(safeUserMessage, safeAgentResponse);
     const hasOverrideSignal = hasSalienceOverrideSignal(combinedText);
+
+    // Phase 2.4: scope entries by workspace/agent/user/world/channel
+    const scopeFields = {
+      ...(metadata?.workspaceId ? { workspaceId: metadata.workspaceId } : {}),
+      ...(metadata?.agentId ? { agentId: metadata.agentId } : {}),
+      ...(metadata?.userId ? { userId: metadata.userId } : {}),
+      ...(metadata?.worldId ? { worldId: metadata.worldId } : {}),
+      ...(metadata?.channel ? { channel: metadata.channel } : {}),
+    };
     const shouldIndex =
       salience >= this.minTurnSalienceScore || hasOverrideSignal;
     const confidence = roundToTwoDecimals(0.45 + salience * 0.45);
@@ -256,6 +271,7 @@ export class MemoryIngestionEngine {
               sessionId,
               role: "assistant",
               content: combinedText,
+              ...scopeFields,
               metadata: {
                 type: "conversation_turn",
                 memoryRole: "working",
@@ -264,6 +280,7 @@ export class MemoryIngestionEngine {
                 confidence,
                 salienceScore: roundToTwoDecimals(salience),
                 contentHash,
+                originalText: combinedText,
                 ...(metadata?.agentResponseMetadata ?? {}),
               },
             },
@@ -282,6 +299,7 @@ export class MemoryIngestionEngine {
               sessionId,
               role: "assistant",
               content: combinedText,
+              ...scopeFields,
               metadata: {
                 type: "conversation_turn_index",
                 memoryRole: "semantic",
@@ -290,6 +308,7 @@ export class MemoryIngestionEngine {
                 confidence,
                 salienceScore: roundToTwoDecimals(salience),
                 contentHash,
+                originalText: combinedText,
                 ...(metadata?.agentResponseMetadata ?? {}),
               },
             },
@@ -326,6 +345,7 @@ export class MemoryIngestionEngine {
   async processSessionEnd(
     sessionId: string,
     history: readonly LLMMessage[],
+    scope?: Pick<TurnIngestionMetadata, "workspaceId" | "agentId" | "userId" | "worldId">,
   ): Promise<SessionEndResult> {
     if (history.length === 0) {
       return { summary: "", entities: [], proposedFacts: [] };
@@ -373,6 +393,10 @@ export class MemoryIngestionEngine {
                 sessionId,
                 role: "system",
                 content: summary,
+                ...(scope?.workspaceId ? { workspaceId: scope.workspaceId } : {}),
+                ...(scope?.agentId ? { agentId: scope.agentId } : {}),
+                ...(scope?.userId ? { userId: scope.userId } : {}),
+                ...(scope?.worldId ? { worldId: scope.worldId } : {}),
                 metadata: {
                   type: "session_summary",
                   priority: "high",
@@ -421,6 +445,8 @@ export class MemoryIngestionEngine {
                 sessionId,
                 role: "system",
                 content: fact,
+                ...(scope?.workspaceId ? { workspaceId: scope.workspaceId } : {}),
+                ...(scope?.agentId ? { agentId: scope.agentId } : {}),
                 metadata: {
                   type: "entity_fact",
                   memoryRole: "semantic",
@@ -459,7 +485,11 @@ export class MemoryIngestionEngine {
   /**
    * Process a session compaction event by storing the summary with an embedding.
    */
-  async processCompaction(sessionId: string, summary: string): Promise<void> {
+  async processCompaction(
+    sessionId: string,
+    summary: string,
+    scope?: Pick<TurnIngestionMetadata, "workspaceId">,
+  ): Promise<void> {
     if (summary.trim() === "") return;
 
     try {
@@ -474,6 +504,7 @@ export class MemoryIngestionEngine {
           sessionId,
           role: "system",
           content: normalizedSummary,
+          ...(scope?.workspaceId ? { workspaceId: scope.workspaceId } : {}),
           metadata: {
             type: "compaction_summary",
             memoryRole: "episodic",
