@@ -113,7 +113,7 @@ export async function createMemoryRetrievers(
 
   return {
     memoryRetriever,
-    learningProvider: createLearningRetriever(memoryBackend),
+    learningProvider: createLearningRetriever(memoryBackend, workspacePath),
   };
 }
 
@@ -232,7 +232,13 @@ export function createBasicHistoryRetriever(
 
 export function createLearningRetriever(
   memoryBackend: MemoryBackend,
+  workspacePath?: string,
 ): MemoryRetriever {
+  // Phase 2B: scope learning key by workspace to prevent cross-workspace leakage.
+  // Security finding C-1: global learning:latest leaked between workspaces.
+  const learningKey = workspacePath
+    ? `${workspacePath}:learning:latest`
+    : "learning:latest";
   return {
     async retrieve(): Promise<string | undefined> {
       if (!memoryBackend) return undefined;
@@ -250,7 +256,7 @@ export function createLearningRetriever(
             steps: string[];
           }>;
           preferences: Record<string, string>;
-        }>("learning:latest");
+        }>(learningKey);
         if (!learning) return undefined;
 
         const parts: string[] = [];
