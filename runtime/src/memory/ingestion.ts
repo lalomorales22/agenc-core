@@ -648,6 +648,10 @@ export function createIngestionHooks(
           ? ctx.payload.backgroundRunId
           : undefined;
 
+        const hookWorkspaceId = typeof ctx.payload.workspaceId === "string"
+          ? ctx.payload.workspaceId
+          : undefined;
+
         void engine
           .ingestTurn(sessionId, userMessage, agentResponse, {
             agentResponseMetadata:
@@ -657,6 +661,7 @@ export function createIngestionHooks(
                 ? agentResponseMetadata as Record<string, unknown>
                 : undefined,
             backgroundRunId,
+            workspaceId: hookWorkspaceId,
           })
           .catch((err) => {
             log.error("memory-ingestion-turn: ingestTurn failed", err);
