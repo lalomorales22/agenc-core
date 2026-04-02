@@ -119,4 +119,85 @@ describe("createChannelHostServices", () => {
     expect(worldOneA).toBe(worldOneB);
     expect(worldOneA?.memoryBackend).not.toBe(worldTwo?.memoryBackend);
   });
+
+
+  it("isolates same-world runs by effective storage key", async () => {
+    const services = createChannelHostServices({
+      config: {
+        memory: { backend: "sqlite" },
+      } as never,
+      logger: {
+        debug: vi.fn(),
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      },
+    });
+
+    const simOne = await services?.concordia_memory?.resolveWorldContext({
+      worldId: "world-1",
+      workspaceId: "workspace-1",
+      simulationId: "sim-1",
+      effectiveStorageKey: "world:world-1::sim:sim-1",
+      logStorageKey: "log:world-1::sim:sim-1",
+      scopedWorkspaceId: "workspace-1::sim:sim-1",
+    });
+    const simTwo = await services?.concordia_memory?.resolveWorldContext({
+      worldId: "world-1",
+      workspaceId: "workspace-1",
+      simulationId: "sim-2",
+      effectiveStorageKey: "world:world-1::sim:sim-2",
+      logStorageKey: "log:world-1::sim:sim-2",
+      scopedWorkspaceId: "workspace-1::sim:sim-2",
+    });
+
+    expect(simOne?.memoryBackend).not.toBe(simTwo?.memoryBackend);
+    expect(createMemoryBackend).toHaveBeenCalledWith(
+      expect.objectContaining({ worldId: "world:world-1::sim:sim-1" }),
+    );
+    expect(createMemoryBackend).toHaveBeenCalledWith(
+      expect.objectContaining({ worldId: "world:world-1::sim:sim-2" }),
+    );
+  });
+
+  it("separates per-simulation log contexts even when lineage storage is shared", async () => {
+    const services = createChannelHostServices({
+      config: {
+        memory: { backend: "sqlite" },
+      } as never,
+      logger: {
+        debug: vi.fn(),
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      },
+    });
+
+    const resumedA = await services?.concordia_memory?.resolveWorldContext({
+      worldId: "world-1",
+      workspaceId: "workspace-1",
+      simulationId: "sim-2",
+      lineageId: "lineage-1",
+      parentSimulationId: "sim-1",
+      effectiveStorageKey: "world:world-1::lineage:lineage-1",
+      logStorageKey: "log:world-1::sim:sim-2",
+      scopedWorkspaceId: "workspace-1::lineage:lineage-1",
+    });
+    const resumedB = await services?.concordia_memory?.resolveWorldContext({
+      worldId: "world-1",
+      workspaceId: "workspace-1",
+      simulationId: "sim-3",
+      lineageId: "lineage-1",
+      parentSimulationId: "sim-2",
+      effectiveStorageKey: "world:world-1::lineage:lineage-1",
+      logStorageKey: "log:world-1::sim:sim-3",
+      scopedWorkspaceId: "workspace-1::lineage:lineage-1",
+    });
+
+    expect(resumedA).not.toBe(resumedB);
+    expect(resumedA?.memoryBackend).not.toBeUndefined();
+    expect(resumedB?.memoryBackend).not.toBeUndefined();
+    expect(resumedA?.dailyLogManager).not.toBe(resumedB?.dailyLogManager);
+  });
+
 });

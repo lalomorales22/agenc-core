@@ -183,6 +183,11 @@ export interface ConcordiaMemoryHostServices {
     simulationId?: string;
     lineageId?: string | null;
     parentSimulationId?: string | null;
+    effectiveStorageKey?: string;
+    logStorageKey?: string;
+    scopedWorkspaceId?: string;
+    continuityMode?: "isolated" | "lineage_resume";
+    checkpointMetadata?: Record<string, unknown> | null;
   }): Promise<ConcordiaWorldMemoryHostServices>;
 }
 
@@ -255,7 +260,10 @@ function createConcordiaMemoryHostServices(params: {
 
   return {
     async resolveWorldContext(input) {
-      const cacheKey = `${input.workspaceId}::${input.worldId}`;
+      const effectiveStorageKey = input.effectiveStorageKey ?? input.worldId;
+      const logStorageKey = input.logStorageKey ?? effectiveStorageKey;
+      const scopedWorkspaceId = input.scopedWorkspaceId ?? input.workspaceId;
+      const cacheKey = `${scopedWorkspaceId}::${effectiveStorageKey}::${logStorageKey}`;
       const existing = worldContexts.get(cacheKey);
       if (existing) {
         return existing;
@@ -264,7 +272,10 @@ function createConcordiaMemoryHostServices(params: {
       const created = createConcordiaWorldContext({
         ...params,
         worldId: input.worldId,
+        effectiveStorageKey,
+        logStorageKey,
         workspaceId: input.workspaceId,
+        scopedWorkspaceId,
         getSharedBackend,
       }).catch((error) => {
         worldContexts.delete(cacheKey);
@@ -280,13 +291,16 @@ async function createConcordiaWorldContext(params: {
   readonly config: GatewayConfig;
   readonly logger: Logger;
   readonly worldId: string;
+  readonly effectiveStorageKey: string;
+  readonly logStorageKey: string;
   readonly workspaceId: string;
+  readonly scopedWorkspaceId: string;
   readonly getSharedBackend: () => Promise<MemoryBackend>;
 }): Promise<ConcordiaWorldMemoryHostServices> {
   const worldBackend = await createMemoryBackend({
     config: params.config,
     logger: params.logger,
-    worldId: params.worldId,
+    worldId: params.effectiveStorageKey,
   });
   const sharedBackend = await params.getSharedBackend();
 
@@ -309,10 +323,11 @@ async function createConcordiaWorldContext(params: {
     logger: params.logger,
   });
 
-  const vectorDbPath = resolveWorldVectorDbPath(params.worldId);
+  const vectorDbPath = resolveWorldVectorDbPath(params.effectiveStorageKey);
   const worldDir = dirname(vectorDbPath);
+  const logDir = dirname(resolveWorldVectorDbPath(params.logStorageKey));
   const curatedMemory = new CuratedMemoryManager(join(worldDir, "MEMORY.md"));
-  const runtimeDailyLogManager = new DailyLogManager(join(worldDir, "logs"));
+  const runtimeDailyLogManager = new DailyLogManager(join(logDir, "logs"));
 
   const embeddingProvider = await createEmbeddingProvider({
     preferred: params.config.memory?.embeddingProvider,
@@ -338,7 +353,7 @@ async function createConcordiaWorldContext(params: {
       vectorBackend: vectorStore,
       embeddingProvider,
       curatedMemory,
-      workspaceId: params.workspaceId,
+      workspaceId: params.scopedWorkspaceId,
       logger: params.logger,
     });
     const engine = new MemoryIngestionEngine({
@@ -395,7 +410,7 @@ async function createConcordiaWorldContext(params: {
         llmProvider,
         identityManager,
         agentId: input.agentId,
-        workspaceId: input.workspaceId ?? params.workspaceId,
+        workspaceId: input.workspaceId ?? params.scopedWorkspaceId,
         recentHistory: recentHistory.map((entry) => ({
           role: entry.role,
           content: entry.content,
@@ -413,7 +428,7 @@ async function createConcordiaWorldContext(params: {
           graph,
           logger: params.logger,
         },
-        input?.workspaceId ?? params.workspaceId,
+        input?.workspaceId ?? params.scopedWorkspaceId,
       );
     },
     retain() {
@@ -438,7 +453,7 @@ async function createConcordiaWorldContext(params: {
           content: input.content,
           author: input.author,
           userId: input.userId,
-          sourceWorldId: params.worldId,
+          sourceWorldId: params.effectiveStorageKey,
         });
       },
       async getFacts(scope, userId) {
