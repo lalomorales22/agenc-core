@@ -176,6 +176,80 @@ export interface ConcordiaWorldMemoryHostServices {
   readonly vectorDbPath?: string;
 }
 
+export interface ConcordiaCheckpointSceneCursorMetadata {
+  readonly scene_index: number;
+  readonly scene_round: number;
+  readonly current_scene_name?: string | null;
+}
+
+export interface ConcordiaCheckpointRuntimeCursorMetadata {
+  readonly current_step: number;
+  readonly start_step: number;
+  readonly max_steps: number;
+  readonly last_acting_agent?: string | null;
+  readonly last_step_outcome?: string | null;
+  readonly engine_type?: string | null;
+}
+
+export interface ConcordiaCheckpointReplayCursorMetadata {
+  readonly replay_cursor: number;
+  readonly replay_event_count: number;
+  readonly last_event_id?: string | null;
+  readonly resume_behavior?: string | null;
+  readonly source_step?: number;
+}
+
+export interface ConcordiaCheckpointWorldStateRefsMetadata {
+  readonly source: string;
+  readonly gm_state_key?: string | null;
+  readonly entity_state_keys: readonly string[];
+  readonly authoritative_snapshot_ref?: string | null;
+}
+
+export interface ConcordiaCheckpointSubsystemStateMetadata {
+  readonly resumed: readonly string[];
+  readonly reset: readonly string[];
+}
+
+export interface ConcordiaCheckpointStatusMetadata {
+  readonly checkpoint_id: string;
+  readonly checkpoint_path: string;
+  readonly schema_version: number;
+  readonly world_id: string;
+  readonly workspace_id: string;
+  readonly simulation_id: string;
+  readonly lineage_id?: string | null;
+  readonly parent_simulation_id?: string | null;
+  readonly step: number;
+  readonly timestamp: number;
+  readonly max_steps: number;
+  readonly scene_cursor: ConcordiaCheckpointSceneCursorMetadata | null;
+  readonly runtime_cursor: ConcordiaCheckpointRuntimeCursorMetadata;
+  readonly replay_cursor: ConcordiaCheckpointReplayCursorMetadata;
+  readonly world_state_refs: ConcordiaCheckpointWorldStateRefsMetadata;
+  readonly memory_namespace_refs?: Record<string, unknown>;
+  readonly subsystem_state: ConcordiaCheckpointSubsystemStateMetadata;
+}
+
+export interface ConcordiaCheckpointMetadata {
+  readonly checkpointId?: string | null;
+  readonly checkpointPath?: string | null;
+  readonly checkpointSchemaVersion?: number | null;
+  readonly checkpointSimulationId?: string | null;
+  readonly checkpointLineageId?: string | null;
+  readonly checkpointParentSimulationId?: string | null;
+  readonly checkpointWorldId?: string | null;
+  readonly checkpointWorkspaceId?: string | null;
+  readonly resumedFromStep?: number | null;
+  readonly sceneCursor?: ConcordiaCheckpointSceneCursorMetadata | null;
+  readonly runtimeCursor?: ConcordiaCheckpointRuntimeCursorMetadata | null;
+  readonly replayCursor?: ConcordiaCheckpointReplayCursorMetadata | null;
+  readonly worldStateRefs?: ConcordiaCheckpointWorldStateRefsMetadata | null;
+  readonly subsystemRestore?: ConcordiaCheckpointSubsystemStateMetadata | null;
+  readonly checkpointStatus?: ConcordiaCheckpointStatusMetadata | null;
+  readonly checkpointManifest?: Record<string, unknown> | null;
+}
+
 export interface ConcordiaMemoryHostServices {
   resolveWorldContext(input: {
     worldId: string;
@@ -187,7 +261,7 @@ export interface ConcordiaMemoryHostServices {
     logStorageKey?: string;
     scopedWorkspaceId?: string;
     continuityMode?: "isolated" | "lineage_resume";
-    checkpointMetadata?: Record<string, unknown> | null;
+    checkpointMetadata?: ConcordiaCheckpointMetadata | null;
   }): Promise<ConcordiaWorldMemoryHostServices>;
 }
 
