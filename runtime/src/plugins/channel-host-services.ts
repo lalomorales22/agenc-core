@@ -180,6 +180,9 @@ export interface ConcordiaMemoryHostServices {
   resolveWorldContext(input: {
     worldId: string;
     workspaceId: string;
+    simulationId?: string;
+    lineageId?: string | null;
+    parentSimulationId?: string | null;
   }): Promise<ConcordiaWorldMemoryHostServices>;
 }
 
