@@ -211,6 +211,20 @@ function isTerminalStatus(status: SimulationStatus["status"]): boolean {
   return TERMINAL_STATUSES.has(status);
 }
 
+function isAbortLikeError(error: unknown): boolean {
+  return typeof error === "object" &&
+    error !== null &&
+    "name" in error &&
+    (error as { name?: unknown }).name === "AbortError";
+}
+
+function ignoreHandledAsyncRejection(error: unknown): void {
+  if (isAbortLikeError(error)) {
+    return;
+  }
+  console.error(error);
+}
+
 function getSelectionInitialState(
   status?: SimulationStatus | null,
 ): SimulationState {
@@ -530,7 +544,7 @@ export function useSimulation(config: {
       return;
     }
     const epoch = selectionEpochRef.current;
-    void hydrateReplay(epoch, "hydrate");
+    void hydrateReplay(epoch, "hydrate").catch(ignoreHandledAsyncRejection);
   }, [active, hydrateReplay, simulationId]);
 
   useEffect(() => {
@@ -558,19 +572,21 @@ export function useSimulation(config: {
           return;
         }
         dispatch({ type: "SET_TRANSPORT_STATE", transportState: "reconnecting" });
-        void hydrateReplay(epoch, "catch-up").then((ok) => {
-          if (
-            !ok ||
-            disposed ||
-            !shouldMaintainLiveTransport(statusRef.current.status) ||
-            !isCurrentSelection(epoch, simulationId)
-          ) {
-            dispatch({ type: "SET_CONNECTED", connected: false });
-            dispatch({ type: "SET_TRANSPORT_STATE", transportState: "disconnected" });
-            return;
-          }
-          openEventStream();
-        });
+        void hydrateReplay(epoch, "catch-up")
+          .then((ok) => {
+            if (
+              !ok ||
+              disposed ||
+              !shouldMaintainLiveTransport(statusRef.current.status) ||
+              !isCurrentSelection(epoch, simulationId)
+            ) {
+              dispatch({ type: "SET_CONNECTED", connected: false });
+              dispatch({ type: "SET_TRANSPORT_STATE", transportState: "disconnected" });
+              return;
+            }
+            openEventStream();
+          })
+          .catch(ignoreHandledAsyncRejection);
       }, reconnectDelayRef.current);
       reconnectDelayRef.current = Math.min(
         reconnectDelayRef.current * 2,
@@ -716,7 +732,7 @@ export function useSimulation(config: {
       }
     };
 
-    void hydrateStatus();
+    void hydrateStatus().catch(ignoreHandledAsyncRejection);
     return () => controller.abort();
   }, [
     active,
@@ -780,7 +796,7 @@ export function useSimulation(config: {
     };
 
     const interval = setInterval(() => {
-      void pollStatus();
+      void pollStatus().catch(ignoreHandledAsyncRejection);
     }, intervalMs);
 
     return () => {
@@ -835,7 +851,7 @@ export function useSimulation(config: {
       }));
     };
 
-    void loadAgentStates();
+    void loadAgentStates().catch(ignoreHandledAsyncRejection);
     return () => {
       disposed = true;
       for (const controller of controllers) {
@@ -878,7 +894,7 @@ export function useSimulation(config: {
     };
 
     const interval = setInterval(() => {
-      void pollAgentStates();
+      void pollAgentStates().catch(ignoreHandledAsyncRejection);
     }, pollIntervalMs);
 
     return () => {

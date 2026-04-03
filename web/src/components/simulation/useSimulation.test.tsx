@@ -226,6 +226,91 @@ describe('useSimulation', () => {
     expect(result.current.state.events.every((event) => event.simulation_id === 'sim-2')).toBe(true);
   });
 
+  it('swallows aborted replay hydration during selection changes', async () => {
+    const aborted = deferred<Response>();
+
+    fetchMock.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith('/simulations/sim-1/events')) {
+        return aborted.promise;
+      }
+      if (url.endsWith('/simulations/sim-1/status')) {
+        return jsonResponse(makeStatus({
+          simulation_id: 'sim-1',
+          world_id: 'world-1',
+          status: 'running',
+          running: true,
+        }));
+      }
+      if (url.endsWith('/simulations/sim-2/events')) {
+        return jsonResponse({
+          simulation_id: 'sim-2',
+          events: [makeEvent('evt-2', { simulation_id: 'sim-2', world_id: 'world-2' })],
+          next_cursor: 'evt-2',
+        });
+      }
+      if (url.endsWith('/simulations/sim-2/status')) {
+        return jsonResponse(makeStatus({
+          simulation_id: 'sim-2',
+          world_id: 'world-2',
+          status: 'paused',
+          running: false,
+          paused: true,
+        }));
+      }
+      throw new Error('unexpected fetch ' + url);
+    });
+
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    const { result, rerender } = renderHook(
+      ({ simulationId, initialStatus }) => useSimulation({
+        simulationId,
+        bridgeUrl: 'http://localhost:3200',
+        agentIds: [],
+        active: true,
+        pollIntervalMs: 1000,
+        initialStatus,
+      }),
+      {
+        initialProps: {
+          simulationId: 'sim-1',
+          initialStatus: makeStatus({
+            simulation_id: 'sim-1',
+            world_id: 'world-1',
+            status: 'running',
+            running: true,
+          }),
+        },
+      },
+    );
+
+    rerender({
+      simulationId: 'sim-2',
+      initialStatus: makeStatus({
+        simulation_id: 'sim-2',
+        world_id: 'world-2',
+        status: 'paused',
+        running: false,
+        paused: true,
+      }),
+    });
+
+    await act(async () => {
+      aborted.reject(new DOMException('Aborted', 'AbortError'));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(result.current.state.events.map((event) => event.event_id)).toEqual(['evt-2']);
+      expect(result.current.state.status.simulation_id).toBe('sim-2');
+    });
+
+    expect(result.current.state.error).toBeNull();
+    expect(consoleErrorSpy).not.toHaveBeenCalled();
+    consoleErrorSpy.mockRestore();
+  });
+
   it('hydrates replay, catches up after reconnect, and deduplicates repeated live events', async () => {
 
     fetchMock.mockImplementation(async (input) => {
