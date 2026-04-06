@@ -3,13 +3,14 @@
  * Renders TownCanvas with agent overlay + event sidebar.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { AgentState, SimulationEvent } from '../useSimulation';
 import { TownCanvas } from './TownCanvas';
 import { useTownState } from './hooks/useTownState';
 import { loadTiledMap } from './maps/TiledMapLoader';
 import { createLocationRegistry, type LocationRegistryInstance } from './systems/LocationRegistry';
 import { getMapConfig } from './config/ScenarioMapRegistry';
+import { interpretEvents } from './systems/EventInterpreter';
 import type { ParsedMap } from './maps/types';
 import { EventTimeline } from '../EventTimeline';
 
@@ -17,9 +18,10 @@ interface TownViewProps {
   worldId: string;
   agentStates: Record<string, AgentState>;
   events: SimulationEvent[];
+  onInspectAgent?: (agentId: string) => void;
 }
 
-export function TownView({ worldId, agentStates, events }: TownViewProps) {
+export function TownView({ worldId, agentStates, events, onInspectAgent }: TownViewProps) {
   const [parsedMap, setParsedMap] = useState<ParsedMap | null>(null);
   const [registry, setRegistry] = useState<LocationRegistryInstance | null>(null);
   const [mapError, setMapError] = useState<string | null>(null);
@@ -61,11 +63,25 @@ export function TownView({ worldId, agentStates, events }: TownViewProps) {
 
   const { agents, updatePositions } = useTownState(agentStates, registry);
 
+  // Interpret recent events into visual commands (speech bubbles, actions)
+  const commands = useMemo(() => {
+    // Only interpret last 10 events to avoid flooding
+    const recent = events.slice(-10);
+    return interpretEvents(recent);
+  }, [events]);
+
   const handlePositionsUpdate = useCallback(
     (positions: Map<string, { x: number; y: number; locationId: string | null }>) => {
       updatePositions(positions);
     },
     [updatePositions],
+  );
+
+  const handleAgentClick = useCallback(
+    (agentId: string) => {
+      onInspectAgent?.(agentId);
+    },
+    [onInspectAgent],
   );
 
   if (mapError) {
@@ -89,7 +105,9 @@ export function TownView({ worldId, agentStates, events }: TownViewProps) {
           <TownCanvas
             parsedMap={parsedMap}
             agents={agents}
+            commands={commands}
             onAgentPositionsUpdate={handlePositionsUpdate}
+            onAgentClick={handleAgentClick}
           />
         ) : (
           <div className="flex h-full items-center justify-center text-green-700 font-mono text-sm">

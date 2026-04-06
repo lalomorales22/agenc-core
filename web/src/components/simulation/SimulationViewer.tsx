@@ -143,6 +143,7 @@ export function SimulationViewer({
           worldId={simulation.world_id}
           agentStates={state.agentStates}
           events={state.events}
+          onInspectAgent={setInspectedAgent}
         />
       ) : (
         <div className="flex min-h-0 flex-1 overflow-hidden">
