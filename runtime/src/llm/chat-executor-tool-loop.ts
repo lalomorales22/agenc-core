@@ -60,7 +60,6 @@ import {
   summarizeToolRoundProgress,
   enrichToolResultMetadata,
 } from "./chat-executor-tool-utils.js";
-import { inferDoomTurnContract } from "./chat-executor-doom.js";
 import {
   applyActiveRoutedToolNames,
   buildActiveRoutedToolSet,
@@ -423,16 +422,6 @@ export async function executeSingleToolCall(
     });
   args = artifactReferenceCanonicalization.args;
   const contractAdjustedFields: string[] = [];
-  if (toolCall.name === "mcp.doom.start_game") {
-    const doomTurnContract = inferDoomTurnContract(ctx.messageText);
-    if (
-      doomTurnContract?.requiresAutonomousPlay &&
-      args.async_player !== true
-    ) {
-      args = { ...args, async_player: true };
-      contractAdjustedFields.push("async_player");
-    }
-  }
   const argumentDiagnostics: Record<string, unknown> = {};
   if (normalizedFields.length > 0) {
     argumentDiagnostics.normalizedFields = normalizedFields;

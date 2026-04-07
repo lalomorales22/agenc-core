@@ -290,11 +290,42 @@ import {
   createBackgroundRunToolAfterHook,
   createBackgroundRunWebhookRoute,
 } from "./background-run-wake-adapters.js";
-import {
-  getMissingDoomEvidenceGap,
-  inferDoomTurnContract,
-  summarizeDoomToolEvidence,
-} from "../llm/chat-executor-doom.js";
+// Doom autoplay subsystem is scheduled for full excision in the architectural
+// cleanup TODO. The source helpers in `../llm/chat-executor-doom.js` were
+// removed as the first step; these local no-op stubs keep the still-extant
+// autoplay call sites compiling until the daemon.ts-side subsystem is ripped
+// out as its own dedicated cut.
+const inferDoomTurnContract = (_messageText: string):
+  | undefined
+  | {
+      readonly requiresLaunch: boolean;
+      readonly requiresAutonomousPlay: boolean;
+      readonly requiresHoldPosition: boolean;
+      readonly requiresGodMode: boolean;
+    } => undefined;
+const summarizeDoomToolEvidence = (
+  _toolCalls: readonly unknown[],
+): {
+  readonly confirmedLaunch: boolean;
+  readonly confirmedAsyncStart: boolean;
+  readonly verifiedAsyncState: boolean;
+  readonly confirmedHoldPosition: boolean;
+  readonly confirmedActiveObjective: boolean;
+  readonly confirmedGodMode: boolean;
+  readonly executedTools: readonly string[];
+} => ({
+  confirmedLaunch: false,
+  confirmedAsyncStart: false,
+  verifiedAsyncState: false,
+  confirmedHoldPosition: false,
+  confirmedActiveObjective: false,
+  confirmedGodMode: false,
+  executedTools: [],
+});
+const getMissingDoomEvidenceGap = (
+  _contract: ReturnType<typeof inferDoomTurnContract>,
+  _evidence: ReturnType<typeof summarizeDoomToolEvidence>,
+): undefined => undefined;
 import { parseBackgroundRunQualityArtifact } from "../eval/background-run-quality.js";
 import type { DelegationBenchmarkSummary } from "../eval/delegation-benchmark.js";
 import {

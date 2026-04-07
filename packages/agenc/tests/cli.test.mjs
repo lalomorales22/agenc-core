@@ -77,6 +77,7 @@ test("runAgencWrapper forwards product commands to the installed agenc bin", asy
         cwd: process.cwd(),
         homeDir: undefined,
         packageRoot: undefined,
+        sourceDir: undefined,
       },
     },
   ]);
@@ -134,6 +135,7 @@ test("runAgencWrapper uses force install semantics for runtime update", async ()
       cwd: process.cwd(),
       homeDir: undefined,
       packageRoot: undefined,
+      sourceDir: undefined,
       force: true,
     },
   ]);
@@ -166,6 +168,7 @@ test("runAgencRuntimeWrapper forwards directly to the installed agenc-runtime bi
         cwd: process.cwd(),
         homeDir: undefined,
         packageRoot: undefined,
+        sourceDir: undefined,
       },
     },
   ]);
