@@ -84,6 +84,11 @@ import {
   partitionToolCalls,
   type IsConcurrencySafeFn,
 } from "./tool-orchestration.js";
+import {
+  applyToolResultBudget,
+  type ContentReplacementState,
+  type ToolBudgetConfig,
+} from "./tool-result-budget.js";
 
 // ============================================================================
 // Callback interfaces
@@ -165,6 +170,16 @@ export interface ToolLoopConfig {
    * inventory which rounds would benefit from parallel dispatch.
    */
   readonly isConcurrencySafe?: IsConcurrencySafeFn;
+  /**
+   * Cut 5.3: tool result budget config. When set, oversized tool
+   * results are persisted to disk and replaced in the message
+   * history with a `<persisted-output>` placeholder that includes
+   * the file path + a 2 KB preview. The state is stored on the
+   * caller-supplied Map<sessionId, ContentReplacementState> so it
+   * persists across rounds in the same session.
+   */
+  readonly toolResultBudget?: ToolBudgetConfig;
+  readonly toolResultBudgetState?: Map<string, ContentReplacementState>;
 }
 
 // ============================================================================
@@ -714,6 +729,49 @@ export async function executeSingleToolCall(
       result = enrichToolResultMetadata(result, {
         circuitBreaker: "open",
         circuitBreakerReason: circuitReason,
+      });
+    }
+  }
+
+  // Cut 5.3: apply per-tool result budget. When the budget config is
+  // wired, oversized successful results are persisted to disk and
+  // replaced with a placeholder pointing at the file path. Failed
+  // results are skipped — error messages are typically small and
+  // their text is needed for the model to recover.
+  if (
+    config.toolResultBudget &&
+    config.toolResultBudgetState &&
+    !exec.toolFailed
+  ) {
+    const currentState =
+      config.toolResultBudgetState.get(ctx.sessionId) ?? {
+        seenIds: new Set<string>(),
+        replacements: new Map(),
+      };
+    const budgetResult = applyToolResultBudget({
+      sessionId: ctx.sessionId,
+      toolUseId: toolCall.id,
+      toolName: toolCall.name,
+      content: result,
+      state: currentState,
+      config: config.toolResultBudget,
+    });
+    if (budgetResult.persisted) {
+      result = budgetResult.content;
+      config.toolResultBudgetState.set(ctx.sessionId, budgetResult.state);
+      callbacks.emitExecutionTrace(ctx, {
+        type: "tool_dispatch_started",
+        phase: "tool_followup",
+        callIndex: ctx.callIndex,
+        payload: {
+          tool: "__tool_result_persisted__",
+          args: {},
+          argumentDiagnostics: {
+            toolCallId: toolCall.id,
+            toolName: toolCall.name,
+            diskPath: budgetResult.diskPath,
+          },
+        },
       });
     }
   }

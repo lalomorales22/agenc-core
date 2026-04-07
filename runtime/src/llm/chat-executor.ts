@@ -56,6 +56,10 @@ import {
   isQueryDepthExceeded,
   type QueryTracking,
 } from "./query-tracking.js";
+import type {
+  ContentReplacementState,
+  ToolBudgetConfig,
+} from "./tool-result-budget.js";
 // ---------------------------------------------------------------------------
 // Imports from extracted sibling modules
 // ---------------------------------------------------------------------------
@@ -392,6 +396,19 @@ export class ChatExecutor {
    * executor defaults to a fresh chainId with depth 0.
    */
   private readonly queryTracking: QueryTracking;
+  /**
+   * Cut 5.3: tool result budget config + per-session content
+   * replacement state. When the budget config is provided, oversized
+   * tool results are persisted to disk and the in-memory message
+   * history sees a small placeholder that includes the file path.
+   * The state Map is owned by the executor and survives across the
+   * tool loop rounds inside a single session.
+   */
+  private readonly toolResultBudget?: ToolBudgetConfig;
+  private readonly toolResultBudgetState = new Map<
+    string,
+    ContentReplacementState
+  >();
 
   private readonly cooldowns = new Map<string, CooldownEntry>();
   private readonly sessionTokens = new Map<string, number>();
@@ -509,6 +526,7 @@ export class ChatExecutor {
     this.hookRegistry = config.hookRegistry;
     this.canUseTool = config.canUseTool;
     this.isConcurrencySafe = config.isConcurrencySafe;
+    this.toolResultBudget = config.toolResultBudget;
     this.queryTracking = config.queryTracking ?? rootQueryTracking();
     if (isQueryDepthExceeded(this.queryTracking)) {
       throw new Error(
@@ -1715,6 +1733,12 @@ export class ChatExecutor {
       ...(this.canUseTool ? { canUseTool: this.canUseTool } : {}),
       ...(this.isConcurrencySafe
         ? { isConcurrencySafe: this.isConcurrencySafe }
+        : {}),
+      ...(this.toolResultBudget
+        ? {
+            toolResultBudget: this.toolResultBudget,
+            toolResultBudgetState: this.toolResultBudgetState,
+          }
         : {}),
     }, this.buildToolLoopCallbacks());
   }
