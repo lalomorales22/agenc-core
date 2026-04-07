@@ -1964,8 +1964,6 @@ export class DaemonManager {
       llmConfig: config.llm,
       providerConfigs: this._llmProviderConfigCatalog.map((entry) => entry.config),
       subagentConfig: resolvedSubAgentConfig,
-      resolveDelegationScoreThreshold: () =>
-        this.resolveDelegationScoreThreshold(),
       resolveHostToolingProfile: () => this._hostToolingProfile,
       resolveHostWorkspaceRoot: () => this._hostWorkspacePath,
       pipelineExecutor: plannerPipelineExecutor,
@@ -3479,8 +3477,6 @@ export class DaemonManager {
         llmConfig: newConfig.llm,
         providerConfigs: this._llmProviderConfigCatalog.map((entry) => entry.config),
         subagentConfig: resolvedSubAgentConfig,
-        resolveDelegationScoreThreshold: () =>
-          this.resolveDelegationScoreThreshold(),
         resolveHostToolingProfile: () => this._hostToolingProfile,
         resolveHostWorkspaceRoot: () => this._hostWorkspacePath,
         pipelineExecutor: plannerPipelineExecutor,
