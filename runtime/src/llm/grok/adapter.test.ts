@@ -86,7 +86,10 @@ describe("GrokProvider", () => {
     await provider.chat([{ role: "user", content: "test" }]);
 
     expect(mockOpenAIConstructor).toHaveBeenCalledOnce();
-    expect(mockOpenAIConstructor.mock.calls[0][0].timeout).toBe(60_000);
+    // Default timeout was raised from 60s to 120s in the runtime hardening
+    // batch (PR #174) because the planner-verifier phase on reasoning models
+    // routinely exceeded 60s. This test pins the new default.
+    expect(mockOpenAIConstructor.mock.calls[0][0].timeout).toBe(120_000);
   });
 
   it("reports execution profile from explicit context window overrides", async () => {
@@ -577,9 +580,10 @@ describe("GrokProvider", () => {
       context: {
         configuredProviderTimeoutMs: null,
         callOverrideTimeoutMs: null,
-        effectiveTimeoutMs: 60_000,
+        // Default timeout was raised from 60s to 120s in PR #174.
+        effectiveTimeoutMs: 120_000,
         timeoutSource: "provider_default",
-        timeoutMs: 60_000,
+        timeoutMs: 120_000,
       },
     });
   });

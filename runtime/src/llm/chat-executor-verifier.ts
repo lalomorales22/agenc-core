@@ -14,6 +14,7 @@ import type {
   PlannerWorkflowAdmission,
   PlannerVerifierWorkItem,
   PlannerPlan,
+  PlannerPlanArtifactIntent,
   SubagentVerifierStepVerdict,
   SubagentVerifierStepAssessment,
   SubagentVerifierDecision,
@@ -64,7 +65,6 @@ import {
 } from "../workflow/execution-envelope.js";
 import {
   extractDelegationTokens,
-  getAcceptanceVerificationCategories,
   validateDelegatedOutputContract,
 } from "../utils/delegation-validation.js";
 import { parseJsonObjectFromText } from "../utils/delegated-contract-normalization.js";
@@ -95,6 +95,15 @@ export function buildPlannerWorkflowAdmission(params: {
   readonly completionContract?: ImplementationCompletionContract;
   readonly includeSubagentOutputVerification?: boolean;
   readonly requiredSubagentOutputStepNames?: readonly string[];
+  /**
+   * Model-emitted plan-artifact intent. Replaces the regex-based pre-call
+   * classifier removed on 2026-04-06. When the model decides this turn is an
+   * `edit_artifact` or `grounded_plan_generation` request, the verifier
+   * skips mandatory implementation completion verification — those request
+   * classes never produce source-code mutation that needs implementation
+   * verification.
+   */
+  readonly planIntent?: PlannerPlanArtifactIntent;
 }): PlannerWorkflowAdmission {
   const completionContract = resolvePlannerCompletionContract(params);
   const workflowContract =
@@ -160,10 +169,20 @@ export function buildPlannerWorkflowAdmission(params: {
           }),
       };
     });
+  // When the model decided this turn is editing or generating a plan
+  // artifact, skip mandatory implementation completion verification — those
+  // turns do not produce source-code mutations that the implementation
+  // verifier should police. The previous regex pre-call classifier short-
+  // circuited this case at the planner-routing layer; the new model-driven
+  // path propagates the same intent via plannerPlan.planIntent.
+  const planIntentSkipsImplementationVerification =
+    params.planIntent === "edit_artifact" ||
+    params.planIntent === "grounded_plan_generation";
   const requiresMandatoryImplementationVerification =
     Boolean(completionContract) &&
-    completionContract.taskClass !== "scaffold_allowed" &&
-    completionContract.taskClass !== "review_required";
+    completionContract!.taskClass !== "scaffold_allowed" &&
+    completionContract!.taskClass !== "review_required" &&
+    !planIntentSkipsImplementationVerification;
   const requiresMandatorySubagentOutputVerification =
     requiredSubagentOutputStepNames.size > 0;
 
@@ -224,7 +243,7 @@ export function evaluatePlannerDeterministicChecks(
   const unresolvedItems: string[] = [];
   const childSessionRecords: Array<{
     readonly name: string;
-    readonly role: WorkflowStepRole;
+    readonly role: WorkflowStepRole | undefined;
     readonly verdict: SubagentVerifierStepVerdict;
     readonly subagentSessionId?: string;
   }> = [];
@@ -359,10 +378,10 @@ export function evaluatePlannerDeterministicChecks(
           inputContract: step.inputContract,
           acceptanceCriteria: step.acceptanceCriteria,
           requiredToolCapabilities: step.requiredToolCapabilities,
-          contextRequirements: step.workflowStep.contextRequirements,
-          executionContext: step.workflowStep.executionContext,
+          contextRequirements: step.workflowStep?.contextRequirements,
+          executionContext: step.workflowStep?.executionContext,
           ownedArtifacts: collectWorkflowArtifactRelationPaths({
-            relations: step.workflowStep.artifactRelations,
+            relations: step.workflowStep?.artifactRelations,
             relationTypes: ["write_owner"],
           }),
         },
@@ -387,7 +406,7 @@ export function evaluatePlannerDeterministicChecks(
     if (step.verificationKind === "subagent_output") {
       childSessionRecords.push({
         name: step.name,
-        role: step.workflowStep.role,
+        role: step.workflowStep?.role,
         verdict,
         ...(childSessionId ? { subagentSessionId: childSessionId } : {}),
       });
@@ -471,7 +490,7 @@ function enforceRequiredReviewerChildren(params: {
   readonly stepAssessments: readonly SubagentVerifierStepAssessment[];
   readonly childSessionRecords: readonly {
     readonly name: string;
-    readonly role: WorkflowStepRole;
+    readonly role: WorkflowStepRole | undefined;
     readonly verdict: SubagentVerifierStepVerdict;
     readonly subagentSessionId?: string;
   }[];
@@ -480,16 +499,19 @@ function enforceRequiredReviewerChildren(params: {
   const requiredChildren = params.verifierWorkItems
     .map((item) => item.workflowContract?.requiredChildren)
     .find((entry) => entry !== undefined);
-  if (!requiredChildren || requiredChildren.cardinality <= 0) {
+  const requiredCardinality = requiredChildren?.cardinality ?? 0;
+  if (!requiredChildren || requiredCardinality <= 0) {
     return [...params.stepAssessments];
   }
 
-  const relevantRoles = new Set(
-    requiredChildren.roles.length > 0
-      ? requiredChildren.roles
+  const requiredRoles = requiredChildren.roles ?? [];
+  const relevantRoles = new Set<WorkflowStepRole>(
+    requiredRoles.length > 0
+      ? requiredRoles
       : (["reviewer"] as const),
   );
   const successfulRequiredChildren = params.childSessionRecords.filter((record) =>
+    record.role !== undefined &&
     relevantRoles.has(record.role) &&
     record.verdict === "pass" &&
     typeof record.subagentSessionId === "string" &&
@@ -498,11 +520,12 @@ function enforceRequiredReviewerChildren(params: {
   const distinctSessionIds = new Set(
     successfulRequiredChildren.map((record) => record.subagentSessionId!.trim()),
   );
-  const missingExactNames = (requiredChildren.exactNames ?? []).filter((name) =>
-    !successfulRequiredChildren.some((record) => record.name === name)
+  const missingExactNames = (requiredChildren.exactNames ?? []).filter(
+    (name: string) =>
+      !successfulRequiredChildren.some((record) => record.name === name),
   );
   if (
-    distinctSessionIds.size >= requiredChildren.cardinality &&
+    distinctSessionIds.size >= requiredCardinality &&
     missingExactNames.length === 0
   ) {
     return [...params.stepAssessments];
@@ -510,7 +533,7 @@ function enforceRequiredReviewerChildren(params: {
 
   const targets = params.stepAssessments.filter((assessment) => {
     const workItem = params.verifierWorkItems.find((item) => item.name === assessment.name);
-    const role = workItem?.workflowStep.role;
+    const role = workItem?.workflowStep?.role;
     return role === "writer" || role === "validator" || role === "synthesizer";
   });
   const namesToFail = new Set(
@@ -518,7 +541,7 @@ function enforceRequiredReviewerChildren(params: {
   );
   const issueSuffix = missingExactNames.length > 0
     ? `missing=${missingExactNames.join(",")}`
-    : `sessions=${distinctSessionIds.size}/${requiredChildren.cardinality}`;
+    : `sessions=${distinctSessionIds.size}/${requiredCardinality}`;
   const updatedAssessments: SubagentVerifierStepAssessment[] =
     params.stepAssessments.map((assessment) => {
     if (!namesToFail.has(assessment.name)) {
@@ -527,8 +550,11 @@ function enforceRequiredReviewerChildren(params: {
     const issues: PlannerVerifierIssueCode[] = assessment.issues.includes(
       "missing_required_reviewer_children",
     )
-      ? [...assessment.issues]
-      : [...assessment.issues, "missing_required_reviewer_children"];
+      ? ([...assessment.issues] as PlannerVerifierIssueCode[])
+      : ([
+          ...assessment.issues,
+          "missing_required_reviewer_children",
+        ] as PlannerVerifierIssueCode[]);
     const unresolvedValue = `${assessment.name}:missing_required_reviewer_children:${issueSuffix}`;
     if (!params.unresolvedItems.includes(unresolvedValue)) {
       params.unresolvedItems.push(unresolvedValue);
@@ -641,7 +667,7 @@ export function buildSubagentVerifierMessages(
 function describeVerifierTemplate(
   step: PlannerVerifierWorkItem,
 ): string {
-  switch (step.workflowStep.role) {
+  switch (step.workflowStep?.role) {
     case "reviewer":
       return "Reviewer template: require grounded findings and read-backed evidence; do not require mutation.";
     case "writer":
@@ -707,7 +733,7 @@ export function buildSubagentVerifierStructuredOutputRequest(): LLMStructuredOut
 
 export function parseSubagentVerifierDecision(
   content: string | Record<string, unknown>,
-  verifierWorkItems: readonly PlannerVerifierWorkItem[],
+  _verifierWorkItems: readonly PlannerVerifierWorkItem[],
 ): SubagentVerifierDecision | undefined {
   const parsed =
     typeof content === "string" ? parseJsonObjectFromText(content) : content;
@@ -730,7 +756,6 @@ export function parseSubagentVerifierDecision(
         .map((entry) => entry.trim())
         .filter((entry) => entry.length > 0)
     : [];
-  const stepsByName = new Map(verifierWorkItems.map((step) => [step.name, step]));
   const parsedSteps = Array.isArray(parsed.steps) ? parsed.steps : [];
   const assessments: SubagentVerifierStepAssessment[] = [];
   for (const entry of parsedSteps) {
@@ -1434,9 +1459,12 @@ function shouldDeferPlannerSubagentExecutableOutcomeValidation(params: {
   if (params.workflowStep.role === "validator") {
     return false;
   }
-  const stepKind = canonicalizeExecutionStepKind(
-    params.step.executionContext?.stepKind,
-  );
+  const stepKind = canonicalizeExecutionStepKind({
+    stepKind: params.step.executionContext?.stepKind,
+    effectClass: params.step.executionContext?.effectClass,
+    verificationMode: params.step.executionContext?.verificationMode,
+    targetArtifacts: params.step.executionContext?.targetArtifacts,
+  });
   if (stepKind === "delegated_validation") {
     return false;
   }
@@ -1482,11 +1510,19 @@ function classifyPlannerWorkflowAdmission(params: {
   readonly completionContract?: ImplementationCompletionContract;
 }): PlannerWorkflowAdmission["taskClassification"] {
   const completionContract = params.completionContract;
+  // Only the contract's taskClass decides docs-research-plan-only routing.
+  // The placeholder taxonomy is a separate dimension (it tells the verifier
+  // which placeholder pattern to match against authored evidence) and does
+  // NOT mean the work itself is read-only — a "documentation" placeholder
+  // taxonomy still applies when the planner is mutating a plan/spec file
+  // and the verifier needs to police that the file does not contain
+  // unfilled placeholders. Treating it as docs-research-plan-only here
+  // misclassified delegated plan rewrites and short-circuited documentation
+  // completion verification.
   if (
     !completionContract ||
     completionContract.taskClass === "scaffold_allowed" ||
-    completionContract.taskClass === "review_required" ||
-    completionContract.placeholderTaxonomy === "documentation"
+    completionContract.taskClass === "review_required"
   ) {
     return "docs_research_plan_only";
   }

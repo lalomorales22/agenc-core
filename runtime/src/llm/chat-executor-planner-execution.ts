@@ -1428,6 +1428,7 @@ export async function executePlannerPath(
       const plannerWorkflowAdmission = buildPlannerWorkflowAdmission({
         subagentSteps,
         deterministicSteps,
+        workflowContract: plannerPlan.workflowContract,
         workspaceRoot: plannerExecutionContext.workspaceRoot,
         verificationContract: ctx.requiredToolEvidence?.verificationContract,
         completionContract: ctx.requiredToolEvidence?.completionContract,
@@ -1435,6 +1436,7 @@ export async function executePlannerPath(
           config.subagentVerifierConfig.enabled ||
           config.subagentVerifierConfig.force,
         requiredSubagentOutputStepNames,
+        planIntent: plannerPlan.planIntent,
       });
       ctx.plannerWorkflowTaskClassification =
         plannerWorkflowAdmission.taskClassification;

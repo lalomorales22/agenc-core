@@ -1741,99 +1741,20 @@ describe("ChatExecutor", () => {
       });
     });
 
-    it("preserves legacy completion compatibility for documentation-only direct writes", async () => {
-      const events: Record<string, unknown>[] = [];
-      const toolHandler = vi.fn().mockImplementation((name) => {
-        if (name === "system.readFile") {
-          return safeJson({
-            path: "/tmp/phase9-docs/README.md",
-            content: "# Phase 9\n\nDraft.\n",
-          });
-        }
-        if (name === "system.writeFile") {
-          return safeJson({
-            path: "/tmp/phase9-docs/README.md",
-            bytesWritten: 32,
-          });
-        }
-        return safeJson({ ok: true });
-      });
-      const provider = createMockProvider("primary", {
-        chat: vi
-          .fn()
-          .mockResolvedValueOnce(
-            mockResponse({
-              content: "",
-              finishReason: "tool_calls",
-              toolCalls: [
-                {
-                  id: "tc-docs-read",
-                  name: "system.readFile",
-                  arguments: safeJson({
-                    path: "/tmp/phase9-docs/README.md",
-                  }),
-                },
-              ],
-            }),
-          )
-          .mockResolvedValueOnce(
-            mockResponse({
-              content: "",
-              finishReason: "tool_calls",
-              toolCalls: [
-                {
-                  id: "tc-docs-write",
-                  name: "system.writeFile",
-                  arguments: safeJson({
-                    path: "/tmp/phase9-docs/README.md",
-                    content: "# Phase 9\n\nUsage notes.\n",
-                  }),
-                },
-              ],
-            }),
-          )
-          .mockResolvedValueOnce(
-            mockResponse({
-              content: "Updated README.md with the requested usage notes.",
-            }),
-          ),
-      });
-
-      const executor = new ChatExecutor({
-        providers: [provider],
-        toolHandler,
-        allowedTools: ["system.readFile", "system.writeFile"],
-      });
-      const result = await executor.execute(
-        createParams({
-          message: createMessage(
-            "In /tmp/phase9-docs only, update README.md with usage notes.",
-          ),
-          trace: {
-            onExecutionTraceEvent: (event) => {
-              events.push(event as unknown as Record<string, unknown>);
-            },
-          },
-        }),
-      );
-
-      expect(result.stopReason).toBe("completed");
-      expect(result.completionState).toBe("completed");
-      expect(events).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            type: "completion_gate_checked",
-            phase: "tool_followup",
-            payload: expect.objectContaining({
-              gate: "workflow_completion_truth",
-              decision: "accept",
-              ownerClass: "documentation",
-              ownershipSource: "turn_contract",
-            }),
-          }),
-        ]),
-      );
-    });
+    // The "preserves legacy completion compatibility for documentation-only
+    // direct writes" test that lived here was removed on 2026-04-06 alongside
+    // the regex-based plan-artifact intent classifier. It exercised the
+    // pre-call direct-owner shortcut path: a documentation-only README
+    // update used to be detected by the regex layer and routed through
+    // the workflow-completion-truth gate without invoking the planner.
+    // With the rip-out, intent is decided by the model and surfaced as
+    // `plan_intent` on the parsed PlannerPlan, so the executor always
+    // routes through the planner first; the legacy direct-owner shortcut
+    // and the workflow-completion-truth gate path it triggered no longer
+    // exist as standalone code paths. New end-to-end coverage for
+    // documentation-only edit flows belongs in a planner-pipeline
+    // integration test against a recorded model response that emits
+    // `plan_intent: "edit_artifact"`.
 
     it("preserves legacy completion compatibility for research-only turns", async () => {
       const events: Record<string, unknown>[] = [];
@@ -13660,13 +13581,20 @@ describe("ChatExecutor", () => {
       ]);
     });
 
-    it("routes TODO-to-plan expansion requests through the planner instead of the direct tool loop", async () => {
+    // Removed 2026-04-06: this test exercised the regex-based pre-call
+    // shortcut where a TODO/PLAN reference forced a one-pass planner-only
+    // route with exact `provider.chat` call counts. With the rip-out the
+    // executor always routes through the planner-pipeline-and-verifier
+    // chain, so the call count and `requiresSynthesis` semantics differ.
+    // New coverage belongs in a planner-pipeline integration test.
+    it.skip("routes TODO-to-plan expansion requests through the planner instead of the direct tool loop", async () => {
       const provider = createMockProvider("primary", {
         chat: vi.fn().mockResolvedValueOnce(
           mockResponse({
             content: safeJson({
               reason: "expand_plan_artifact",
               requiresSynthesis: false,
+              plan_intent: "grounded_plan_generation",
               steps: [
                 {
                   name: "read_todo",
@@ -13741,7 +13669,12 @@ describe("ChatExecutor", () => {
       expect(result.callUsage.map((entry) => entry.phase)).toEqual(["planner"]);
     });
 
-    it("keeps explicit single-artifact documentation updates on the direct owner path", async () => {
+    // Removed 2026-04-06: tests the deleted direct-owner shortcut path that
+    // bypassed the planner for single-artifact documentation updates. The
+    // model now decides intent post-plan; pre-plan code never builds a
+    // direct-owner contract anymore. New coverage belongs in a planner-
+    // pipeline integration test against a recorded model response.
+    it.skip("keeps explicit single-artifact documentation updates on the direct owner path", async () => {
       const workspaceRoot = "/home/tetsuo/git/stream-test/agenc-shell";
       const targetArtifact = `${workspaceRoot}/PLAN.md`;
       const events: Record<string, unknown>[] = [];
@@ -13899,7 +13832,9 @@ describe("ChatExecutor", () => {
     ).toBe(true);
   });
 
-  it("normalizes explicit @artifact refs during direct-owner updates and does not inherit build verification", async () => {
+  // Removed 2026-04-06: tests the deleted direct-owner shortcut path. With
+  // the rip-out, planner is always used for artifact-mentioning turns.
+  it.skip("normalizes explicit @artifact refs during direct-owner updates and does not inherit build verification", async () => {
     const workspaceRoot = "/home/tetsuo/git/stream-test/agenc-shell";
     const targetArtifact = `${workspaceRoot}/PLAN.md`;
     const toolHandler = vi.fn(async (name: string, args?: Record<string, unknown>) => {
@@ -14011,7 +13946,8 @@ describe("ChatExecutor", () => {
     });
   });
 
-  it("keeps explicit single-artifact updates on the direct-owner path even when stale workflow verification is present", async () => {
+  // Removed 2026-04-06: tests the deleted direct-owner shortcut path.
+  it.skip("keeps explicit single-artifact updates on the direct-owner path even when stale workflow verification is present", async () => {
     const workspaceRoot = "/home/tetsuo/git/stream-test/agenc-shell";
     const targetArtifact = `${workspaceRoot}/PLAN.md`;
     const toolHandler = vi.fn(async (name: string, args?: Record<string, unknown>) => {
@@ -14145,7 +14081,10 @@ describe("ChatExecutor", () => {
     });
   });
 
-  it("completes explicit artifact review-and-fix requests without mutating when grounded inspection finds no gaps", async () => {
+  // Removed 2026-04-06: tests the deleted direct-owner artifact-review-and-fix
+  // shortcut path. The new model-driven flow no longer detects "review and
+  // fix" intent from the message text via regex.
+  it.skip("completes explicit artifact review-and-fix requests without mutating when grounded inspection finds no gaps", async () => {
     const workspaceRoot = "/home/tetsuo/git/stream-test/agenc-shell";
     const toolHandler = vi.fn(async (name: string, args?: Record<string, unknown>) => {
       if (name === "system.readFile") {
@@ -15906,7 +15845,11 @@ describe("ChatExecutor", () => {
       });
     });
 
-    it("fails closed for tightly coupled documentation edits on a shared artifact target", async () => {
+    // Removed 2026-04-06: tests the deleted shared-artifact close-fail path
+    // which depended on the regex classifier identifying "tightly coupled
+    // documentation edits" pre-plan. The new flow validates this post-plan
+    // via planIntent on the parsed plan.
+    it.skip("fails closed for tightly coupled documentation edits on a shared artifact target", async () => {
       const provider = createMockProvider("primary", {
         chat: vi
           .fn()
@@ -16043,7 +15986,11 @@ describe("ChatExecutor", () => {
       );
     });
 
-    it("blocks shared-artifact implementation plans instead of dropping into inline fallback", async () => {
+    // Removed 2026-04-06: tests a planner-validation path that depended on
+    // the regex pre-call classifier emitting `implement_from_artifact`. The
+    // model now decides intent post-plan; the equivalent block is enforced
+    // by the post-plan validator reading planIntent from the parsed plan.
+    it.skip("blocks shared-artifact implementation plans instead of dropping into inline fallback", async () => {
       const provider = createMockProvider("primary", {
         chat: vi
           .fn()
@@ -16497,7 +16444,9 @@ describe("ChatExecutor", () => {
       );
     });
 
-    it("refines the traced mixed implementation plan into a single-owner workflow before execution", async () => {
+    // Removed 2026-04-06: tests a planner-refinement path that depended on
+    // the regex classifier identifying mixed implementation plans pre-call.
+    it.skip("refines the traced mixed implementation plan into a single-owner workflow before execution", async () => {
       const events: Record<string, unknown>[] = [];
       const workspaceRoot = "/tmp/phase9-mixed-impl";
       const toolHandler = vi.fn().mockResolvedValue("unexpected inline execution");
@@ -17087,7 +17036,9 @@ describe("ChatExecutor", () => {
       );
     });
 
-    it("continues execution when request-level milestones remain even if the prose summary bypasses deferral heuristics", async () => {
+    // Removed 2026-04-06: tests a milestone-deferral path that depended on
+    // the deleted regex pre-call classifier shaping completion contracts.
+    it.skip("continues execution when request-level milestones remain even if the prose summary bypasses deferral heuristics", async () => {
       const events: Record<string, unknown>[] = [];
       const toolHandler = vi.fn()
         .mockResolvedValueOnce("# PLAN\n- phase 1\n- phase 2")

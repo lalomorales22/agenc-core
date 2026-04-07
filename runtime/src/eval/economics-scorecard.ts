@@ -34,7 +34,12 @@ function safeRatio(numerator: number, denominator: number): number {
 }
 
 function safeComplianceRate(numerator: number, denominator: number): number {
-  if (!Number.isFinite(denominator) || denominator <= 0) return 0;
+  // When no records apply to a compliance dimension, the dimension is
+  // vacuously compliant. Returning 0 here flagged scenarios that simply did
+  // not exercise the dimension as failing, which is wrong: a scorecard for a
+  // run that never had to enforce delegation denials cannot fail the
+  // delegation-denial rate.
+  if (!Number.isFinite(denominator) || denominator <= 0) return 1;
   return numerator / denominator;
 }
 

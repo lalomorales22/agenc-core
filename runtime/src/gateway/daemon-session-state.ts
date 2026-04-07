@@ -24,6 +24,13 @@ interface PersistedWebSessionRuntimeState {
   readonly statefulHistoryCompacted?: boolean;
   readonly artifactSnapshotId?: string;
   readonly artifactSessionId?: string;
+  /**
+   * Active task carryover for the next compatible turn. Round-trips through
+   * web-session resume so a paused implementation/artifact-update task can
+   * resume on a new client connection without losing the workflow contract
+   * fingerprint, source/target artifacts, or task lineage.
+   */
+  readonly activeTaskContext?: unknown;
 }
 
 const SESSION_STATEFUL_LINEAGE_PHASES = new Set([
@@ -81,13 +88,25 @@ function buildPersistedWebSessionRuntimeState(
     typeof (artifactContext as Record<string, unknown>).snapshotId === "string"
       ? String((artifactContext as Record<string, unknown>).snapshotId)
       : undefined;
-  if (!resumeAnchor && !historyCompacted && !artifactSnapshotId) return undefined;
+  const activeTaskContext =
+    session.metadata[SESSION_ACTIVE_TASK_CONTEXT_METADATA_KEY];
+  const hasActiveTaskContext =
+    typeof activeTaskContext === "object" && activeTaskContext !== null;
+  if (
+    !resumeAnchor &&
+    !historyCompacted &&
+    !artifactSnapshotId &&
+    !hasActiveTaskContext
+  ) {
+    return undefined;
+  }
   return {
     version: 2,
     ...(resumeAnchor ? { statefulResumeAnchor: resumeAnchor } : {}),
     ...(historyCompacted ? { statefulHistoryCompacted: true } : {}),
     ...(artifactSnapshotId ? { artifactSnapshotId } : {}),
     ...(artifactSnapshotId ? { artifactSessionId: session.id } : {}),
+    ...(hasActiveTaskContext ? { activeTaskContext } : {}),
   };
 }
 
@@ -111,13 +130,26 @@ function coercePersistedWebSessionRuntimeState(
     candidate.artifactSessionId.trim().length > 0
       ? candidate.artifactSessionId.trim()
       : undefined;
-  if (!resumeAnchor && !historyCompacted && !artifactSnapshotId) return undefined;
+  const activeTaskContext =
+    typeof candidate.activeTaskContext === "object" &&
+    candidate.activeTaskContext !== null
+      ? candidate.activeTaskContext
+      : undefined;
+  if (
+    !resumeAnchor &&
+    !historyCompacted &&
+    !artifactSnapshotId &&
+    !activeTaskContext
+  ) {
+    return undefined;
+  }
   return {
     version: 2,
     ...(resumeAnchor ? { statefulResumeAnchor: resumeAnchor } : {}),
     ...(historyCompacted ? { statefulHistoryCompacted: true } : {}),
     ...(artifactSnapshotId ? { artifactSnapshotId } : {}),
     ...(artifactSessionId ? { artifactSessionId } : {}),
+    ...(activeTaskContext ? { activeTaskContext } : {}),
   };
 }
 
@@ -215,6 +247,10 @@ export async function hydrateWebSessionRuntimeState(
       session.metadata[SESSION_STATEFUL_ARTIFACT_RECORDS_METADATA_KEY] =
         snapshot.records;
     }
+  }
+  if (persisted.activeTaskContext) {
+    session.metadata[SESSION_ACTIVE_TASK_CONTEXT_METADATA_KEY] =
+      persisted.activeTaskContext;
   }
 }
 

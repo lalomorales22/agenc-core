@@ -236,7 +236,9 @@ const ARTIFACT_TASK_WRITE_TOOL_NAMES = [
   "system.writeFile",
   "system.appendFile",
 ] as const;
-const ARTIFACT_TASK_MUTATION_TOOL_NAMES = new Set(ARTIFACT_TASK_WRITE_TOOL_NAMES);
+const ARTIFACT_TASK_MUTATION_TOOL_NAMES: ReadonlySet<string> = new Set(
+  ARTIFACT_TASK_WRITE_TOOL_NAMES,
+);
 
 function resolveArtifactTaskContractGuidance(
   input: ToolContractGuidanceContext,

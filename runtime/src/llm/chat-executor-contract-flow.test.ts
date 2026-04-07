@@ -289,7 +289,8 @@ describe("chat-executor-contract-flow", () => {
           providerEvidence: undefined,
           response: undefined,
           plannerSummaryState: {
-            routeReason: "plan_artifact_execution_request",
+            routeReason: "plan_artifact_reference",
+            plannerPlanIntent: "implement_from_artifact",
           },
         } as any,
       }),
