@@ -457,6 +457,14 @@ export interface ChatExecutorConfig {
    */
   readonly queryTracking?: import("./query-tracking.js").QueryTracking;
   /**
+   * Cut 5.3: tool result budget config. When set, oversized tool
+   * results are persisted to disk and replaced in the message history
+   * with a `<persisted-output>` placeholder pointing at the file
+   * path. Per-session ContentReplacementState is owned by the
+   * executor; callers only need to supply the budget config.
+   */
+  readonly toolResultBudget?: import("./tool-result-budget.js").ToolBudgetConfig;
+  /**
    * Maximum token budget per session. When cumulative usage meets or exceeds
    * this value, the executor attempts to compact conversation history by
    * summarizing older messages. If compaction fails, falls back to
