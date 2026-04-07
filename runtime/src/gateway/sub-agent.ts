@@ -58,7 +58,12 @@ import { SubAgentSpawnError } from "./errors.js";
 // Constants
 // ============================================================================
 
-export const DEFAULT_SUB_AGENT_TIMEOUT_MS = 300_000; // 5 minutes
+// 0 = unlimited execution deadline. Sub-agents inherit any explicit timeout
+// from their config or parent envelope; the default is "no deadline" because
+// long-running implementation phases routinely exceed any fixed budget.
+// Reverted from a 5-minute cap added by PR #174 because the cap silently
+// killed legitimate long-horizon child phases.
+export const DEFAULT_SUB_AGENT_TIMEOUT_MS = 0;
 export const DEFAULT_SUB_AGENT_CONTEXT_STARTUP_TIMEOUT_MS = 15_000;
 export const MAX_CONCURRENT_SUB_AGENTS = 16;
 export const DEFAULT_MAX_SUB_AGENT_DEPTH = 4;

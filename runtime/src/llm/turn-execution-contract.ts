@@ -18,7 +18,6 @@ import {
   extractPlannerArtifactTargets,
   extractPlannerSourceArtifactTargets,
   requestExplicitlyRequestsDelegation,
-  requestRequiresToolGroundedExecution,
   extractExplicitSubagentOrchestrationRequirements,
   isDialogueOnlyDirectTurnMessage,
 } from "./chat-executor-planner.js";
@@ -602,13 +601,10 @@ export function resolveTurnExecutionContract(params: {
   readonly runtimeContext?: ChatExecuteParams["runtimeContext"];
   readonly requiredToolEvidence?: ChatExecuteParams["requiredToolEvidence"];
 }): TurnExecutionContract {
-  const messageText =
-    typeof params.message.content === "string"
-      ? params.message.content
-      : params.message.content
-          .filter((part) => part.type === "text")
-          .map((part) => part.text)
-          .join(" ");
+  // GatewayMessage.content is always a string; the multi-part LLM content
+  // shape only exists on `LLMMessage`, not on the gateway-facing message
+  // type. No conditional narrowing needed here.
+  const messageText = params.message.content;
   const runtimeWorkspaceRoot = normalizeWorkspaceRoot(
     params.runtimeContext?.workspaceRoot,
   );

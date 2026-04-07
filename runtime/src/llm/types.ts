@@ -606,6 +606,14 @@ export interface LLMChatOptions {
   readonly timeoutMs?: number;
   /** Abort signal propagated from the runtime when the request is cancelled. */
   readonly signal?: AbortSignal;
+  /**
+   * Disable provider-side parallel tool calls for this request. Used by the
+   * meta-planner and other goal-only flows that intentionally do not want the
+   * model to fan out into multiple concurrent tool invocations on a single
+   * planning turn. Honored by providers that expose the OpenAI-compatible
+   * `parallel_tool_calls` request flag (Grok, OpenAI, etc.).
+   */
+  readonly parallelToolCalls?: boolean;
 }
 
 export interface LLMProviderEvidence {

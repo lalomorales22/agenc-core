@@ -469,7 +469,7 @@ function dependencyProvidesWorkspaceInspectionEvidence(params: {
 function collectDependencyWorkspaceInspectionToolCalls(params: {
   readonly dependencyStep: PipelinePlannerStep | undefined;
   readonly result: string | null;
-}): readonly Array<{
+}): ReadonlyArray<{
   readonly name?: string;
   readonly args?: unknown;
   readonly result?: string;

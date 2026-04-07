@@ -163,11 +163,13 @@ export class ObservabilityService {
   }
 
   async listTraces(query?: ObservabilityTraceQuery) {
+    this.flushBuffer();
     await this.writeChain;
     return this.store.listTraces(query);
   }
 
   async getTrace(traceId: string): Promise<ObservabilityTraceDetail | null> {
+    this.flushBuffer();
     await this.writeChain;
     return this.store.getTrace(traceId);
   }
@@ -175,11 +177,13 @@ export class ObservabilityService {
   async getSummary(
     query: ObservabilitySummaryQuery = {},
   ): Promise<ObservabilitySummary> {
+    this.flushBuffer();
     await this.writeChain;
     return this.store.getSummary(query);
   }
 
   async getArtifact(path: string): Promise<ObservabilityArtifactResponse> {
+    this.flushBuffer();
     await this.writeChain;
     return this.store.getArtifact(path);
   }

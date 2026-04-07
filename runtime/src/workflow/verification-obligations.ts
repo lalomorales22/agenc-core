@@ -28,6 +28,14 @@ export interface WorkflowVerificationContract {
   readonly stepKind?: ExecutionStepKind;
   readonly completionContract?: ImplementationCompletionContract;
   readonly requestCompletion?: WorkflowRequestCompletionContract;
+  /**
+   * Optional reviewer/writer/validator role label propagated from the
+   * planner-emitted `execution_context.role` of the originating step. Used by
+   * the verifier to decide which role-specific verification path applies
+   * (e.g. reviewer-only steps cannot satisfy implementation-class
+   * acceptance criteria, validator steps must report deterministic outcomes).
+   */
+  readonly role?: "reviewer" | "writer" | "validator" | "researcher" | "synthesizer";
 }
 
 export interface VerificationObligations {

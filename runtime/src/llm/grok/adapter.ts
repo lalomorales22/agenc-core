@@ -1871,21 +1871,21 @@ export class GrokProvider implements LLMProvider {
       }
     }
     if (structuredOutputEnabled && structuredOutputSchema) {
-      let stripStructuredOutput = false;
-      try {
-        assertXaiStructuredOutputToolCompatibility({
-          providerName: this.name,
-          model: typeof params.model === "string" ? params.model : this.config.model,
-          structuredOutputRequested: true,
-          toolsRequested: selectedTools.toolsAttached,
-        });
-      } catch {
-        console.warn(
-          `[${this.name}] Structured output with tools not supported on model ${typeof params.model === "string" ? params.model : this.config.model}; stripping structured output for this request`,
-        );
-        stripStructuredOutput = true;
-      }
-      if (!stripStructuredOutput) params.text = {
+      // Fail closed when the configured model cannot honor structured outputs
+      // with tools. The previous "graceful fallback" silently stripped the
+      // structured output and continued, which masked configuration errors
+      // (e.g. a planner step routed to grok-code-fast-1 instead of a Grok 4
+      // model). The CLAUDE.md learned rule "xAI Compatibility: Treat
+      // undocumented 200s as untrusted until semantics are proven" applies:
+      // raise the assertion at the adapter boundary so the user fixes the
+      // config instead of getting a degraded run.
+      assertXaiStructuredOutputToolCompatibility({
+        providerName: this.name,
+        model: typeof params.model === "string" ? params.model : this.config.model,
+        structuredOutputRequested: true,
+        toolsRequested: selectedTools.toolsAttached,
+      });
+      params.text = {
         format: {
           type: structuredOutputSchema.type,
           name: structuredOutputSchema.name,

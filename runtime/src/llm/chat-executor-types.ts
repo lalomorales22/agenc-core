@@ -648,6 +648,23 @@ export interface PlannerVerifierWorkItem {
   readonly resultStepNames?: readonly string[];
   readonly verificationContract?: WorkflowVerificationContract;
   readonly deferExecutableOutcomeValidation?: boolean;
+  /**
+   * Per-step workflow contract carried over from the originating
+   * `PlannerSubAgentTaskStepIntent.workflowStep`. Lets the verifier inspect
+   * the step's executionContext, role, contextRequirements, and
+   * artifactRelations without having to re-resolve them from the source
+   * step. Optional because not every verifier work item is backed by a
+   * subagent step (some are deterministic-implementation work items).
+   */
+  readonly workflowStep?: WorkflowStepContract;
+  /**
+   * Plan-level workflow contract propagated from the parent
+   * `PlannerPlan.workflowContract`. Carries the overall workflow class and
+   * structural shape so role-specific verification paths can decide whether
+   * the work item belongs to an implementation, documentation, or
+   * read-only workflow.
+   */
+  readonly workflowContract?: WorkflowContract;
 }
 
 export type PlannerWorkflowTaskClassification =
@@ -663,6 +680,13 @@ export interface PlannerWorkflowAdmission {
   readonly requiresMandatoryImplementationVerification: boolean;
   readonly requiresMandatorySubagentOutputVerification: boolean;
   readonly invalidReason?: string;
+  /**
+   * Plan-level workflow contract propagated from the parent
+   * `PlannerPlan.workflowContract`. The verifier reads this to decide
+   * whether the admission belongs to an implementation, documentation, or
+   * read-only workflow class.
+   */
+  readonly workflowContract?: WorkflowContract;
 }
 
 export interface PlannerSynthesisStepIntent extends PlannerStepBaseIntent {

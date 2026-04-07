@@ -159,9 +159,13 @@ export function resolveExecutionToolContractGuidance(input: {
 export function resolveRuntimeWorkflowContext(input: {
   readonly ctx: ContractFlowContext;
 }): RuntimeWorkflowContextResolution {
+  // turnExecutionContract is normally populated by the runtime preflight, but
+  // it can be undefined in test fixtures and in early-error paths. Read it
+  // defensively so the contract resolver does not crash on a partially-built
+  // context.
   const contractContext = mergeWorkflowVerificationContext({
-    verificationContract: input.ctx.turnExecutionContract.verificationContract,
-    completionContract: input.ctx.turnExecutionContract.completionContract,
+    verificationContract: input.ctx.turnExecutionContract?.verificationContract,
+    completionContract: input.ctx.turnExecutionContract?.completionContract,
   });
   const plannerContext = mergeWorkflowVerificationContext({
     verificationContract: input.ctx.plannerVerificationContract,
@@ -319,13 +323,17 @@ export function requiresWorkflowOwnedImplementationCompletion(input: {
   if (hasConcordiaSimulationTurnContract(input.ctx.messageMetadata)) {
     return false;
   }
-  if (input.ctx.turnExecutionContract.turnClass === "artifact_update") {
+  // turnExecutionContract is normally populated by runtime preflight; in
+  // test fixtures and early-error contexts it may be undefined. Read
+  // defensively rather than crashing.
+  const turnExecutionContract = input.ctx.turnExecutionContract;
+  if (turnExecutionContract?.turnClass === "artifact_update") {
     return false;
   }
-  if (input.ctx.turnExecutionContract.turnClass === "workflow_implementation") {
+  if (turnExecutionContract?.turnClass === "workflow_implementation") {
     return !(
-      input.ctx.turnExecutionContract.verificationContract ||
-      input.ctx.turnExecutionContract.completionContract
+      turnExecutionContract.verificationContract ||
+      turnExecutionContract.completionContract
     );
   }
   if (

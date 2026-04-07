@@ -18,18 +18,22 @@ function createMessage(content: string): GatewayMessage {
 }
 
 describe("turn-execution-contract", () => {
-  it("routes explicit single-artifact repair requests to the artifact-update contract", () => {
-    const contract = resolveTurnExecutionContract({
-      message: createMessage("Go through @PLAN.md, find any gaps, and fix them."),
-      runtimeContext: { workspaceRoot: "/workspace" },
-    });
-
-    expect(contract.turnClass).toBe("artifact_update");
-    expect(contract.ownerMode).toBe("artifact_owner");
-    expect(contract.delegationPolicy).toBe("direct_owner");
-    expect(contract.targetArtifacts).toEqual(["/workspace/PLAN.md"]);
-    expect(contract.artifactTaskContract?.operationMode).toBe("review_and_update_if_needed");
-  });
+  // Three pre-plan-shortcut tests that previously lived here ("routes
+  // explicit single-artifact repair requests to the artifact-update
+  // contract", "gives implement-from-artifact requests workspace-wide
+  // mutable ownership by default", "derives carryover only for
+  // artifact-update and workflow-implementation contracts") were removed
+  // on 2026-04-06 alongside the regex pre-call classifier. They asserted
+  // that `resolveTurnExecutionContract` could detect plan-artifact intent
+  // from the user message text alone (via `classifyPlannerPlanArtifactIntent`)
+  // and emit a fully-built artifact-update or workflow-implementation
+  // contract before the model had been called. The model now decides intent
+  // and emits `plan_intent` on the parsed PlannerPlan; pre-plan contract
+  // assembly defaults to dialogue/none and the contract is refined
+  // post-plan. End-to-end coverage for the new model-driven path belongs
+  // in a planner-pipeline integration test against a recorded model
+  // response. The activeTaskContext-based continuation test below is still
+  // valid because it does not depend on text classification.
 
   it("routes implementation continuations to workflow implementation before tool execution", () => {
     const activeTaskContext: ActiveTaskContext = {
@@ -59,34 +63,4 @@ describe("turn-execution-contract", () => {
     expect(contract.invalidReason).toBeUndefined();
   });
 
-  it("gives implement-from-artifact requests workspace-wide mutable ownership by default", () => {
-    const contract = resolveTurnExecutionContract({
-      message: createMessage("I want you to implement @PLAN.md in full."),
-      runtimeContext: { workspaceRoot: "/workspace" },
-    });
-
-    expect(contract.turnClass).toBe("workflow_implementation");
-    expect(contract.ownerMode).toBe("workflow_owner");
-    expect(contract.sourceArtifacts).toEqual(["/workspace/PLAN.md"]);
-    expect(contract.targetArtifacts).toEqual(["/workspace"]);
-    expect(contract.executionEnvelope?.targetArtifacts).toEqual(["/workspace"]);
-  });
-
-  it("derives carryover only for artifact-update and workflow-implementation contracts", () => {
-    const dialogueContract = resolveTurnExecutionContract({
-      message: createMessage("hello"),
-      runtimeContext: { workspaceRoot: "/workspace" },
-    });
-    const artifactContract = resolveTurnExecutionContract({
-      message: createMessage("Review @ROADMAP.md and fix any missing sections."),
-      runtimeContext: { workspaceRoot: "/workspace" },
-    });
-
-    expect(deriveActiveTaskContext(dialogueContract)).toBeUndefined();
-    expect(deriveActiveTaskContext(artifactContract)).toMatchObject({
-      turnClass: "artifact_update",
-      ownerMode: "artifact_owner",
-      targetArtifacts: ["/workspace/ROADMAP.md"],
-    });
-  });
 });
