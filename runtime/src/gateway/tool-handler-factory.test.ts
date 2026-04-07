@@ -129,27 +129,6 @@ describe("createSessionToolHandler", () => {
     });
   });
 
-  it("wraps plain-text Doom execution failures as JSON errors", async () => {
-    const send = vi.fn();
-    const baseHandler = vi.fn(async () =>
-      "Executor not running. Start game with async_player=True.",
-    );
-    const handler = createSessionToolHandler({
-      sessionId: "session-1",
-      baseHandler,
-      routerId: "router-a",
-      send,
-    });
-
-    const result = await handler("mcp.doom.set_objective", {
-      objective_type: "hold_position",
-    });
-
-    expect(JSON.parse(result)).toEqual({
-      error: "Executor not running. Start game with async_player=True.",
-    });
-  });
-
   it("marks non-zero exitCode tool results as isError in client and subagent lifecycle events", async () => {
     const sentMessages: ControlResponse[] = [];
     const send = vi.fn((msg: ControlResponse): void => {
@@ -198,48 +177,6 @@ describe("createSessionToolHandler", () => {
       | undefined;
     expect(lifecyclePayload?.isError).toBe(true);
     expect(lifecyclePayload?.toolCallId).toBeDefined();
-  });
-
-  it("does not block same-turn Doom follow-up calls after a failed launch", async () => {
-    const sentMessages: ControlResponse[] = [];
-    const send = vi.fn((msg: ControlResponse): void => {
-      sentMessages.push(msg);
-    });
-
-    const baseHandler = vi.fn(async (name: string) => {
-      if (name === "mcp.doom.start_game") {
-        return "Unknown resolution 'banana'. Valid: ['RES_1280X720']";
-      }
-      return "Executor not running. Start game with async_player=True.";
-    });
-    const handler = createSessionToolHandler({
-      sessionId: "session-1",
-      baseHandler,
-      routerId: "router-a",
-      send,
-    });
-
-    const startResult = await handler("mcp.doom.start_game", {
-      screen_resolution: "banana",
-      async_player: true,
-    });
-    const blockedResult = await handler("mcp.doom.set_objective", {
-      objective_type: "hold_position",
-    });
-
-    expect(JSON.parse(startResult)).toEqual({
-      error: "Unknown resolution 'banana'. Valid: ['RES_1280X720']",
-    });
-    expect(JSON.parse(blockedResult)).toEqual({
-      error: "Executor not running. Start game with async_player=True.",
-    });
-    expect(baseHandler).toHaveBeenCalledTimes(2);
-    expect(sentMessages.at(-1)).toMatchObject({
-      type: "tools.result",
-      payload: {
-        toolName: "mcp.doom.set_objective",
-      },
-    });
   });
 
   it("does not block duplicate same-turn Doom launches after a successful start", async () => {

@@ -69,7 +69,7 @@ const DESKTOP_FILE_MANAGER_LAUNCH_RE = /\b(?:thunar|nautilus)\b/i;
 const DESKTOP_EDITOR_LAUNCH_RE = /\b(?:mousepad|gedit)\b/i;
 const COLLAPSE_WHITESPACE_RE = /\s+/g;
 const APPROVAL_TASK_PREVIEW_MAX_CHARS = 180;
-const DOOM_TOOL_PREFIX = 'mcp.doom.';
+// Cut 4.1: DOOM_TOOL_PREFIX removed (Doom autoplay subsystem excised).
 const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   "system.makeDir": "system.mkdir",
   "system.listFiles": "system.listDir",
@@ -1773,32 +1773,10 @@ function allowsMissingRootBootstrapCwd(
   return referencesAbsolutePathWithinRoot(toolName, args, normalizedRoot);
 }
 
-function isDoomTool(name: string): boolean {
-  return name.startsWith(DOOM_TOOL_PREFIX);
-}
-
-function canonicalizeToolFailureResult(
-  toolName: string,
-  result: string,
-): string {
-  if (!isDoomTool(toolName) || !didToolCallFail(false, result)) {
-    return result;
-  }
-
-  try {
-    const parsed = JSON.parse(result) as unknown;
-    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
-      return result;
-    }
-  } catch {
-    // Wrap known Doom plain-text failures below.
-  }
-
-  const trimmed = result.trim();
-  return JSON.stringify({
-    error: trimmed.length > 0 ? trimmed : `Tool "${toolName}" failed`,
-  });
-}
+// Cut 4.1: isDoomTool + canonicalizeToolFailureResult removed.
+// Doom-specific failure-result wrapping is gone alongside the rest of
+// the Doom autoplay subsystem; the dispatcher now treats `mcp.doom.*`
+// like any other MCP tool.
 
 function normalizeDesktopBashCommand(
   name: string,
@@ -3121,7 +3099,9 @@ export function createSessionToolHandler(config: SessionToolHandlerConfig): Tool
     }
     const durationMs = Date.now() - start;
     incidentDiagnostics?.clearDomain("tool");
-    result = canonicalizeToolFailureResult(toolName, result);
+    // Cut 4.1: canonicalizeToolFailureResult was a Doom-specific
+    // failure-result rewrap; removed alongside the rest of the Doom
+    // autoplay subsystem.
     const isError = didToolCallFail(false, result);
     if (!isError) {
       if (toolName === 'system.readFile') {
