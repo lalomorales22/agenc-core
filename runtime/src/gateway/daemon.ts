@@ -95,9 +95,7 @@ import { createGatewayMessage } from "./message.js";
 import { ChatExecutor } from "../llm/chat-executor.js";
 import { createChatExecutor } from "./chat-executor-factory.js";
 import {
-  didToolCallFail,
   normalizeToolCallArguments,
-  parseToolResultObject,
 } from "../llm/chat-executor-tool-utils.js";
 import {
   getProviderNativeAdvertisedToolNames,
@@ -118,7 +116,6 @@ import type {
   DeterministicPipelineExecutor,
   SkillInjector,
   MemoryRetriever,
-  ToolCallRecord,
   ChatToolRoutingSummary,
 } from "../llm/chat-executor.js";
 import {
@@ -266,7 +263,6 @@ function firstSurfaceSummaryLine(value: unknown): string | undefined {
 import { BackgroundRunNotifier } from "./background-run-notifier.js";
 import { BackgroundRunStore } from "./background-run-store.js";
 import type {
-  BackgroundRunContract,
   PersistedBackgroundRun,
 } from "./background-run-store.js";
 import type {
