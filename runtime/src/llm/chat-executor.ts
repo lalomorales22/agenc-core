@@ -344,7 +344,6 @@ export class ChatExecutor {
   private readonly plannerEnabled: boolean;
   private readonly plannerMaxTokens: number;
   private readonly delegationDecisionConfig: ResolvedDelegationDecisionConfig;
-  private readonly resolveDelegationScoreThreshold?: () => number | undefined;
   private readonly subagentVerifierConfig: ResolvedSubagentVerifierConfig;
   private readonly toolBudgetPerRequest: number;
   private readonly maxModelRecallsPerRequest: number;
@@ -454,7 +453,6 @@ export class ChatExecutor {
     this.delegationDecisionConfig = resolveDelegationDecisionConfig(
       config.delegationDecision,
     );
-    this.resolveDelegationScoreThreshold = config.resolveDelegationScoreThreshold;
     this.resolveHostWorkspaceRoot = config.resolveHostWorkspaceRoot;
     this.subagentVerifierConfig = ChatExecutor.resolveSubagentVerifierConfig(
       config.subagentVerifier,
@@ -1225,12 +1223,6 @@ export class ChatExecutor {
         reason: "grounded_execution_request",
       };
     }
-    const resolvedThresholdOverride = this.resolveDelegationScoreThreshold?.();
-    const baseDelegationThreshold =
-      typeof resolvedThresholdOverride === "number" &&
-        Number.isFinite(resolvedThresholdOverride)
-        ? Math.max(0, Math.min(1, resolvedThresholdOverride))
-        : this.delegationDecisionConfig.scoreThreshold;
 
     // Pre-check token budget — attempt compaction instead of hard fail
     let compacted = false;
@@ -1304,7 +1296,6 @@ export class ChatExecutor {
         requiredToolEvidence: resolvedRequiredToolEvidence,
         initialRoutedToolNames,
         expandedRoutedToolNames,
-        baseDelegationThreshold,
       },
       {
         maxToolRounds: effectiveMaxToolRounds,

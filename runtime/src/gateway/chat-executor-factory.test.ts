@@ -62,7 +62,6 @@ describe("createChatExecutor", () => {
         plannerEnabled: true,
       } as GatewayLLMConfig,
       subagentConfig: createSubagentConfig(),
-      resolveDelegationScoreThreshold: () => 0,
       resolveHostToolingProfile: () => null,
       resolveHostWorkspaceRoot: () => null,
     });

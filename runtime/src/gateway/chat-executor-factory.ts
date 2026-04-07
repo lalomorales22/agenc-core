@@ -88,8 +88,6 @@ export interface CreateChatExecutorParams {
   providerConfigs?: readonly GatewayLLMConfig[];
   /** Resolved subagent runtime config. */
   subagentConfig: ResolvedSubAgentRuntimeConfig;
-  /** Callback to resolve dynamic delegation score threshold. */
-  resolveDelegationScoreThreshold: () => number;
   /** Callback to resolve host tooling profile. */
   resolveHostToolingProfile: () => HostToolingProfile | null;
   /** Callback to resolve canonical host workspace root. */
@@ -186,7 +184,6 @@ export function createChatExecutor(
         subagentConfig.handoffMinPlannerConfidence,
       hardBlockedTaskClasses: subagentConfig.hardBlockedTaskClasses,
     },
-    resolveDelegationScoreThreshold: params.resolveDelegationScoreThreshold,
     subagentVerifier: {
       enabled: subagentConfig.enabled,
       force: subagentConfig.forceVerifier,

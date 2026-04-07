@@ -475,8 +475,6 @@ export interface ChatExecutorConfig {
   readonly pipelineExecutor?: DeterministicPipelineExecutor;
   /** Delegation utility scoring controls for planner-emitted subagent tasks. */
   readonly delegationDecision?: DelegationDecisionConfig;
-  /** Optional live resolver for delegation threshold overrides. */
-  readonly resolveDelegationScoreThreshold?: () => number | undefined;
   /** Optional verifier/critic loop for planner-emitted subagent outputs. */
   readonly subagentVerifier?: {
     /** Enable verifier flow for planner-emitted subagent steps. */
@@ -665,7 +663,6 @@ export interface ExecutionContext {
   readonly canExpandOnRoutingMiss: boolean;
   readonly hasHistory: boolean;
   readonly plannerDecision: PlannerDecision;
-  readonly baseDelegationThreshold: number;
   readonly toolRouting?: ChatExecuteParams["toolRouting"];
   readonly stateful?: ChatExecuteParams["stateful"];
   readonly requiredToolEvidence?: {
@@ -737,7 +734,6 @@ export interface BuildExecutionContextParams {
   readonly trace?: ChatExecuteParams["trace"];
   readonly initialRoutedToolNames: readonly string[];
   readonly expandedRoutedToolNames: readonly string[];
-  readonly baseDelegationThreshold: number;
 }
 
 /** Configuration values from ChatExecutor instance needed for context building. */
@@ -794,7 +790,6 @@ export function buildDefaultExecutionContext(
     ),
     hasHistory,
     plannerDecision: params.plannerDecision,
-    baseDelegationThreshold: params.baseDelegationThreshold,
     toolRouting: params.toolRouting,
     stateful: params.stateful,
     trace: params.trace,
