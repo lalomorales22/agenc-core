@@ -31,8 +31,8 @@ import type {
   LLMPipelineStopReason,
   LLMRetryPolicyMatrix,
 } from "./policy.js";
-import type { ImplementationCompletionContract } from "../workflow/completion-contract.js";
-import type { WorkflowVerificationContract } from "../workflow/verification-obligations.js";
+import type {} from "../workflow/completion-contract.js";
+import type {} from "../workflow/verification-obligations.js";
 import { resolveWorkflowCompletionState } from "../workflow/completion-state.js";
 import { deriveWorkflowProgressSnapshot } from "../workflow/completion-progress.js";
 import {
@@ -536,15 +536,17 @@ export class ChatExecutor {
     // workflow shapes. The completionProgress block is preserved for the
     // result envelope but no longer feeds back into finalContent rewriting.
     ctx.finalContent = sanitizeFinalContent(ctx.finalContent);
-    const workflowContext = this.resolveWorkflowVerificationContext(ctx);
+    // Cut 4: resolveWorkflowVerificationContext always returned `{}`
+    // after the planner subsystem was deleted; the workflow contract
+    // fields here are now plumbed as undefined.
     const completionProgress = deriveWorkflowProgressSnapshot({
       stopReason: ctx.stopReason,
       completionState: ctx.completionState,
       stopReasonDetail: ctx.stopReasonDetail,
       validationCode: ctx.validationCode,
       toolCalls: ctx.allToolCalls,
-      verificationContract: workflowContext.verificationContract,
-      completionContract: workflowContext.completionContract,
+      verificationContract: undefined,
+      completionContract: undefined,
       completedRequestMilestoneIds: ctx.completedRequestMilestoneIds,
       updatedAt: Date.now(),
       contractFingerprint: ctx.turnExecutionContract.contractFingerprint,
@@ -637,29 +639,19 @@ export class ChatExecutor {
     }
   }
 
-  private resolveWorkflowVerificationContext(_ctx: ExecutionContext): {
-    verificationContract?: WorkflowVerificationContract;
-    completionContract?: ImplementationCompletionContract;
-  } {
-    // Simple agent loop has NO inferred contracts. The model + system
-    // prompt + tools are the entire contract. With no
-    // verificationContract and no completionContract, every downstream
-    // gate (`synchronizeCompletionState`, the placeholder/stub
-    // detector, the `reconcileTerminal*` rewriters) becomes a no-op
-    // and the executor just delivers the model's last assistant
-    // message verbatim. The contract-flow machinery that computed
-    // these was deleted along with `chat-executor-contract-flow.ts`
-    // in Phase 2c of the planner rip-out.
-    return {};
-  }
+  // Cut 4: resolveWorkflowVerificationContext deleted (returned `{}`
+  // unconditionally after the planner-era contract flow was removed).
 
   private synchronizeCompletionState(ctx: ExecutionContext): void {
-    const workflowContext = this.resolveWorkflowVerificationContext(ctx);
+    // Cut 4: simplified — no workflow contract is ever derived for the
+    // flat tool loop, so we just pass undefined contracts through to
+    // resolveWorkflowCompletionState which collapses to a default
+    // completion state derived only from stop reason + tool calls.
     ctx.completionState = resolveWorkflowCompletionState({
       stopReason: ctx.stopReason,
       toolCalls: ctx.allToolCalls,
-      verificationContract: workflowContext.verificationContract,
-      completionContract: workflowContext.completionContract,
+      verificationContract: undefined,
+      completionContract: undefined,
       completedRequestMilestoneIds: ctx.completedRequestMilestoneIds,
       validationCode: ctx.validationCode,
       verifier: {

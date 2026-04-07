@@ -95,9 +95,7 @@ import { createGatewayMessage } from "./message.js";
 import { ChatExecutor } from "../llm/chat-executor.js";
 import { createChatExecutor } from "./chat-executor-factory.js";
 import {
-  didToolCallFail,
   normalizeToolCallArguments,
-  parseToolResultObject,
 } from "../llm/chat-executor-tool-utils.js";
 import {
   getProviderNativeAdvertisedToolNames,
@@ -118,7 +116,6 @@ import type {
   DeterministicPipelineExecutor,
   SkillInjector,
   MemoryRetriever,
-  ToolCallRecord,
   ChatToolRoutingSummary,
 } from "../llm/chat-executor.js";
 import {
@@ -266,7 +263,6 @@ function firstSurfaceSummaryLine(value: unknown): string | undefined {
 import { BackgroundRunNotifier } from "./background-run-notifier.js";
 import { BackgroundRunStore } from "./background-run-store.js";
 import type {
-  BackgroundRunContract,
   PersistedBackgroundRun,
 } from "./background-run-store.js";
 import type {
@@ -290,42 +286,10 @@ import {
   createBackgroundRunToolAfterHook,
   createBackgroundRunWebhookRoute,
 } from "./background-run-wake-adapters.js";
-// Doom autoplay subsystem is scheduled for full excision in the architectural
-// cleanup TODO. The source helpers in `../llm/chat-executor-doom.js` were
-// removed as the first step; these local no-op stubs keep the still-extant
-// autoplay call sites compiling until the daemon.ts-side subsystem is ripped
-// out as its own dedicated cut.
-const inferDoomTurnContract = (_messageText: string):
-  | undefined
-  | {
-      readonly requiresLaunch: boolean;
-      readonly requiresAutonomousPlay: boolean;
-      readonly requiresHoldPosition: boolean;
-      readonly requiresGodMode: boolean;
-    } => undefined;
-const summarizeDoomToolEvidence = (
-  _toolCalls: readonly unknown[],
-): {
-  readonly confirmedLaunch: boolean;
-  readonly confirmedAsyncStart: boolean;
-  readonly verifiedAsyncState: boolean;
-  readonly confirmedHoldPosition: boolean;
-  readonly confirmedActiveObjective: boolean;
-  readonly confirmedGodMode: boolean;
-  readonly executedTools: readonly string[];
-} => ({
-  confirmedLaunch: false,
-  confirmedAsyncStart: false,
-  verifiedAsyncState: false,
-  confirmedHoldPosition: false,
-  confirmedActiveObjective: false,
-  confirmedGodMode: false,
-  executedTools: [],
-});
-const getMissingDoomEvidenceGap = (
-  _contract: ReturnType<typeof inferDoomTurnContract>,
-  _evidence: ReturnType<typeof summarizeDoomToolEvidence>,
-): undefined => undefined;
+// Cut 4.1: Doom autoplay subsystem fully excised. The earlier
+// session left no-op shims here so the rest of the runtime would still
+// compile after `chat-executor-doom.ts` was deleted; this commit
+// removes both the shims and the call sites in `executeWebChatTurn`.
 import { parseBackgroundRunQualityArtifact } from "../eval/background-run-quality.js";
 import type { DelegationBenchmarkSummary } from "../eval/delegation-benchmark.js";
 import {
@@ -344,10 +308,8 @@ import {
   wireAutonomousFeatures as wireAutonomousFeaturesStandalone,
   type FeatureWiringContext,
 } from "./daemon-feature-wiring.js";
-import {
-  blockUntilDoomStopTool,
-  isDoomStopRequest,
-} from "./doom-stop-guard.js";
+// Cut 4.1: doom-stop-guard imports removed alongside the rest of the
+// Doom autoplay subsystem.
 import {
   ObservabilityService,
   setDefaultObservabilityService,
@@ -395,120 +357,8 @@ export {
 // ============================================================================
 
 // DEFAULT_GROK_MODEL imported from ./llm-provider-manager.js (DEFAULT_GROK_FALLBACK_MODEL moved to system-prompt-builder.ts)
-const DEFAULT_DOOM_FIT_RESOLUTION = "RES_1024X768";
 const SIGNAL_SHUTDOWN_FORCE_EXIT_MS = 8_000;
 // STATIC_SUBAGENT_DESKTOP_TOOLS moved to ./subagent-infrastructure.ts
-
-function chooseDoomResolutionForDisplay(width: number, height: number): string {
-  if (width >= 1280 && height >= 720) return "RES_1280X720";
-  if (width >= 1024 && height >= 768) return "RES_1024X768";
-  if (width >= 800 && height >= 600) return "RES_800X600";
-  return "RES_640X480";
-}
-
-function buildDoomAutoplayBackgroundContract(): BackgroundRunContract {
-  return {
-    domain: "generic",
-    kind: "until_stopped",
-    successCriteria: [
-      "The active ViZDoom session is verified and continues making progress under supervision.",
-    ],
-    completionCriteria: [
-      "The user explicitly stops Doom or cancels the background supervision run.",
-    ],
-    blockedCriteria: [
-      "Doom MCP tools cannot verify or control the session after bounded retries.",
-      "The session needs user input that cannot be inferred safely.",
-    ],
-    nextCheckMs: 8_000,
-    heartbeatMs: 15_000,
-    requiresUserStop: true,
-    managedProcessPolicy: { mode: "none" },
-  };
-}
-
-function extractDoomRecoveryObjective(
-  toolCalls: readonly ToolCallRecord[],
-): Record<string, unknown> {
-  for (let index = toolCalls.length - 1; index >= 0; index -= 1) {
-    const toolCall = toolCalls[index];
-    if (
-      !toolCall ||
-      toolCall.name !== "mcp.doom.set_objective" ||
-      toolCall.isError
-    ) {
-      continue;
-    }
-    const objectiveType = toolCall.args.objective_type;
-    if (typeof objectiveType !== "string" || objectiveType.trim().length === 0) {
-      continue;
-    }
-
-    const recoveryObjective: Record<string, unknown> = {
-      objective_type: objectiveType,
-    };
-    if (
-      toolCall.args.params &&
-      typeof toolCall.args.params === "object" &&
-      !Array.isArray(toolCall.args.params)
-    ) {
-      recoveryObjective.params = toolCall.args.params;
-    }
-    if (typeof toolCall.args.priority === "number") {
-      recoveryObjective.priority = toolCall.args.priority;
-    }
-    return recoveryObjective;
-  }
-
-  return {
-    objective_type: "explore",
-    priority: 1,
-  };
-}
-
-function buildDoomAutoplaySupervisionObjective(params: {
-  readonly toolCalls: readonly ToolCallRecord[];
-}): string {
-  const successfulStart = params.toolCalls.find(
-    (toolCall) => toolCall.name === "mcp.doom.start_game" && !toolCall.isError,
-  );
-  const startPayload = successfulStart
-    ? parseToolResultObject(successfulStart.result)
-    : undefined;
-  const evidence = summarizeDoomToolEvidence(params.toolCalls);
-  const recoveryObjective = extractDoomRecoveryObjective(params.toolCalls);
-  const contextLines: string[] = [];
-
-  if (typeof startPayload?.scenario === "string") {
-    contextLines.push("A scenario-based session is already configured.");
-  }
-  if (typeof startPayload?.wad === "string") {
-    contextLines.push("A campaign session is already configured.");
-  }
-  if (evidence.confirmedGodMode) {
-    contextLines.push("Requested invulnerability is already active.");
-  }
-  if (evidence.confirmedHoldPosition) {
-    contextLines.push(
-      "The current session already has a user-requested movement constraint; preserve it unless the user changes the task.",
-    );
-  } else if (evidence.confirmedActiveObjective) {
-    contextLines.push(
-      "A non-idle gameplay objective is already configured; keep it unless verification shows it is no longer progressing.",
-    );
-  }
-
-  return [
-    "Supervise the existing ViZDoom session for this user.",
-    ...contextLines,
-    `Recovery objective JSON: ${JSON.stringify(recoveryObjective)}`,
-    "Use Doom MCP tools for verification and steering instead of shell or desktop process inspection.",
-    "If verification shows no live episode, recover with Doom MCP tools instead of narrating.",
-    "If the executor becomes idle or stalls, restore forward progress with an active objective such as `explore`, or use tactical Doom tools directly.",
-    "If the episode ends or the player dies, use `mcp.doom.new_episode` and continue supervision.",
-    "Keep the session visibly active until the user explicitly stops it.",
-  ].join("\n");
-}
 
 /** Minimum confidence score for injecting learned patterns into conversations. */
 
@@ -5651,8 +5501,9 @@ export class DaemonManager {
     }
 
     webChat.broadcastEvent("chat.inbound", { sessionId: msg.sessionId });
-    const isDoomStopTurn = isDoomStopRequest(msg.content);
-    const doomTurnContract = inferDoomTurnContract(msg.content);
+    // Cut 4.1: Doom autoplay subsystem excised. The runtime no longer
+    // special-cases ViZDoom turns; the model treats `mcp.doom.*` like
+    // any other MCP tool.
 
     const activeBackgroundRun =
       this._backgroundRunSupervisor?.getStatusSnapshot(msg.sessionId);
@@ -5662,7 +5513,7 @@ export class DaemonManager {
           msg.sessionId,
           "Stopped the active background run for this session.",
         );
-        if (!isDoomStopTurn) return;
+        return;
       }
       if (isBackgroundRunPauseRequest(msg.content)) {
         const paused = await this._backgroundRunSupervisor?.pauseRun(
@@ -5712,7 +5563,7 @@ export class DaemonManager {
       }
     }
 
-    if (!isDoomStopTurn && this._backgroundRunSupervisor) {
+    if (this._backgroundRunSupervisor) {
       if (isBackgroundRunStatusRequest(msg.content)) {
         const recentSnapshot =
           await this._backgroundRunSupervisor.getRecentSnapshot(msg.sessionId);
@@ -5748,7 +5599,6 @@ export class DaemonManager {
     }
 
     if (
-      !doomTurnContract &&
       inferBackgroundRunIntent(msg.content) &&
       this._backgroundRunSupervisor
     ) {
@@ -5798,18 +5648,6 @@ export class DaemonManager {
       });
     };
 
-    const requestedDesktopResolution =
-      this._desktopManager?.getHandleBySession(msg.sessionId)?.resolution ??
-      this.gateway?.config.desktop?.resolution;
-    const requestedDoomResolution = requestedDesktopResolution
-      ? chooseDoomResolutionForDisplay(
-          requestedDesktopResolution.width,
-          requestedDesktopResolution.height,
-        )
-      : DEFAULT_DOOM_FIT_RESOLUTION;
-    const doomTurnToolCalls: ToolCallRecord[] = [];
-    let doomStopIssued = false;
-
     const sessionToolHandler = this.createWebChatSessionToolHandler({
       sessionId: msg.sessionId,
       webChat,
@@ -5819,68 +5657,9 @@ export class DaemonManager {
       traceLabel: "webchat",
       traceConfig,
       traceId: turnTraceId,
-      normalizeArgs: (toolName, normalizedArgs) => {
-        if (toolName !== "mcp.doom.start_game") return normalizedArgs;
-        let nextArgs = normalizedArgs;
-        if (
-          doomTurnContract?.requiresAutonomousPlay &&
-          nextArgs.async_player !== true
-        ) {
-          nextArgs = { ...nextArgs, async_player: true };
-        }
-        if (
-          nextArgs.screen_resolution === "RES_1280X720" &&
-          requestedDoomResolution !== "RES_1280X720"
-        ) {
-          nextArgs = {
-            ...nextArgs,
-            screen_resolution: requestedDoomResolution,
-          };
-        }
-        return nextArgs;
-      },
-      beforeHandle: (toolName) => {
-        if (isDoomStopTurn) {
-          const blockedResult = blockUntilDoomStopTool(
-            toolName,
-            doomStopIssued,
-          );
-          if (toolName === "mcp.doom.stop_game" && !blockedResult) {
-            doomStopIssued = true;
-          }
-          if (blockedResult) return blockedResult;
-        }
-        // The contract-guidance pre-call validator was removed in
-        // Phase 2c of the planner rip-out. Doom turns now rely on
-        // the model's own system prompt to select tools in the
-        // right order; the runtime no longer second-guesses.
-        return undefined;
-      },
-      onToolEnd: (toolName, args, result, durationMs) => {
-        doomTurnToolCalls.push({
-          name: toolName,
-          args,
-          result,
-          isError: didToolCallFail(false, result),
-          durationMs,
-        });
-      },
     });
 
-    if (isDoomStopTurn) {
-      await this.executeWebChatDoomStopTurn({
-        msg,
-        webChat,
-        hooks,
-        sessionMgr,
-        sessionToolHandler,
-        memoryBackend,
-        signals,
-      });
-      return;
-    }
-
-    const conversationResult = await this.executeWebChatConversationTurn({
+    await this.executeWebChatConversationTurn({
       msg,
       webChat,
       chatExecutor,
@@ -5897,120 +5676,8 @@ export class DaemonManager {
       traceConfig,
       turnTraceId,
     });
-
-    if (
-      conversationResult &&
-      conversationResult.stopReason === "completed" &&
-      doomTurnContract?.requiresAutonomousPlay &&
-      this._backgroundRunSupervisor
-    ) {
-      const doomEvidence = summarizeDoomToolEvidence(doomTurnToolCalls);
-      if (!getMissingDoomEvidenceGap(doomTurnContract, doomEvidence)) {
-        try {
-          await this._backgroundRunSupervisor.startRun({
-            sessionId: msg.sessionId,
-            objective: buildDoomAutoplaySupervisionObjective({
-              toolCalls: doomTurnToolCalls,
-            }),
-            options: {
-              silent: true,
-              contract: buildDoomAutoplayBackgroundContract(),
-            },
-          });
-        } catch (error) {
-          this.logger.warn("Failed to start Doom background supervision", {
-            sessionId: msg.sessionId,
-            error: toErrorMessage(error),
-          });
-        }
-      }
-    }
-  }
-
-  private async executeWebChatDoomStopTurn(params: {
-    msg: GatewayMessage;
-    webChat: WebChatChannel;
-    hooks: HookDispatcher;
-    sessionMgr: SessionManager;
-    sessionToolHandler: ToolHandler;
-    memoryBackend: MemoryBackend;
-    signals: WebChatSignals;
-  }): Promise<void> {
-    const {
-      msg,
-      webChat,
-      hooks,
-      sessionMgr,
-      sessionToolHandler,
-      memoryBackend,
-      signals,
-    } = params;
-
-    const session = sessionMgr.getOrCreate({
-      channel: "webchat",
-      senderId: msg.sessionId,
-      scope: "dm",
-      workspaceId: "default",
-    });
-
-    signals.signalThinking(msg.sessionId);
-    let content = "Doom stopped.";
-    try {
-      const result = await sessionToolHandler("mcp.doom.stop_game", {});
-      const parsed = parseToolResultObject(result);
-      const error =
-        parsed &&
-        typeof parsed.error === "string" &&
-        parsed.error.trim().length > 0
-          ? parsed.error.trim()
-          : undefined;
-      if (error) {
-        content = `Failed to stop Doom: ${error}`;
-      } else if (parsed?.status === "stopped") {
-        content = "Doom stopped.";
-      } else {
-        content = "Doom stop requested.";
-      }
-    } catch (error) {
-      content = `Failed to stop Doom: ${toErrorMessage(error)}`;
-    } finally {
-      signals.signalIdle(msg.sessionId);
-    }
-
-    sessionMgr.appendMessage(session.id, {
-      role: "user",
-      content: msg.content,
-    });
-    sessionMgr.appendMessage(session.id, { role: "assistant", content });
-
-    await webChat.send({
-      sessionId: msg.sessionId,
-      content,
-    });
-    webChat.broadcastEvent("chat.response", { sessionId: msg.sessionId });
-
-    await hooks.dispatch("message:outbound", {
-      sessionId: msg.sessionId,
-      content,
-      provider: "runtime",
-      userMessage: msg.content,
-      agentResponse: content,
-    });
-
-    try {
-      await memoryBackend.addEntry({
-        sessionId: msg.sessionId,
-        role: "user",
-        content: msg.content,
-      });
-      await memoryBackend.addEntry({
-        sessionId: msg.sessionId,
-        role: "assistant",
-        content,
-      });
-    } catch (error) {
-      this.logger.warn?.("Failed to persist messages to memory:", error);
-    }
+    // Cut 4.1: post-conversation Doom autoplay → background supervision
+    // hand-off has been removed alongside the rest of the Doom subsystem.
   }
 
   private async executeWebChatConversationTurn(params: {

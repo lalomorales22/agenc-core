@@ -28,10 +28,9 @@ import { SHELL_BUILTIN_COMMANDS } from "./chat-executor-constants.js";
 import {
   didToolCallFail,
   extractToolFailureText,
-  normalizeDoomScreenResolution,
   parseToolResultObject,
 } from "./chat-executor-tool-utils.js";
-import { assessExecuteWithAgentResult } from "../utils/delegated-scope-trust.js";
+import {} from "../utils/delegated-scope-trust.js";
 
 const NON_ACTIONABLE_STATEFUL_FALLBACK_REASONS = new Set<LLMStatefulFallbackReason>(["store_disabled"]);
 
@@ -1304,63 +1303,17 @@ function inferRoundRecoveryHint(
   });
   if (!failedManagedStop) return undefined;
 
-  const usedDoomShellStopFallback = roundCalls.some((call) => {
-    if (call.name !== "desktop.bash") return false;
-    const command = String(call.args?.command ?? "");
-    if (!/\b(?:doom|vizdoom)\b/i.test(command)) return false;
-    return /\b(?:ps|pgrep|pkill|kill)\b/i.test(command);
-  });
-  if (!usedDoomShellStopFallback) return undefined;
-
-  return {
-    key: "doom-stop-via-mcp",
-    message:
-      "To stop Doom, call `mcp.doom.stop_game` directly. Do not inspect or kill ViZDoom with " +
-      "`desktop.process_stop`, `kill`, or `pkill`; the running game is owned by the Doom MCP, " +
-      "not the managed desktop-process registry.",
-  };
+  // Cut 4: Doom-specific shell-stop fallback hint removed.
+  return undefined;
 }
 
 export function inferRecoveryHint(
   call: ToolCallRecord,
 ): RecoveryHint | undefined {
   const parsedResult = parseToolResultObject(call.result);
-  if (
-    call.name === "mcp.doom.start_game" &&
-    didToolCallFail(call.isError, call.result) &&
-    typeof call.args?.screen_resolution === "string"
-  ) {
-    const normalizedResolution = normalizeDoomScreenResolution(
-      call.args.screen_resolution,
-    );
-    if (
-      typeof normalizedResolution === "string" &&
-      normalizedResolution !== call.args.screen_resolution
-    ) {
-      return {
-        key: "doom-start-game-invalid-resolution",
-        message:
-          "Doom screen resolutions must use the exact ViZDoom enum string. " +
-          `Retry with \`${normalizedResolution}\` instead of \`${call.args.screen_resolution}\`.`,
-      };
-    }
-  }
-
-  if (
-    call.name === "mcp.doom.start_game" &&
-    !didToolCallFail(call.isError, call.result) &&
-    parsedResult &&
-    parsedResult.status === "running" &&
-    call.args?.async_player === true
-  ) {
-    return {
-      key: "doom-async-start-verify",
-      message:
-        "The async Doom executor started, but you still need evidence before claiming success. " +
-        "Call `mcp.doom.set_objective` with `objective_type: \"hold_position\"` when the task is stationary defense, " +
-        "then verify with `mcp.doom.get_situation_report` or `mcp.doom.get_state`.",
-    };
-  }
+  // Cut 4: Doom-specific recovery hints removed (resolution normalization,
+  // async-start verification reminder). mcp.doom.* tools are now handled
+  // by the model directly with no runtime-side coaching.
 
   if (
     !didToolCallFail(call.isError, call.result) &&
@@ -1437,142 +1390,6 @@ export function inferRecoveryHint(
         "Keep the command in single-run mode (`vitest run` or `vitest --run`). " +
         "If worker strategy matters for the installed Vitest version, use the supported `--pool=<threads|forks>` option or project config instead.",
     };
-  }
-  if (call.name === "execute_with_agent" && parsedResult) {
-    const delegatedScopeAssessment = assessExecuteWithAgentResult({
-      args:
-        call.args && typeof call.args === "object" && !Array.isArray(call.args)
-          ? call.args
-          : undefined,
-      result: call.result,
-    });
-    if (delegatedScopeAssessment?.delegatedScopeTrust === "rejected_invalid_scope") {
-      return {
-        key: "execute-with-agent-invalid-scope",
-        message:
-          "The previous `execute_with_agent` attempt was rejected because delegated scope/root authority was invalid. " +
-          "Do not invent or widen child cwd/workspace roots in the next attempt. " +
-          "Use the parent tool path for trivial cwd/ls introspection, or rely only on runtime-provided delegated scope.",
-      };
-    }
-    const status =
-      typeof parsedResult.status === "string"
-        ? parsedResult.status.trim().toLowerCase()
-        : "";
-    const validationCode =
-      typeof parsedResult.validationCode === "string"
-        ? parsedResult.validationCode.trim().toLowerCase()
-        : "";
-    const decomposition =
-      typeof parsedResult.decomposition === "object" &&
-        parsedResult.decomposition !== null &&
-        !Array.isArray(parsedResult.decomposition)
-        ? parsedResult.decomposition as {
-          phases?: unknown;
-          suggestedSteps?: unknown;
-        }
-        : null;
-    if (status === "needs_decomposition" || decomposition) {
-      const phases = Array.isArray(decomposition?.phases)
-        ? decomposition.phases.filter(
-          (phase): phase is string =>
-            typeof phase === "string" && phase.trim().length > 0,
-        )
-        : [];
-      const suggestedSteps = Array.isArray(decomposition?.suggestedSteps)
-        ? decomposition.suggestedSteps
-            .filter(
-              (entry): entry is { name: string } =>
-                typeof entry === "object" &&
-                entry !== null &&
-                typeof (entry as { name?: unknown }).name === "string" &&
-                (entry as { name: string }).name.trim().length > 0,
-            )
-            .map((entry) => entry.name.trim())
-        : [];
-      const phasesText =
-        phases.length > 0 ? ` (${phases.join(" -> ")})` : "";
-      const splitText =
-        suggestedSteps.length > 0
-          ? ` Suggested split: ${suggestedSteps.join(", ")}.`
-          : "";
-      return {
-        key:
-          `execute-with-agent-needs-decomposition:` +
-          `${phases.join(",")}:${suggestedSteps.join(",")}`,
-        message:
-          `The previous \`execute_with_agent\` objective was too large${phasesText}. ` +
-          "Do not retry the same combined task. Split it into smaller " +
-          "`execute_with_agent` calls that each own one phase with explicit dependencies " +
-          "and distinct acceptance criteria." +
-          splitText,
-      };
-    }
-    if (validationCode === "low_signal_browser_evidence") {
-      return {
-        key: "execute-with-agent-low-signal-browser",
-        message:
-          "The previous `execute_with_agent` attempt used low-signal browser state checks. " +
-          "Retry with concrete browser navigation/snapshot or run_code steps against real URLs or localhost targets. " +
-          "Do not rely on `browser_tabs` or about:blank tab listings as evidence.",
-      };
-    }
-    if (validationCode === "missing_file_mutation_evidence") {
-      return {
-        key: "execute-with-agent-missing-file-mutation",
-        message:
-          "The previous `execute_with_agent` attempt did not create or edit files with real mutation tools. " +
-          "Retry only after explicitly using file-writing tools and naming the changed files in the result.",
-      };
-    }
-    if (validationCode === "missing_required_source_evidence") {
-      return {
-        key: "execute-with-agent-missing-required-source-evidence",
-        message:
-          "The previous `execute_with_agent` attempt wrote derived files without first inspecting the named source artifacts from its delegated input contract. " +
-          "Retry only after reading those source files and preserving the distinction between planned structure and files that actually exist.",
-      };
-    }
-    if (validationCode === "missing_workspace_inspection_evidence") {
-      return {
-        key: "execute-with-agent-missing-workspace-inspection-evidence",
-        message:
-          "The previous `execute_with_agent` attempt updated a derived documentation artifact without first inspecting the current workspace state beyond the target artifact itself. " +
-          "Retry only after collecting concrete repo/layout inspection evidence and grounding the rewrite in that evidence.",
-      };
-    }
-    if (validationCode === "forbidden_phase_action") {
-      return {
-        key: "execute-with-agent-forbidden-phase-action",
-        message:
-          "The previous `execute_with_agent` attempt violated the delegated phase contract by running or claiming a forbidden action for that phase. " +
-          "Retry only with the scoped file-authoring or inspection work, and leave install/build/test verification for the later step.",
-      };
-    }
-    if (validationCode === "blocked_phase_output") {
-      return {
-        key: "execute-with-agent-blocked-phase-output",
-        message:
-          "The previous `execute_with_agent` attempt returned a success-path answer that still said the phase was blocked or could not be completed. " +
-          "Retry only after fixing and verifying the blocking issue, or let the failure propagate instead of presenting the phase as completed.",
-      };
-    }
-    if (validationCode === "contradictory_completion_claim") {
-      return {
-        key: "execute-with-agent-contradictory-completion",
-        message:
-          "The previous `execute_with_agent` attempt claimed completion while still admitting unresolved mismatches or follow-up work. " +
-          "Retry only after fixing and verifying the issue, or report the phase as blocked instead of successful.",
-      };
-    }
-    if (validationCode === "expected_json_object") {
-      return {
-        key: "execute-with-agent-expected-json-object",
-        message:
-          "The previous `execute_with_agent` attempt returned the wrong shape. " +
-          "Retry with a single JSON object only, with no markdown or surrounding prose.",
-      };
-    }
   }
   if (
     isDesktopSessionUnavailable(failureTextLower) &&
