@@ -2245,55 +2245,6 @@ describe("SubAgentManager", () => {
       }
     });
 
-    it("persists forced exact child outputs into continuation history", async () => {
-      const observedMessages: LLMMessage[][] = [];
-      const provider = makeSequencedLLMProvider(
-        [
-          "Memorized.",
-          "TOKEN=NEON-AXIS-17",
-        ],
-        observedMessages,
-      );
-      const createContext = vi.fn(async () => {
-        const context = makeMockContext();
-        return {
-          ...context,
-          llmProvider: provider,
-        };
-      });
-      const manager = new SubAgentManager(
-        makeManagerConfig({ createContext }),
-      );
-
-      const firstSessionId = await manager.spawn({
-        parentSessionId: "parent-1",
-        task: "Child endurance F2 exact task",
-        prompt:
-          "Task: Child endurance F2 exact task\nObjective: In the child agent only, memorize token TOKEN=NEON-AXIS-17 for later recall, do not reveal it now, and answer exactly CHILD-STORED-F2.",
-      });
-      await settle();
-
-      expect(manager.getResult(firstSessionId)?.output).toBe("CHILD-STORED-F2");
-
-      const secondSessionId = await manager.spawn({
-        parentSessionId: "parent-1",
-        task: "Child endurance F2 exact task reuse session",
-        prompt:
-          "Task: Child endurance F2 exact task reuse session\nObjective: Reuse the same child session from F2. Recall the memorized child token and return exactly TOKEN=NEON-AXIS-17 without any extra words.",
-        continuationSessionId: firstSessionId,
-      });
-      await settle();
-
-      expect(secondSessionId).toBe(firstSessionId);
-      expect(manager.getResult(secondSessionId)?.output).toBe("TOKEN=NEON-AXIS-17");
-      expect(observedMessages[1]).toEqual(
-        expect.arrayContaining([
-          { role: "user", content: "Task: Child endurance F2 exact task\nObjective: In the child agent only, memorize token TOKEN=NEON-AXIS-17 for later recall, do not reveal it now, and answer exactly CHILD-STORED-F2." },
-          { role: "assistant", content: "CHILD-STORED-F2" },
-        ]),
-      );
-    });
-
     it("finds the latest successful child session for a parent", async () => {
       vi.useFakeTimers();
       try {

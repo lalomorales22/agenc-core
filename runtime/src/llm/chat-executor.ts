@@ -254,12 +254,8 @@ import {
   extractMessageText,
   truncateText,
   sanitizeFinalContent,
-  reconcileDirectShellObservationContent,
-  reconcileExactResponseContract,
-  reconcileTerminalCompletionStateContent,
-  reconcileVerifiedFileWorkflowContent,
-  reconcileStructuredToolOutcome,
-  reconcileTerminalFailureContent,
+  // Cut 2: reconcile* helpers no longer imported — finalContent
+  // post-processing chain removed.
   normalizeHistory,
   normalizeHistoryForStatefulReconciliation,
   toStatefulReconciliationMessage,
@@ -558,32 +554,12 @@ export class ChatExecutor {
     // Finalization, trajectory recording, bandit outcome
     const { plannerSummary, durationMs } = this.recordOutcomeAndFinalize(ctx);
 
-    // Sanitize + assemble result
+    // Cut 2: the planner-era reconcile* post-processing chain has been
+    // removed. The flat tool-loop now relies on the model's own response
+    // text without runtime-side narrative reconciliation against expected
+    // workflow shapes. The completionProgress block is preserved for the
+    // result envelope but no longer feeds back into finalContent rewriting.
     ctx.finalContent = sanitizeFinalContent(ctx.finalContent);
-    ctx.finalContent = reconcileDirectShellObservationContent(
-      ctx.finalContent,
-      ctx.allToolCalls,
-    );
-    ctx.finalContent = reconcileVerifiedFileWorkflowContent(
-      ctx.finalContent,
-      ctx.allToolCalls,
-    );
-    ctx.finalContent = reconcileExactResponseContract(
-      ctx.finalContent,
-      ctx.allToolCalls,
-      ctx.messageText,
-      {
-        metadata: ctx.message.metadata,
-        forceLiteralWhenNoToolEvidence:
-          plannerSummary?.routeReason === "exact_response_turn" ||
-          plannerSummary?.routeReason === "dialogue_memory_turn",
-      },
-    );
-    ctx.finalContent = reconcileStructuredToolOutcome(
-      ctx.finalContent,
-      ctx.allToolCalls,
-      ctx.messageText,
-    );
     const workflowContext = this.resolveWorkflowVerificationContext(ctx);
     const completionProgress = deriveWorkflowProgressSnapshot({
       stopReason: ctx.stopReason,
@@ -601,22 +577,6 @@ export class ChatExecutor {
         overall: ctx.plannerSummaryState.subagentVerification.overall,
       },
     });
-
-    ctx.finalContent = reconcileTerminalFailureContent({
-      content: ctx.finalContent,
-      stopReason: ctx.stopReason,
-      stopReasonDetail: ctx.stopReasonDetail,
-      toolCalls: ctx.allToolCalls,
-    });
-    ctx.finalContent = reconcileTerminalCompletionStateContent({
-      content: ctx.finalContent,
-      completionState: ctx.completionState,
-      stopReason: ctx.stopReason,
-      stopReasonDetail: ctx.stopReasonDetail,
-      toolCalls: ctx.allToolCalls,
-      completionProgress,
-    });
-    ctx.finalContent = sanitizeFinalContent(ctx.finalContent);
 
     return {
       content: ctx.finalContent,
