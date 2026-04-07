@@ -254,12 +254,8 @@ import {
   extractMessageText,
   truncateText,
   sanitizeFinalContent,
-  reconcileDirectShellObservationContent,
-  reconcileExactResponseContract,
-  reconcileTerminalCompletionStateContent,
-  reconcileVerifiedFileWorkflowContent,
-  reconcileStructuredToolOutcome,
-  reconcileTerminalFailureContent,
+  // Cut 2: reconcile* helpers no longer imported — finalContent
+  // post-processing chain removed.
   normalizeHistory,
   normalizeHistoryForStatefulReconciliation,
   toStatefulReconciliationMessage,
@@ -523,34 +519,10 @@ export class ChatExecutor {
     // now flows through `executeToolCallLoop` directly. See PR #188 for
     // the simpleAgentLoop flag that gated this for Phase 1.
 
-    // Direct path: initial LLM call + tool loop
-    if (!ctx.plannerHandled) {
-      const plannerFallbackBarrier = this.resolvePlannerFallbackBarrier(ctx);
-      if (plannerFallbackBarrier) {
-        this.emitExecutionTrace(ctx, {
-          type: "planner_path_finished",
-          phase: "planner",
-          callIndex: ctx.callIndex,
-          payload: {
-            routeReason: ctx.plannerSummaryState.routeReason,
-            stopReason: "validation_error",
-            stopReasonDetail: plannerFallbackBarrier.stopReasonDetail,
-            diagnostics: ctx.plannerSummaryState.diagnostics,
-            handled: true,
-            enforcement: plannerFallbackBarrier.enforcement,
-          },
-        });
-        this.setStopReason(
-          ctx,
-          "validation_error",
-          plannerFallbackBarrier.stopReasonDetail,
-        );
-        ctx.finalContent = plannerFallbackBarrier.finalContent;
-        ctx.plannerHandled = true;
-      } else {
-        await this.executeToolCallLoop(ctx);
-      }
-    }
+    // Direct path: initial LLM call + tool loop. The planner subsystem
+    // was deleted in Phase 2; `plannerHandled` is always false here and
+    // `resolvePlannerFallbackBarrier` (now removed) was a no-op.
+    await this.executeToolCallLoop(ctx);
 
     this.checkRequestTimeout(ctx, "finalization");
     this.synchronizeCompletionState(ctx);
@@ -558,32 +530,12 @@ export class ChatExecutor {
     // Finalization, trajectory recording, bandit outcome
     const { plannerSummary, durationMs } = this.recordOutcomeAndFinalize(ctx);
 
-    // Sanitize + assemble result
+    // Cut 2: the planner-era reconcile* post-processing chain has been
+    // removed. The flat tool-loop now relies on the model's own response
+    // text without runtime-side narrative reconciliation against expected
+    // workflow shapes. The completionProgress block is preserved for the
+    // result envelope but no longer feeds back into finalContent rewriting.
     ctx.finalContent = sanitizeFinalContent(ctx.finalContent);
-    ctx.finalContent = reconcileDirectShellObservationContent(
-      ctx.finalContent,
-      ctx.allToolCalls,
-    );
-    ctx.finalContent = reconcileVerifiedFileWorkflowContent(
-      ctx.finalContent,
-      ctx.allToolCalls,
-    );
-    ctx.finalContent = reconcileExactResponseContract(
-      ctx.finalContent,
-      ctx.allToolCalls,
-      ctx.messageText,
-      {
-        metadata: ctx.message.metadata,
-        forceLiteralWhenNoToolEvidence:
-          plannerSummary?.routeReason === "exact_response_turn" ||
-          plannerSummary?.routeReason === "dialogue_memory_turn",
-      },
-    );
-    ctx.finalContent = reconcileStructuredToolOutcome(
-      ctx.finalContent,
-      ctx.allToolCalls,
-      ctx.messageText,
-    );
     const workflowContext = this.resolveWorkflowVerificationContext(ctx);
     const completionProgress = deriveWorkflowProgressSnapshot({
       stopReason: ctx.stopReason,
@@ -601,22 +553,6 @@ export class ChatExecutor {
         overall: ctx.plannerSummaryState.subagentVerification.overall,
       },
     });
-
-    ctx.finalContent = reconcileTerminalFailureContent({
-      content: ctx.finalContent,
-      stopReason: ctx.stopReason,
-      stopReasonDetail: ctx.stopReasonDetail,
-      toolCalls: ctx.allToolCalls,
-    });
-    ctx.finalContent = reconcileTerminalCompletionStateContent({
-      content: ctx.finalContent,
-      completionState: ctx.completionState,
-      stopReason: ctx.stopReason,
-      stopReasonDetail: ctx.stopReasonDetail,
-      toolCalls: ctx.allToolCalls,
-      completionProgress,
-    });
-    ctx.finalContent = sanitizeFinalContent(ctx.finalContent);
 
     return {
       content: ctx.finalContent,
@@ -734,51 +670,9 @@ export class ChatExecutor {
   }
 
 
-  private resolvePlannerFallbackBarrier(
-    ctx: ExecutionContext,
-  ):
-    | {
-      readonly stopReasonDetail: string;
-      readonly finalContent: string;
-      readonly enforcement:
-        | "executor_level_planner_veto_barrier"
-        | "executor_level_planner_parse_barrier";
-    }
-    | undefined {
-    if (!ctx.plannerImplementationFallbackBlocked || ctx.plannerHandled) {
-      return undefined;
-    }
-    const delegationDecision = ctx.plannerSummaryState.delegationDecision;
-    if (delegationDecision && delegationDecision.shouldDelegate === false && ctx.plannedSubagentSteps > 0) {
-      return {
-        stopReasonDetail:
-          "Planner produced an implementation-scoped delegated plan, but runtime delegation admission rejected it. Inline legacy fallback is disabled for this task class.",
-        finalContent:
-          "Planner produced an implementation-scoped delegated plan, " +
-          `but runtime delegation admission rejected it (${ctx.plannerSummaryState.delegationDecision?.reason ?? "delegation_veto"}). ` +
-          "Inline legacy fallback is disabled for this task class; re-plan the work with a single-owner execution contract or provide an explicit workflow verification contract.",
-        enforcement: "executor_level_planner_veto_barrier",
-      };
-    }
-    if (
-      ctx.plannerSummaryState.routeReason === "planner_parse_failed" &&
-      ctx.plannerSummaryState.diagnostics.some((diagnostic) =>
-        diagnostic.code === "planner_step_contract_retry" ||
-        diagnostic.code === "planner_required_orchestration_retry" ||
-        diagnostic.code === "planner_parse_contract_retry"
-      )
-    ) {
-      return {
-        stopReasonDetail:
-          "Planner could not produce a valid delegated execution plan after runtime validation retries. Inline legacy fallback is disabled for this task class.",
-        finalContent:
-          "Planner could not produce a valid delegated execution plan after runtime validation retries. " +
-          "Inline legacy fallback is disabled for this task class; re-plan the work with a single-owner execution contract or provide an explicit workflow verification contract.",
-        enforcement: "executor_level_planner_parse_barrier",
-      };
-    }
-    return undefined;
-  }
+  // resolvePlannerFallbackBarrier removed in Cut 2 — the planner subsystem
+  // was deleted in Phase 2 and the barrier always returned undefined after
+  // that, since `plannerImplementationFallbackBlocked` is never set true.
 
   private timeoutDetail(
     stage: string,
