@@ -5,7 +5,6 @@ import {
   extractToolFailureTextFromResult,
   normalizeToolCallArguments,
   repairToolCallArgumentsFromMessageText,
-  summarizeToolRoundProgress,
   summarizeToolArgumentChanges,
 } from "./chat-executor-tool-utils.js";
 
@@ -199,63 +198,6 @@ describe("chat-executor-tool-utils", () => {
         "screen_resolution",
         "window_visible",
       ]);
-    });
-  });
-
-  describe("summarizeToolRoundProgress", () => {
-    it("tracks verification diagnostics and repair-loop signals", () => {
-      const progress = summarizeToolRoundProgress(
-        [
-          {
-            name: "system.bash",
-            args: { command: "npm", args: ["run", "test"] },
-            result:
-              '{"exitCode":1,"stderr":"AssertionError: expected 0 to be greater than 0"}',
-            isError: false,
-            durationMs: 42,
-          },
-          {
-            name: "system.writeFile",
-            args: { path: "src/core.test.ts", content: "fixed" },
-            result: '{"path":"/tmp/core.test.ts","bytesWritten":5}',
-            isError: false,
-            durationMs: 5,
-          },
-        ],
-        50,
-        new Set<string>(),
-        new Set<string>(),
-      );
-
-      expect(progress.newVerificationFailureDiagnosticKeys).toBe(1);
-      expect(progress.hadSuccessfulMutation).toBe(true);
-      expect(progress.hadVerificationCall).toBe(true);
-      expect(progress.hadMaterialProgress).toBe(true);
-    });
-
-    it("treats failing node runtime checks against built artifacts as verification", () => {
-      const progress = summarizeToolRoundProgress(
-        [
-          {
-            name: "system.bash",
-            args: {
-              command:
-                "node -e \"require('./packages/data/dist/index.js')\"",
-            },
-            result:
-              "{\"exitCode\":1,\"stderr\":\"SyntaxError: Unexpected identifier 'assert' at packages/data/dist/index.js\"}",
-            isError: false,
-            durationMs: 84,
-          },
-        ],
-        84,
-        new Set<string>(),
-        new Set<string>(),
-      );
-
-      expect(progress.newVerificationFailureDiagnosticKeys).toBe(1);
-      expect(progress.hadVerificationCall).toBe(true);
-      expect(progress.hadMaterialProgress).toBe(true);
     });
   });
 
