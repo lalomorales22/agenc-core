@@ -28,7 +28,6 @@ import { SHELL_BUILTIN_COMMANDS } from "./chat-executor-constants.js";
 import {
   didToolCallFail,
   extractToolFailureText,
-  normalizeDoomScreenResolution,
   parseToolResultObject,
 } from "./chat-executor-tool-utils.js";
 import {} from "../utils/delegated-scope-trust.js";
@@ -1304,63 +1303,17 @@ function inferRoundRecoveryHint(
   });
   if (!failedManagedStop) return undefined;
 
-  const usedDoomShellStopFallback = roundCalls.some((call) => {
-    if (call.name !== "desktop.bash") return false;
-    const command = String(call.args?.command ?? "");
-    if (!/\b(?:doom|vizdoom)\b/i.test(command)) return false;
-    return /\b(?:ps|pgrep|pkill|kill)\b/i.test(command);
-  });
-  if (!usedDoomShellStopFallback) return undefined;
-
-  return {
-    key: "doom-stop-via-mcp",
-    message:
-      "To stop Doom, call `mcp.doom.stop_game` directly. Do not inspect or kill ViZDoom with " +
-      "`desktop.process_stop`, `kill`, or `pkill`; the running game is owned by the Doom MCP, " +
-      "not the managed desktop-process registry.",
-  };
+  // Cut 4: Doom-specific shell-stop fallback hint removed.
+  return undefined;
 }
 
 export function inferRecoveryHint(
   call: ToolCallRecord,
 ): RecoveryHint | undefined {
   const parsedResult = parseToolResultObject(call.result);
-  if (
-    call.name === "mcp.doom.start_game" &&
-    didToolCallFail(call.isError, call.result) &&
-    typeof call.args?.screen_resolution === "string"
-  ) {
-    const normalizedResolution = normalizeDoomScreenResolution(
-      call.args.screen_resolution,
-    );
-    if (
-      typeof normalizedResolution === "string" &&
-      normalizedResolution !== call.args.screen_resolution
-    ) {
-      return {
-        key: "doom-start-game-invalid-resolution",
-        message:
-          "Doom screen resolutions must use the exact ViZDoom enum string. " +
-          `Retry with \`${normalizedResolution}\` instead of \`${call.args.screen_resolution}\`.`,
-      };
-    }
-  }
-
-  if (
-    call.name === "mcp.doom.start_game" &&
-    !didToolCallFail(call.isError, call.result) &&
-    parsedResult &&
-    parsedResult.status === "running" &&
-    call.args?.async_player === true
-  ) {
-    return {
-      key: "doom-async-start-verify",
-      message:
-        "The async Doom executor started, but you still need evidence before claiming success. " +
-        "Call `mcp.doom.set_objective` with `objective_type: \"hold_position\"` when the task is stationary defense, " +
-        "then verify with `mcp.doom.get_situation_report` or `mcp.doom.get_state`.",
-    };
-  }
+  // Cut 4: Doom-specific recovery hints removed (resolution normalization,
+  // async-start verification reminder). mcp.doom.* tools are now handled
+  // by the model directly with no runtime-side coaching.
 
   if (
     !didToolCallFail(call.isError, call.result) &&

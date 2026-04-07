@@ -30,15 +30,10 @@ const NON_JSON_FAILURE_PREFIXES = [
   "error executing tool",
   "tool not found:",
 ];
-const DOOM_VALIDATION_FAILURE_RE =
-  /^unknown\s+(?:resolution|screen resolution|scenario|map|skill(?:\s+level)?|wad)\b.*\bvalid:/i;
-const DOOM_RUNTIME_FAILURE_RE =
-  /^(?:executor not running\b|no game is running\b|game is not running\b)/i;
+// Cut 4: Doom-specific failure regexes and resolution constants removed.
 const SHELL_EXECUTION_ANOMALY_RE =
   /(?:^|\n)(?:[^:\n]+:\s+line\s+\d+:\s+)?(?:(?:ba|z|k)?sh|cd|pushd|popd|source|\.)[^:\n]*:\s+.*(?:no such file or directory|command not found|not found|permission denied|not a directory)/i;
-const DOOM_SCREEN_RESOLUTION_RE = /^(?:RES_)?(\d{2,4})[xX](\d{2,4})$/i;
 const NULLISH_STRING_RE = /^(?:null|none|undefined)$/i;
-const DEFAULT_VISIBLE_DOOM_SCREEN_RESOLUTION = "RES_1280X720";
 const COLLABORATION_PAYOUT_MODES = new Set(["fixed", "weighted", "milestone"]);
 
 function truncateText(value: string, maxChars: number): string {
@@ -274,8 +269,7 @@ function isLikelyFailureText(result: string): boolean {
   if (text.length === 0) return false;
   if (text.startsWith("mcp tool \"") && text.includes("\" failed:")) return true;
   if (text.includes("requires desktop session")) return true;
-  if (DOOM_VALIDATION_FAILURE_RE.test(result)) return true;
-  if (DOOM_RUNTIME_FAILURE_RE.test(result)) return true;
+  // Cut 4: Doom-specific failure regexes removed.
   return NON_JSON_FAILURE_PREFIXES.some((prefix) => text.startsWith(prefix));
 }
 
@@ -355,63 +349,20 @@ export function parseToolCallArguments(
   }
 }
 
-export function normalizeDoomScreenResolution(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined;
-  const trimmed = value.trim();
-  if (trimmed.length === 0) return trimmed;
-  const match = trimmed.match(DOOM_SCREEN_RESOLUTION_RE);
-  if (!match) return trimmed;
-  return `RES_${match[1]}X${match[2]}`;
-}
+// Cut 4: normalizeDoomScreenResolution removed (Doom autoplay subsystem
+// excised). mcp.doom.start_game now passes through normalizeToolCallArguments
+// without any Doom-specific resolution rewriting.
 
 export function normalizeToolCallArguments(
   toolName: string,
   args: Record<string, unknown>,
 ): Record<string, unknown> {
-  const normalizedFilesystemArgs = normalizeFilesystemToolCallArguments(
-    toolName,
-    args,
-  );
-  if (toolName !== "mcp.doom.start_game") return normalizedFilesystemArgs;
-
-  let nextArgs = normalizedFilesystemArgs;
-  const normalizedResolution = normalizeDoomScreenResolution(
-    args.screen_resolution,
-  );
-  if (
-    typeof normalizedResolution === "string" &&
-    normalizedResolution !== args.screen_resolution
-  ) {
-    nextArgs = {
-      ...nextArgs,
-      screen_resolution: normalizedResolution,
-    };
-  }
-
-  if (nextArgs.screen_resolution === undefined) {
-    if (nextArgs === args) nextArgs = { ...args };
-    nextArgs.screen_resolution = DEFAULT_VISIBLE_DOOM_SCREEN_RESOLUTION;
-  }
-
-  if (nextArgs.window_visible !== true) {
-    if (nextArgs === args) nextArgs = { ...args };
-    nextArgs.window_visible = true;
-  }
-
-  if (nextArgs.render_hud !== true) {
-    if (nextArgs === args) nextArgs = { ...args };
-    nextArgs.render_hud = true;
-  }
-
-  if (
-    typeof nextArgs.recording_path === "string" &&
-    NULLISH_STRING_RE.test(nextArgs.recording_path.trim())
-  ) {
-    if (nextArgs === args) nextArgs = { ...args };
-    delete nextArgs.recording_path;
-  }
-
-  return nextArgs;
+  // Cut 4: mcp.doom.start_game arg-rewriting (resolution normalization,
+  // window_visible defaulting, render_hud defaulting, recording_path
+  // null-stripping) removed alongside the rest of the Doom autoplay
+  // subsystem. Filesystem path normalization remains.
+  void NULLISH_STRING_RE; // retained for symmetry; other args paths may use it
+  return normalizeFilesystemToolCallArguments(toolName, args);
 }
 
 const TOOL_ARG_ALIASES: Readonly<Record<string, Readonly<Record<string, string>>>> = {

@@ -660,10 +660,7 @@ export async function executeSingleToolCall(
   );
 
   if (abortRound) return "abort_round";
-  if (exec.toolFailed && toolCall.name === "mcp.doom.start_game") {
-    // Downstream Doom setup calls depend on a live game/executor.
-    return "end_round";
-  }
+  // Cut 4: mcp.doom.start_game end-round shortcut removed.
   return "processed";
 }
 
