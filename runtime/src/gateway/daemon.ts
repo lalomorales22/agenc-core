@@ -3178,6 +3178,9 @@ export class DaemonManager {
       recordToolRoutingOutcome: () => {
         /* no-op: static routing, nothing to record */
       },
+      subAgentManager: this._subAgentManager,
+      verifierService: this._delegationVerifierService,
+      agentDefinitions: this._agentDefinitions,
     };
   }
 
@@ -5721,6 +5724,9 @@ export class DaemonManager {
           this._subagentActivityTraceBySession.delete(msg.sessionId);
           this._latestDelegationSurfaceContextBySession.delete(msg.sessionId);
         },
+        subAgentManager: this._subAgentManager,
+        verifierService: this._delegationVerifierService,
+        agentDefinitions: this._agentDefinitions,
       });
     } finally {
       this._foregroundSessionLocks.delete(msg.sessionId);

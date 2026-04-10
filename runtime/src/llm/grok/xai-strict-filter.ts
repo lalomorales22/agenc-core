@@ -72,6 +72,21 @@ import type { LLMFailureClass, LLMPipelineStopReason } from "../policy.js";
  * top-level key not in this set instead of silently stripping it the way
  * `sanitizeToDocumentedXaiResponsesParams()` does.
  */
+/**
+ * Documented maximum `tools` array length for xAI /v1/responses. Source:
+ * developers/rest-api-reference/inference/chat Responses API section:
+ * "A max of 128 tools are supported."
+ *
+ * The runtime enforces this in two places: the Grok adapter's
+ * `buildParams()` auto-trims the tool array to this cap BEFORE the
+ * strict filter runs (so agents with large tool catalogs stay
+ * functional), and `validateXaiRequestPreFlight()` throws on any
+ * request whose tools array still exceeds this after the auto-trim
+ * (defense in depth against a regression that bypasses the adapter
+ * trim).
+ */
+export const XAI_RESPONSES_MAX_TOOL_COUNT = 128;
+
 export const DOCUMENTED_XAI_RESPONSES_REQUEST_FIELDS: ReadonlySet<string> = new Set([
   "include",
   "input",
@@ -491,6 +506,26 @@ export function validateXaiRequestPreFlight(
   //    function tools require the FLAT shape (xAI Responses) not the
   //    legacy nested {function:{...}} shape (Chat Completions).
   const tools = Array.isArray(params.tools) ? params.tools : [];
+  // Documented maximum tool array length per
+  // developers/rest-api-reference/inference/chat (Responses API): "A max
+  // of 128 tools are supported." AgenC was previously sending 129 which
+  // silently passed through xAI's 200-level validation but potentially
+  // contributed to undefined downstream decoder behavior. Fail closed
+  // at the boundary so the runtime cannot exceed the contract. The
+  // Grok adapter also auto-trims to this cap in buildParams() before
+  // this validator runs, so in normal operation this throw is a
+  // defense-in-depth against a regression that bypasses the adapter
+  // trim.
+  if (tools.length > XAI_RESPONSES_MAX_TOOL_COUNT) {
+    throw new XaiUndocumentedFieldError(
+      "tools",
+      `has ${tools.length} entries but the xAI Responses API documents a ` +
+        `maximum of ${XAI_RESPONSES_MAX_TOOL_COUNT} tools per request ` +
+        `(developers/rest-api-reference/inference/chat). Sending more than ` +
+        `${XAI_RESPONSES_MAX_TOOL_COUNT} violates the documented contract ` +
+        `even if the request returns HTTP 200.`,
+    );
+  }
   for (let i = 0; i < tools.length; i++) {
     const tool = tools[i];
     if (!tool || typeof tool !== "object") {
@@ -590,7 +625,8 @@ export interface XaiResponseAnomaly {
     | "silent_tool_drop_promised_in_text"
     | "model_silently_aliased"
     | "incomplete_response"
-    | "failed_response";
+    | "failed_response"
+    | "truncated_response_mid_sentence";
   readonly severity: "error" | "warn";
   readonly message: string;
   readonly evidence: Record<string, unknown>;
@@ -620,6 +656,65 @@ export interface XaiResponseAnomaly {
  */
 const PROMISE_LANGUAGE_RE =
   /\b(?:I\s+will\s+(?:call|invoke|run|execute)|I[''']?ll\s+(?:call|invoke|run|execute)|now\s+(?:executing|running|invoking|calling)|continuing\s+with\s+(?:tool|the\s+tool|tools)|next,?\s+I[''']?ll\s+(?:call|invoke|run|execute)|let\s+me\s+(?:run|call|invoke|execute)|going\s+to\s+(?:call|run|invoke|execute))/i;
+
+/**
+ * Characters that legitimately end a finished natural-language response.
+ * Used by the mid-sentence truncation detector to decide whether the
+ * model's final assistant message ends on a complete thought or was
+ * cut off mid-stream by xAI's server. Includes ASCII sentence enders,
+ * closing brackets, closing quotes, ellipsis, and closing code-fence
+ * backtick. A message that ends on any of these is considered complete
+ * for the purposes of the truncation detector. Everything else (letters,
+ * digits, hyphens, commas, mid-word breaks, orphan backticks, etc.) is
+ * treated as a probable truncation when paired with the other trigger
+ * conditions.
+ */
+const TERMINAL_PUNCTUATION_RE = /[.!?)\]}"'`…]$/;
+
+/**
+ * True if `text` (after trailing-whitespace trim) ends with a documented
+ * terminal punctuation character OR a closing triple-backtick code fence.
+ * Empty strings are treated as complete (no truncation to detect).
+ */
+function endsWithTerminalPunctuation(text: string): boolean {
+  const trimmed = text.replace(/\s+$/u, "");
+  if (trimmed.length === 0) return true;
+  if (trimmed.endsWith("```")) return true;
+  return TERMINAL_PUNCTUATION_RE.test(trimmed);
+}
+
+/**
+ * Count `function_call_output` items in the request input array. The
+ * xAI mid-sentence-truncation bug triggers only when the input contains
+ * prior tool turn history — i.e. at least one `function_call_output`.
+ * Requests without any tool-turn history don't reach the buggy decoder
+ * state, so the detector only fires when this count is > 0.
+ */
+function countFunctionCallOutputInInput(input: unknown): number {
+  if (!Array.isArray(input)) return 0;
+  let count = 0;
+  for (const item of input) {
+    if (
+      item &&
+      typeof item === "object" &&
+      (item as { type?: unknown }).type === "function_call_output"
+    ) {
+      count++;
+    }
+  }
+  return count;
+}
+
+/**
+ * Resolve the effective `tool_choice` value for a request. `undefined`
+ * defaults to `"auto"` per xAI docs (developers/tools/function-calling).
+ */
+function effectiveToolChoice(value: unknown): string | object {
+  if (value === undefined) return "auto";
+  if (typeof value === "string") return value;
+  if (typeof value === "object" && value !== null) return value;
+  return "auto";
+}
 
 /**
  * Extract all text the model produced in this turn — both `message` block
@@ -807,7 +902,104 @@ export function validateXaiResponsePostFlight(params: {
     });
   }
 
-  // 4. Failed responses. Per developers/debugging, status: "failed" means
+  // 4. Mid-sentence truncation (xAI /v1/responses decoder bug on
+  //    grok-4-1-fast-non-reasoning and related variants). Verified via
+  //    13-run curl reproduction matrix captured in report.txt §4.4.
+  //
+  //    Trigger conditions (all must hold):
+  //      a. response.status === "completed"
+  //      b. response.incomplete_details is null/undefined (xAI does NOT
+  //         flag the truncation itself)
+  //      c. sent tools.length > 0
+  //      d. effective tool_choice is "auto" (the buggy decoder path)
+  //      e. input has at least one prior function_call_output item
+  //         (bug only fires after a turn has tool-call history)
+  //      f. response has zero tool-call output blocks (the model
+  //         sampled into text, not another tool call)
+  //      g. message text length > 0
+  //      h. message text does NOT end with terminal punctuation (it
+  //         was cut off mid-word / mid-sentence / mid-list-item)
+  //
+  //    The adapter catches this anomaly and auto-retries the same
+  //    request with tool_choice="none". The matrix proves the retry
+  //    returns a complete (~291 token) coherent response where the
+  //    original returned a truncated (~34 token) mid-list cutoff.
+  //
+  //    severity: "warn" — the adapter handles the retry. If the retry
+  //    path did not run (e.g. stored-response retrieval), the anomaly
+  //    is still surfaced as a warning for observability.
+  const responseStatus = (params.response as { status?: unknown }).status;
+  const responseIncomplete = (
+    params.response as { incomplete_details?: unknown }
+  ).incomplete_details;
+  const effChoice = effectiveToolChoice(
+    (params.request as { tool_choice?: unknown }).tool_choice,
+  );
+  const priorFnOutputCount = countFunctionCallOutputInInput(
+    (params.request as { input?: unknown }).input,
+  );
+  const usage = (params.response as { usage?: unknown }).usage;
+  const outputTokens =
+    usage && typeof usage === "object"
+      ? Number((usage as { output_tokens?: unknown }).output_tokens) || 0
+      : 0;
+  // Two variants of the same xAI decoder bug:
+  //   (a) Mid-sentence truncation: text present but cut off mid-word
+  //   (b) Empty-output truncation: output_tokens === 0, output === []
+  // Both share the same trigger shape (completed + null incomplete +
+  // tools + auto + prior fn_output + zero tool-call blocks). Variant
+  // (b) was not caught in PR #306 because the condition required
+  // messageText.length > 0. Live trigger: session 5e9bcf4d... at
+  // 03:31:42 call_6 returned output:[] with 0 tokens while the prior
+  // calls (2-5) were all productive writeFile sequences.
+  const isMidSentenceTruncation =
+    messageText.length > 0 && !endsWithTerminalPunctuation(messageText);
+  const isEmptyOutputTruncation =
+    messageText.length === 0 && outputTokens === 0;
+  if (
+    responseStatus === "completed" &&
+    (responseIncomplete === null || responseIncomplete === undefined) &&
+    sentTools.length > 0 &&
+    effChoice === "auto" &&
+    priorFnOutputCount > 0 &&
+    toolCallBlockCount === 0 &&
+    (isMidSentenceTruncation || isEmptyOutputTruncation)
+  ) {
+    anomalies.push({
+      code: "truncated_response_mid_sentence",
+      severity: "warn",
+      message:
+        isEmptyOutputTruncation
+          ? `xAI /v1/responses returned status="completed" with ` +
+            `incomplete_details=null and output_tokens=0 (completely empty ` +
+            `output). This is the zero-token variant of the xAI decoder ` +
+            `tool-mode → text-mode transition bug: a turn with ` +
+            `${priorFnOutputCount} prior function_call_output items, ` +
+            `${sentTools.length} tools in scope, and tool_choice="auto" ` +
+            `produced zero output. The adapter will retry with ` +
+            `tool_choice="none".`
+          : `xAI /v1/responses returned status="completed" with ` +
+            `incomplete_details=null, but the text-only response ends without ` +
+            `terminal punctuation after ${outputTokens} output tokens. ` +
+            `This matches the documented xAI decoder tool-mode → text-mode ` +
+            `transition bug (report.txt §4.4): a turn with ${priorFnOutputCount} ` +
+            `prior function_call_output items, ${sentTools.length} tools in ` +
+            `scope, and tool_choice="auto" silently truncates mid-sentence when ` +
+            `the model samples text instead of another tool call. The adapter ` +
+            `will retry this request with tool_choice="none".`,
+      evidence: {
+        outputTokens,
+        messageTextTail: messageText.slice(-120),
+        priorFunctionCallOutputCount: priorFnOutputCount,
+        sentToolCount: sentTools.length,
+        toolCallBlockCount,
+        toolChoice: effChoice,
+        variant: isEmptyOutputTruncation ? "empty_output" : "mid_sentence",
+      },
+    });
+  }
+
+  // 5. Failed responses. Per developers/debugging, status: "failed" means
   //    xAI accepted the request but the model could not produce a valid
   //    response. The adapter's existing extractResponseError() also
   //    handles this in the non-streaming path, but the strict filter

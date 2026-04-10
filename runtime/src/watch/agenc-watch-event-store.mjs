@@ -325,17 +325,46 @@ export function createWatchEventStore(dependencies = {}) {
 
   function commitAgentMessage(body) {
     const content = stripTerminalControlSequences(sanitizeLargeText(body ?? ""));
+    // Defensive: never silently swallow a real chat.message. If the daemon
+    // sent us a non-empty agent reply, the watch transcript MUST land it
+    // visibly in the event store regardless of streaming-state machine
+    // drift. Empty bodies are still surfaced (as a small placeholder) so
+    // the operator knows the turn finished even when the model produced
+    // no text.
+    //
+    // CRITICAL: this function DELIBERATELY bypasses
+    // withPreservedManualTranscriptViewport for the force-snap. PR #310
+    // set transcriptFollowMode/transcriptScrollOffset INSIDE the wrapper,
+    // and the wrapper's cleanup re-applied preserveManualTranscriptViewport
+    // after the mutator returned, undoing the snap. The fix is to perform
+    // the body mutation directly and force-set the viewport AFTER any
+    // wrapper that might overwrite it. The lost-message bug is strictly
+    // worse than the small UX cost of a forced snap on agent reply.
     const target = findLatestStreamingAgentEvent();
+    const timestamp = nowStamp();
+    const createdAtMs = nowMs();
+    let result;
     if (!target) {
-      return pushEvent("agent", "Agent Reply", content || "(empty)", "cyan", {
+      const safeContent = content.length > 0 ? content : "(empty)";
+      result = pushEvent("agent", "Agent Reply", safeContent, "cyan", {
         renderMode: "markdown",
         streamState: "complete",
       });
-    }
-    return withPreservedManualTranscriptViewport(({ shouldFollow }) => {
-      const timestamp = nowStamp();
-      const createdAtMs = nowMs();
-      updateExistingEventBody(target, content || storedEventBody(target) || "(empty)");
+    } else {
+      // Always overwrite the streaming target body with the canonical
+      // commit content when it is non-empty. The previous fallback chain
+      // (`content || storedEventBody(target) || "(empty)"`) could keep a
+      // stale streamed partial when the commit content was non-empty but
+      // semantically different — and could keep "(empty)" forever when
+      // both the commit content and the streamed body were transiently
+      // blank. The commit is the authoritative final text; trust it.
+      const nextBody =
+        content.length > 0
+          ? content
+          : storedEventBody(target).length > 0
+            ? storedEventBody(target)
+            : "(empty)";
+      updateExistingEventBody(target, nextBody);
       target.timestamp = timestamp;
       target.createdAtMs = createdAtMs;
       target.title = "Agent Reply";
@@ -344,10 +373,16 @@ export function createWatchEventStore(dependencies = {}) {
       target.streamState = "complete";
       updateLatestAgentSummary(target);
       updateActivity(timestamp);
-      followTranscriptIfNeeded(shouldFollow);
-      scheduleRender();
-      return target;
-    });
+      result = target;
+    }
+    // Force-snap to the new reply AFTER any nested wrapper has run. This
+    // line MUST be outside withPreservedManualTranscriptViewport — the
+    // wrapper's cleanup overwrote it in PR #310, which is exactly why
+    // agent replies were still invisible despite landing in events[].
+    watchState.transcriptFollowMode = true;
+    watchState.transcriptScrollOffset = 0;
+    scheduleRender();
+    return result;
   }
 
   function cancelAgentStream(reason = "cancelled") {
