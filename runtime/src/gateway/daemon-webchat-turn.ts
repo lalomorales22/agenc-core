@@ -28,7 +28,6 @@ import {
   persistSessionStatefulContinuation,
   persistWebSessionRuntimeState,
 } from "./daemon-session-state.js";
-import { applyLegacyTopLevelVerifier } from "./top-level-verifier.js";
 import { filterSystemPromptForToolRouting } from "./system-prompt-routing.js";
 import {
   buildRuntimeContractSessionTraceId,
@@ -155,9 +154,6 @@ export async function executeWebChatConversationTurn(
     getSessionTokenUsage,
     onModelInfo,
     onSubagentSynthesis,
-    subAgentManager = null,
-    verifierService = null,
-    agentDefinitions,
     taskStore = null,
   } = params;
 
@@ -328,21 +324,9 @@ export async function executeWebChatConversationTurn(
         },
       },
     });
-    const baseResult =
-      rawResult.runtimeContractSnapshot?.flags.runtimeContractV2 === true
-        ? rawResult
-        : await applyLegacyTopLevelVerifier({
-          sessionId: msg.sessionId,
-          userRequest: msg.content,
-          result: rawResult,
-          subAgentManager,
-          verifierService,
-          agentDefinitions,
-          logger,
-        });
     const result = await enrichRuntimeContractSnapshotForSession({
       sessionId: msg.sessionId,
-      result: baseResult,
+      result: rawResult,
       taskStore,
       workerManager: params.workerManager,
     });

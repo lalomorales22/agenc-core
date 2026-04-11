@@ -246,7 +246,7 @@ describe("validateGatewayConfig durable async task prerequisites", () => {
 
     expect(result.valid).toBe(false);
     expect(result.errors).toContain(
-      "memory.backend=memory is invalid when llm.runtimeContractV2 and llm.asyncTasks.enabled are both true",
+      "memory.backend=memory is invalid when llm.asyncTasks.enabled is true",
     );
   });
 });

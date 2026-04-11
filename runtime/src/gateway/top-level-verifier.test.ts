@@ -2,10 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { ChatExecutorResult } from "../llm/chat-executor.js";
 import { createRuntimeContractSnapshot } from "../runtime-contract/types.js";
-import {
-  applyLegacyTopLevelVerifier,
-  runTopLevelVerifierValidation,
-} from "./top-level-verifier.js";
+import { runTopLevelVerifierValidation } from "./top-level-verifier.js";
 import type { VerifierRequirement } from "./verifier-probes.js";
 
 function createResult(
@@ -410,45 +407,5 @@ describe("runTopLevelVerifierValidation", () => {
       expect.objectContaining({ type: "spawned" }),
       expect.objectContaining({ type: "verdict", verdict: "pass" }),
     ]);
-  });
-});
-
-describe("applyLegacyTopLevelVerifier", () => {
-  it("downgrades legacy top-level completion when verification fails", async () => {
-    const spawn = vi.fn(async () => "subagent:verify-legacy");
-    const waitForResult = vi.fn(async () => ({
-      sessionId: "subagent:verify-legacy",
-      output: "Verifier wrote a long narrative without a VERDICT line.",
-      success: false,
-      durationMs: 25,
-      toolCalls: [],
-      structuredOutput: {
-        type: "json_schema",
-        name: "agenc_top_level_verifier_decision",
-        parsed: {
-          verdict: "fail",
-          summary: "Build fails under verifier-run acceptance checks.",
-        },
-      },
-      completionState: "completed",
-      stopReason: "completed",
-    }));
-
-    const updated = await applyLegacyTopLevelVerifier({
-      sessionId: "session:test",
-      userRequest: "Implement every phase from PLAN.md",
-      result: createResult(),
-      subAgentManager: { spawn, waitForResult },
-      verifierService: createVerifierService(),
-    });
-
-    expect(updated.completionState).toBe("partial");
-    expect(updated.content).toContain(
-      "Build fails under verifier-run acceptance checks.",
-    );
-    expect(updated.stopReasonDetail).toContain("Top-level verifier fail");
-    expect(updated.runtimeContractSnapshot?.legacyTopLevelVerifierMode).toBe(
-      "applied",
-    );
   });
 });

@@ -344,8 +344,7 @@ function shouldReturnAsyncTaskHandle(
   taskStore: TaskStore | null | undefined,
 ): boolean {
   return Boolean(
-    runtimeContractFlags?.runtimeContractV2 === true &&
-      runtimeContractFlags?.asyncTasksEnabled === true &&
+    runtimeContractFlags?.asyncTasksEnabled === true &&
       taskStore,
   );
 }

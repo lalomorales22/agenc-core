@@ -34,7 +34,6 @@ import {
   persistSessionRuntimeContractStatusSnapshot,
   persistSessionStatefulContinuation,
 } from "./daemon-session-state.js";
-import { applyLegacyTopLevelVerifier } from "./top-level-verifier.js";
 import type { AgentDefinition } from "./agent-loader.js";
 import type { DelegationVerifierService } from "./delegation-runtime.js";
 import type { PersistentWorkerManager } from "./persistent-worker-manager.js";
@@ -160,9 +159,6 @@ export async function executeTextChannelTurn(
     buildToolRoutingDecision,
     recordToolRoutingOutcome,
     persistToDaemonMemory = shouldPersistToDaemonMemory(msg),
-    subAgentManager = null,
-    verifierService = null,
-    agentDefinitions,
     taskStore = null,
   } = params;
 
@@ -311,21 +307,9 @@ export async function executeTextChannelTurn(
         }
       : {}),
   });
-  const baseResult =
-    rawResult.runtimeContractSnapshot?.flags.runtimeContractV2 === true
-      ? rawResult
-      : await applyLegacyTopLevelVerifier({
-        sessionId: msg.sessionId,
-        userRequest: msg.content,
-        result: rawResult,
-        subAgentManager,
-        verifierService,
-        agentDefinitions,
-        logger,
-      });
   const result = await enrichRuntimeContractSnapshotForSession({
     sessionId: msg.sessionId,
-    result: baseResult,
+    result: rawResult,
     taskStore,
     workerManager: params.workerManager,
   });

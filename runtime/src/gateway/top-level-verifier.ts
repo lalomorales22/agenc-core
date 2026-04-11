@@ -1,17 +1,5 @@
 import type { ChatExecutorResult } from "../llm/chat-executor.js";
-import {
-  deriveActiveTaskContext,
-  mergeTurnExecutionRequiredToolEvidence,
-  resolveWorkflowEvidenceFromRequiredToolEvidence,
-} from "../llm/turn-execution-contract.js";
-import {
-  deriveWorkflowProgressSnapshot,
-  mergeWorkflowProgressSnapshots,
-} from "../workflow/completion-progress.js";
-import {
-  resolveWorkflowCompletionState,
-  type PlannerVerificationSnapshot,
-} from "../workflow/completion-state.js";
+import { type PlannerVerificationSnapshot } from "../workflow/completion-state.js";
 import { createExecutionEnvelope } from "../workflow/execution-envelope.js";
 import {
   normalizeArtifactPaths,
@@ -33,10 +21,6 @@ import type {
 import type { LLMStructuredOutputRequest } from "../llm/types.js";
 import type { RuntimeVerifierVerdict } from "../runtime-contract/types.js";
 import type { SystemRemoteJobManager } from "../tools/system/remote-job.js";
-import {
-  updateRuntimeContractLegacyVerifierMode,
-  updateRuntimeContractVerifierVerdict,
-} from "../runtime-contract/types.js";
 import type { TaskStore } from "../tools/system/task-tracker.js";
 import {
   reportManagedRemoteJob,
@@ -828,119 +812,4 @@ export async function runTopLevelVerifierValidation(
     launcherKind: remoteJobHandle ? "remote_job" : "subagent",
     ...(verifierTaskId ? { taskId: verifierTaskId } : {}),
   };
-}
-
-function buildVerifierAdjustedResult(params: {
-  readonly result: ChatExecutorResult;
-  readonly verifier: PlannerVerificationSnapshot;
-  readonly runtimeVerifier: RuntimeVerifierVerdict;
-  readonly verifierSummary: string;
-  readonly legacyTopLevelVerifierMode: "applied" | "skipped";
-}): ChatExecutorResult {
-  const requiredToolEvidence = mergeTurnExecutionRequiredToolEvidence({
-    turnExecutionContract: params.result.turnExecutionContract,
-  });
-  const workflowEvidence = resolveWorkflowEvidenceFromRequiredToolEvidence({
-    requiredToolEvidence,
-    runtimeContext: {
-      workspaceRoot: params.result.turnExecutionContract.workspaceRoot,
-      activeTaskContext: deriveActiveTaskContext(params.result.turnExecutionContract),
-    },
-  });
-  const completionState = resolveWorkflowCompletionState({
-    stopReason: params.result.stopReason,
-    toolCalls: params.result.toolCalls,
-    verificationContract: workflowEvidence.verificationContract,
-    completionContract: workflowEvidence.completionContract,
-    validationCode: params.result.validationCode,
-    verifier: params.verifier,
-  });
-  const nextProgress = deriveWorkflowProgressSnapshot({
-    stopReason: params.result.stopReason,
-    completionState,
-    stopReasonDetail:
-      params.verifier.overall === "pass"
-        ? params.result.stopReasonDetail
-        : `Top-level verifier ${params.verifier.overall}: ${params.verifierSummary}`,
-    validationCode: params.result.validationCode,
-    toolCalls: params.result.toolCalls,
-    verificationContract: workflowEvidence.verificationContract,
-    completionContract: workflowEvidence.completionContract,
-    updatedAt: Date.now(),
-    contractFingerprint: params.result.turnExecutionContract.contractFingerprint,
-    verifier: params.verifier,
-  });
-  const completionProgress = mergeWorkflowProgressSnapshots({
-    previous: params.result.completionProgress,
-    next: nextProgress,
-  });
-  const runtimeContractSnapshot = params.result.runtimeContractSnapshot
-    ? updateRuntimeContractLegacyVerifierMode({
-      snapshot: updateRuntimeContractVerifierVerdict({
-        snapshot: params.result.runtimeContractSnapshot,
-        verifier: params.runtimeVerifier,
-      }),
-      legacyTopLevelVerifierMode: params.legacyTopLevelVerifierMode,
-    })
-    : undefined;
-
-  if (params.verifier.overall === "pass") {
-    return {
-      ...params.result,
-      completionState,
-      verifierSnapshot: params.verifier,
-      ...(completionProgress ? { completionProgress } : {}),
-      ...(runtimeContractSnapshot ? { runtimeContractSnapshot } : {}),
-    };
-  }
-
-  const content = params.result.content.trim().length > 0
-    ? `${params.result.content.trim()}\n\nVerification did not pass.\n${params.verifierSummary}`
-    : `Verification did not pass.\n${params.verifierSummary}`;
-
-  return {
-    ...params.result,
-    content,
-    completionState,
-    verifierSnapshot: params.verifier,
-    ...(completionProgress ? { completionProgress } : {}),
-    ...(runtimeContractSnapshot ? { runtimeContractSnapshot } : {}),
-    stopReasonDetail: `Top-level verifier ${params.verifier.overall}: ${params.verifierSummary}`,
-  };
-}
-
-export async function applyLegacyTopLevelVerifier(
-  params: {
-    readonly sessionId: string;
-    readonly userRequest: string;
-    readonly result: ChatExecutorResult;
-    readonly subAgentManager: Pick<SubAgentManager, "spawn" | "waitForResult"> | null;
-    readonly verifierService: Pick<
-      DelegationVerifierService,
-      "resolveVerifierRequirement" | "shouldVerifySubAgentResult"
-    > | null;
-    readonly agentDefinitions?: readonly AgentDefinition[];
-    readonly logger?: Logger;
-  },
-): Promise<ChatExecutorResult> {
-  const validation = await runTopLevelVerifierValidation(params);
-  if (validation.outcome === "skipped") {
-    return params.result.runtimeContractSnapshot
-      ? {
-        ...params.result,
-        runtimeContractSnapshot: updateRuntimeContractLegacyVerifierMode({
-          snapshot: params.result.runtimeContractSnapshot,
-          legacyTopLevelVerifierMode: "skipped",
-        }),
-      }
-      : params.result;
-  }
-
-  return buildVerifierAdjustedResult({
-    result: params.result,
-    verifier: validation.verifier,
-    runtimeVerifier: validation.runtimeVerifier,
-    verifierSummary: validation.summary,
-    legacyTopLevelVerifierMode: "applied",
-  });
 }

@@ -216,6 +216,85 @@ describe("completion-validators", () => {
     expect(toolHandler).not.toHaveBeenCalled();
   });
 
+  it("runs the top-level verifier even when runtimeContractV2 is false", async () => {
+    const flags = makeFlags({
+      runtimeContractV2: false,
+      verifierRuntimeRequired: true,
+    });
+    const ctx = makeCtx({
+      flags,
+      allToolCalls: [successfulWrite("/tmp/workspace/src/main.c")],
+      targetArtifacts: ["/tmp/workspace/src/main.c"],
+    });
+    ctx.turnExecutionContract = {
+      version: 1,
+      turnClass: "workflow_implementation",
+      ownerMode: "workflow_owner",
+      workspaceRoot: "/tmp/workspace",
+      sourceArtifacts: ["/tmp/workspace/PLAN.md"],
+      targetArtifacts: ["/tmp/workspace/src/main.c"],
+      delegationPolicy: "direct_owner",
+      contractFingerprint: "contract-1",
+      taskLineageId: "task-1",
+    } as any;
+    const validators = buildCompletionValidators({
+      ctx,
+      runtimeContractFlags: flags,
+      completionValidation: {
+        topLevelVerifier: {
+          subAgentManager: {
+            spawn: vi.fn(async () => "subagent:verify"),
+            waitForResult: vi.fn(async () => ({
+              sessionId: "subagent:verify",
+              output: "All good.\nVERDICT: PASS",
+              success: true,
+              durationMs: 1,
+              toolCalls: [
+                {
+                  name: "verification.runProbe",
+                  args: { probeId: "build" },
+                  result:
+                    "{\"ok\":true,\"__agencVerification\":{\"probeId\":\"build\",\"category\":\"build\",\"profile\":\"generic\"}}",
+                  isError: false,
+                  durationMs: 1,
+                },
+              ],
+              structuredOutput: {
+                type: "json_schema",
+                name: "agenc_top_level_verifier_decision",
+                parsed: {
+                  verdict: "pass",
+                  summary: "Probe-backed verification passed.",
+                },
+              },
+              completionState: "completed",
+              stopReason: "completed",
+            })),
+          },
+          verifierService: {
+            resolveVerifierRequirement: vi.fn(() => ({
+              required: true,
+              profiles: ["generic"],
+              probeCategories: ["build"],
+              mutationPolicy: "read_only_workspace",
+              allowTempArtifacts: false,
+              bootstrapSource: "disabled",
+              rationale: ["test"],
+            })),
+            shouldVerifySubAgentResult: vi.fn(() => true),
+          },
+        },
+      },
+    });
+
+    const result = await validators.find(
+      (validator) => validator.id === "top_level_verifier",
+    )!.execute();
+
+    expect(result.outcome).toBe("pass");
+    expect(result.verifier?.overall).toBe("pass");
+  });
+
   it("blocks finalization when request milestones remain open without an in_progress task", async () => {
     const ctx = makeCtx({});
     setAllowedRequestTaskMilestones(ctx.requestTaskState, [

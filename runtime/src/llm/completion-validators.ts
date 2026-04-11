@@ -44,7 +44,6 @@ export function buildCompletionValidators(params: {
   readonly completionValidation?: ChatExecutorConfig["completionValidation"];
 }): readonly CompletionValidator[] {
   const topLevelVerifierEnabled =
-    params.runtimeContractFlags.runtimeContractV2 &&
     params.runtimeContractFlags.verifierRuntimeRequired;
   const deterministicAcceptanceProbesEnabled =
     shouldRunDeterministicAcceptanceProbes({

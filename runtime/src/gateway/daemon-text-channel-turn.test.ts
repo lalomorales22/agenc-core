@@ -246,12 +246,10 @@ describe("executeTextChannelTurn", () => {
     });
 
     expect(returned).not.toBe(result);
-    expect(returned).toMatchObject({
-      ...result,
-      runtimeContractSnapshot: expect.objectContaining({
-        legacyTopLevelVerifierMode: "skipped",
-      }),
-    });
+    expect(returned).toMatchObject(result);
+    expect(returned.runtimeContractSnapshot).not.toHaveProperty(
+      "legacyTopLevelVerifierMode",
+    );
     expect(execute).toHaveBeenCalledOnce();
     expect(execute).toHaveBeenCalledWith(
       expect.objectContaining({ maxToolRounds: 3 }),
@@ -296,7 +294,7 @@ describe("executeTextChannelTurn", () => {
     });
   });
 
-  it("does not run legacy top-level verifier mutation when runtimeContractV2 is enabled", async () => {
+  it("does not rerun top-level verification after the executor returns", async () => {
     const logger = createLoggerStub();
     const memoryBackend = createMemoryBackendStub();
     const session = createSession();
@@ -329,6 +327,7 @@ describe("executeTextChannelTurn", () => {
       },
     });
     const execute = vi.fn(async () => result);
+    const spawn = vi.fn(async () => "subagent:verify");
 
     const returned = await executeTextChannelTurn({
       logger,
@@ -359,7 +358,7 @@ describe("executeTextChannelTurn", () => {
       buildToolRoutingDecision: () => undefined,
       recordToolRoutingOutcome: vi.fn(),
       subAgentManager: {
-        spawn: vi.fn(async () => "subagent:verify"),
+        spawn,
         waitForResult: vi.fn(async () => ({
           sessionId: "subagent:verify",
           output: "VERDICT: FAIL",
@@ -387,6 +386,7 @@ describe("executeTextChannelTurn", () => {
     expect(returned).toMatchObject(result);
     expect(returned.completionState).toBe("completed");
     expect(returned.content).toBe("reply");
+    expect(spawn).not.toHaveBeenCalled();
   });
 
   it("passes persisted active task context into the executor and stores the updated lineage", async () => {

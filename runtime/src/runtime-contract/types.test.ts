@@ -32,6 +32,13 @@ describe("runtime-contract types", () => {
     expect(snapshot.validators.map((validator) => validator.id)).toEqual(
       COMPLETION_VALIDATOR_ORDER,
     );
+    expect(
+      snapshot.validators.find((validator) => validator.id === "top_level_verifier"),
+    ).toMatchObject({
+      enabled: false,
+      executed: false,
+      outcome: "skipped",
+    });
     expect(snapshot.mailboxLayer).toEqual({
       configured: false,
       effective: false,
@@ -40,5 +47,28 @@ describe("runtime-contract types", () => {
       unackedCount: 0,
       inactiveReason: "flag_disabled",
     });
+  });
+
+  it("enables the top-level verifier whenever runtime verification is required", () => {
+    const snapshot = createRuntimeContractSnapshot({
+      runtimeContractV2: false,
+      stopHooksEnabled: false,
+      asyncTasksEnabled: false,
+      persistentWorkersEnabled: false,
+      mailboxEnabled: false,
+      verifierRuntimeRequired: true,
+      verifierProjectBootstrap: false,
+      workerIsolationWorktree: false,
+      workerIsolationRemote: false,
+    });
+
+    expect(
+      snapshot.validators.find((validator) => validator.id === "top_level_verifier"),
+    ).toMatchObject({
+      enabled: true,
+      executed: false,
+      outcome: "skipped",
+    });
+    expect(snapshot).not.toHaveProperty("legacyTopLevelVerifierMode");
   });
 });

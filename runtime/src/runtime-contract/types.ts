@@ -159,7 +159,6 @@ export interface RuntimeContractSnapshot {
   readonly workerLayer: RuntimeWorkerLayerSnapshot;
   readonly mailboxLayer: RuntimeMailboxLayerSnapshot;
   readonly verifierStages: RuntimeVerifierStageSnapshot;
-  readonly legacyTopLevelVerifierMode: "none" | "pending" | "applied" | "skipped";
   readonly toolProtocol: RuntimeToolProtocolSnapshot;
 }
 
@@ -398,7 +397,7 @@ export function createRuntimeContractSnapshot(
     validators: COMPLETION_VALIDATOR_ORDER.map((id) => ({
       id,
       enabled: id === "top_level_verifier"
-        ? flags.runtimeContractV2 && flags.verifierRuntimeRequired
+        ? flags.verifierRuntimeRequired
         : true,
       executed: false,
       outcome: "skipped",
@@ -452,7 +451,6 @@ export function createRuntimeContractSnapshot(
         ? {}
         : { skipReason: "runtime_not_required" }),
     },
-    legacyTopLevelVerifierMode: flags.runtimeContractV2 ? "none" : "pending",
     toolProtocol: {
       open: false,
       pendingToolCallIds: [],
@@ -535,16 +533,6 @@ export function updateRuntimeContractVerifierStage(params: {
   return {
     ...params.snapshot,
     verifierStages: params.verifierStages,
-  };
-}
-
-export function updateRuntimeContractLegacyVerifierMode(params: {
-  readonly snapshot: RuntimeContractSnapshot;
-  readonly legacyTopLevelVerifierMode: RuntimeContractSnapshot["legacyTopLevelVerifierMode"];
-}): RuntimeContractSnapshot {
-  return {
-    ...params.snapshot,
-    legacyTopLevelVerifierMode: params.legacyTopLevelVerifierMode,
   };
 }
 
