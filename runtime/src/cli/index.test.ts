@@ -58,8 +58,9 @@ const { runMarketTuiCommand } = vi.hoisted(() => ({
 const { runAgentRegisterCommand } = vi.hoisted(() => ({
   runAgentRegisterCommand: vi.fn(async () => 0),
 }));
-const { runShellCommand } = vi.hoisted(() => ({
+const { runShellCommand, runShellExecCommand } = vi.hoisted(() => ({
   runShellCommand: vi.fn(async () => 0),
+  runShellExecCommand: vi.fn(async () => 0),
 }));
 
 vi.mock("./init.js", () => ({
@@ -119,6 +120,7 @@ vi.mock("./agent-cli.js", async () => {
 
 vi.mock("./shell.js", () => ({
   runShellCommand,
+  runShellExecCommand,
 }));
 
 import { runCli } from "./index.js";
@@ -281,6 +283,99 @@ describe("runtime root CLI", () => {
         profile: "coding",
         newSession: true,
         sessionId: "session-123",
+      }),
+    );
+  });
+
+  it("routes coding grep aliases through one-shot shell execution", async () => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+
+    const code = await runCli({
+      argv: [
+        "grep",
+        "shellProfile",
+        "--glob",
+        "src/**/*.ts",
+        "--context",
+        "2",
+      ],
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(code).toBe(0);
+    expect(runShellExecCommand).toHaveBeenCalledTimes(1);
+    expect(runShellExecCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        profile: "coding",
+        quietConnection: true,
+        commandText:
+          '/grep {"pattern":"shellProfile","filePatterns":["src/**/*.ts"],"contextLines":2}',
+      }),
+    );
+  });
+
+  it("routes git aliases through one-shot shell execution", async () => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+
+    const code = await runCli({
+      argv: ["git", "diff", "--staged", "--files", "src/a.ts,src/b.ts"],
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(code).toBe(0);
+    expect(runShellExecCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        profile: "coding",
+        quietConnection: true,
+        commandText:
+          '/git {"subcommand":"diff","staged":true,"filePaths":["src/a.ts","src/b.ts"]}',
+      }),
+    );
+  });
+
+  it("routes session status through one-shot shell execution", async () => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+
+    const code = await runCli({
+      argv: ["session"],
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(code).toBe(0);
+    expect(runShellExecCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        profile: "general",
+        quietConnection: true,
+        commandText: "/session",
+      }),
+    );
+  });
+
+  it("routes resume to the interactive shell path with coding default profile", async () => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+
+    const code = await runCli({
+      argv: ["resume", "--session", "session-456"],
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(code).toBe(0);
+    expect(runShellCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        profile: "coding",
+        sessionId: "session-456",
       }),
     );
   });

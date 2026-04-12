@@ -9,6 +9,8 @@ npm install -g @tetsuo-ai/agenc
 agenc onboard
 agenc start
 agenc shell coding
+agenc plan
+agenc git status
 agenc ui
 ```
 
@@ -51,8 +53,27 @@ binary remains `agenc`.
 
 - bare `agenc` opens the `general` shell by default
 - `agenc shell [profile]` opens a line-oriented terminal shell over the daemon's WebChat/control-plane path
+- `agenc resume [--profile <name>]` reopens the shell session for the current workspace/profile
 - `agenc console` opens the explicit operator console compatibility surface
 - `agenc ui` opens or prints the local dashboard URL on `/ui/`
+
+Current coding-shell command surface on the same daemon:
+
+- `agenc plan`
+- `agenc tasks`
+- `agenc files`
+- `agenc grep`
+- `agenc git status|diff|show|branch|summary|worktree`
+- `agenc branch`
+- `agenc worktree`
+- `agenc diff`
+- `agenc review`
+- `agenc session`
+- `agenc permissions`
+- `agenc mcp`
+- `agenc skills`
+- `agenc model`
+- `agenc effort`
 
 Supported shell profiles:
 

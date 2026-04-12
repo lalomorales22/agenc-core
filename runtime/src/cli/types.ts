@@ -267,6 +267,11 @@ export interface ShellOptions extends BaseCliOptions {
   sessionId?: string;
 }
 
+export interface ShellExecOptions extends ShellOptions {
+  commandText: string;
+  quietConnection?: boolean;
+}
+
 export interface ServiceInstallOptions {
   configPath?: string;
   macos?: boolean;

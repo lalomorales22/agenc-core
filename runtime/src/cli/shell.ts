@@ -9,6 +9,7 @@ import process from "node:process";
 import type {
   CliRuntimeContext,
   CliStatusCode,
+  ShellExecOptions,
   ShellOptions,
 } from "./types.js";
 import { loadGatewayConfig } from "../gateway/config-watcher.js";
@@ -48,6 +49,20 @@ interface ShellDeps {
   }) => Interface;
   readonly cwd: () => string;
   readonly homeDir: () => string;
+}
+
+interface ShellTurnWaiters {
+  resolve: () => void;
+  reject: (error: Error) => void;
+}
+
+interface OpenShellSessionResult {
+  readonly daemonPid: number;
+  readonly daemonPort: number;
+  readonly profile: SessionShellProfile;
+  readonly workspaceRoot: string;
+  sendTurn(content: string): Promise<void>;
+  close(): void;
 }
 
 const DEFAULT_DEPS: ShellDeps = {
@@ -134,19 +149,14 @@ function formatPrompt(profile: SessionShellProfile): string {
   return `agenc(${profile})> `;
 }
 
-export async function runShellCommand(
-  context: CliRuntimeContext,
+async function openShellSession(
   options: ShellOptions,
+  deps: ShellDeps,
   io: {
-    stdin?: NodeJS.ReadableStream;
-    stdout?: NodeJS.WritableStream;
-    stderr?: NodeJS.WritableStream;
-  } = {},
-  deps: ShellDeps = DEFAULT_DEPS,
-): Promise<CliStatusCode> {
-  const stdin = io.stdin ?? process.stdin;
-  const stdout = io.stdout ?? process.stdout;
-  const stderr = io.stderr ?? process.stderr;
+    stderr: NodeJS.WritableStream;
+    onMessage?: (content: string) => void;
+  },
+): Promise<OpenShellSessionResult> {
   const profile =
     coerceSessionShellProfile(options.profile) ?? DEFAULT_SESSION_SHELL_PROFILE;
   const workspaceRoot = realpathSync.native(resolve(deps.cwd()));
@@ -171,15 +181,15 @@ export async function runShellCommand(
   );
 
   const WsConstructor = await deps.loadWsConstructor();
-  const ws = new WsConstructor(`ws://127.0.0.1:${options.controlPlanePort ?? daemon.port}`);
-  const rl = deps.createReadline({ input: stdin, output: stdout });
+  const ws = new WsConstructor(
+    `ws://127.0.0.1:${options.controlPlanePort ?? daemon.port}`,
+  );
 
   let ownerToken = state.ownerToken;
   let activeSessionId = options.sessionId?.trim() || undefined;
   let typingActive = false;
   let settleTimer: NodeJS.Timeout | undefined;
-  let pendingTurnResolve: (() => void) | null = null;
-  let pendingTurnReject: ((error: Error) => void) | null = null;
+  let pendingTurn: ShellTurnWaiters | null = null;
   let bootstrapped = false;
   let bootstrapResolve: (() => void) | null = null;
   let bootstrapReject: ((error: Error) => void) | null = null;
@@ -193,27 +203,26 @@ export async function runShellCommand(
       clearTimeout(settleTimer);
       settleTimer = undefined;
     }
-    pendingTurnResolve = null;
-    pendingTurnReject = null;
+    pendingTurn = null;
     typingActive = false;
   };
 
   const resolveTurn = (): void => {
-    if (!pendingTurnResolve) return;
-    const done = pendingTurnResolve;
+    if (!pendingTurn) return;
+    const { resolve } = pendingTurn;
     clearTurnWaiter();
-    done();
+    resolve();
   };
 
   const rejectTurn = (error: Error): void => {
-    if (!pendingTurnReject) return;
-    const reject = pendingTurnReject;
+    if (!pendingTurn) return;
+    const { reject } = pendingTurn;
     clearTurnWaiter();
     reject(error);
   };
 
   const scheduleTurnSettle = (): void => {
-    if (!pendingTurnResolve || typingActive) return;
+    if (!pendingTurn || typingActive) return;
     if (settleTimer) {
       clearTimeout(settleTimer);
     }
@@ -305,15 +314,13 @@ export async function runShellCommand(
       return;
     }
     if (type === "chat.message" && typeof payload?.content === "string") {
-      stdout.write(`${payload.content.trimEnd()}\n`);
+      io.onMessage?.(payload.content);
       scheduleTurnSettle();
       return;
     }
     if (type === "error") {
       const message =
-        typeof parsed.error === "string"
-          ? parsed.error
-          : "Shell request failed";
+        typeof parsed.error === "string" ? parsed.error : "Shell request failed";
       if (!bootstrapped && activeSessionId && /not found/i.test(message)) {
         activeSessionId = undefined;
         send("chat.new", {
@@ -323,7 +330,7 @@ export async function runShellCommand(
         });
         return;
       }
-      stderr.write(`${message}\n`);
+      io.stderr.write(`${message}\n`);
       if (!bootstrapped) {
         bootstrapReject?.(new Error(message));
         return;
@@ -345,29 +352,68 @@ export async function runShellCommand(
     rejectTurn(resolved);
   });
 
+  await bootstrapPromise;
+
+  return {
+    daemonPid: daemon.pid,
+    daemonPort: options.controlPlanePort ?? daemon.port,
+    profile,
+    workspaceRoot,
+    async sendTurn(content: string): Promise<void> {
+      await new Promise<void>((resolvePromise, rejectPromise) => {
+        pendingTurn = {
+          resolve: resolvePromise,
+          reject: rejectPromise,
+        };
+        send("chat.message", {
+          content,
+          ownerToken,
+          workspaceRoot,
+          shellProfile: profile,
+        });
+      });
+    },
+    close(): void {
+      ws.close();
+    },
+  };
+}
+
+export async function runShellCommand(
+  context: CliRuntimeContext,
+  options: ShellOptions,
+  io: {
+    stdin?: NodeJS.ReadableStream;
+    stdout?: NodeJS.WritableStream;
+    stderr?: NodeJS.WritableStream;
+  } = {},
+  deps: ShellDeps = DEFAULT_DEPS,
+): Promise<CliStatusCode> {
+  const stdin = io.stdin ?? process.stdin;
+  const stdout = io.stdout ?? process.stdout;
+  const stderr = io.stderr ?? process.stderr;
+  const rl = deps.createReadline({ input: stdin, output: stdout });
+  let session: OpenShellSessionResult | null = null;
+
   try {
-    await bootstrapPromise;
+    session = await openShellSession(options, deps, {
+      stderr,
+      onMessage: (content) => {
+        stdout.write(`${content.trimEnd()}\n`);
+      },
+    });
     stdout.write(
-      `Connected to daemon ${daemon.pid} on port ${options.controlPlanePort ?? daemon.port} using profile "${profile}".\n`,
+      `Connected to daemon ${session.daemonPid} on port ${session.daemonPort} using profile "${session.profile}".\n`,
     );
     while (true) {
-      const line = (await rl.question(formatPrompt(profile))).trim();
+      const line = (await rl.question(formatPrompt(session.profile))).trim();
       if (!line) {
         continue;
       }
       if (LOCAL_EXIT_COMMANDS.has(line)) {
         break;
       }
-      await new Promise<void>((resolvePromise, rejectPromise) => {
-        pendingTurnResolve = resolvePromise;
-        pendingTurnReject = rejectPromise;
-        send("chat.message", {
-          content: line,
-          ownerToken,
-          workspaceRoot,
-          shellProfile: profile,
-        });
-      });
+      await session.sendTurn(line);
     }
     return 0;
   } catch (error) {
@@ -379,6 +425,49 @@ export async function runShellCommand(
     return 1;
   } finally {
     rl.close();
-    ws.close();
+    session?.close();
+  }
+}
+
+export async function runShellExecCommand(
+  context: CliRuntimeContext,
+  options: ShellExecOptions,
+  io: {
+    stdout?: NodeJS.WritableStream;
+    stderr?: NodeJS.WritableStream;
+  } = {},
+  deps: ShellDeps = DEFAULT_DEPS,
+): Promise<CliStatusCode> {
+  const stdout = io.stdout ?? process.stdout;
+  const stderr = io.stderr ?? process.stderr;
+  const outputs: string[] = [];
+  let session: OpenShellSessionResult | null = null;
+
+  try {
+    session = await openShellSession(options, deps, {
+      stderr,
+      onMessage: (content) => {
+        outputs.push(content.trimEnd());
+      },
+    });
+    if (options.quietConnection !== true) {
+      stdout.write(
+        `Connected to daemon ${session.daemonPid} on port ${session.daemonPort} using profile "${session.profile}".\n`,
+      );
+    }
+    await session.sendTurn(options.commandText);
+    if (outputs.length > 0) {
+      stdout.write(`${outputs.join("\n")}\n`);
+    }
+    return 0;
+  } catch (error) {
+    context.error({
+      status: "error",
+      command: "shell.exec",
+      message: error instanceof Error ? error.message : String(error),
+    });
+    return 1;
+  } finally {
+    session?.close();
   }
 }

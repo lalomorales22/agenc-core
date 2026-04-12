@@ -74,6 +74,7 @@ import type {
 } from "./subagent-infrastructure.js";
 import type { VoiceBridge } from "./voice-bridge.js";
 import type { WebChatChannel } from "../channels/webchat/plugin.js";
+import { TASK_LIST_ARG } from "../tools/system/task-tracker.js";
 
 // ============================================================================
 // Eval script helpers (moved from daemon.ts top-level)
@@ -350,6 +351,380 @@ function formatShellProfileList(current: SessionShellProfile): string {
   return SESSION_SHELL_PROFILES.map((profile) =>
     `  ${profile}${profile === current ? " (current)" : ""}`,
   ).join("\n");
+}
+
+const REASONING_EFFORTS = ["low", "medium", "high", "xhigh"] as const;
+
+function parseCommandJsonArgs(
+  args: string,
+): Record<string, unknown> | undefined {
+  const trimmed = args.trim();
+  if (!trimmed.startsWith("{")) {
+    return undefined;
+  }
+  const parsed = JSON.parse(trimmed) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("command JSON input must be an object");
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function parseInlineFlag(
+  argv: readonly string[],
+  flag: string,
+): string | undefined {
+  const exact = `--${flag}`;
+  const prefix = `--${flag}=`;
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index];
+    if (token === exact) {
+      const next = argv[index + 1];
+      return typeof next === "string" && !next.startsWith("--")
+        ? next
+        : undefined;
+    }
+    if (token.startsWith(prefix)) {
+      return token.slice(prefix.length);
+    }
+  }
+  return undefined;
+}
+
+function hasInlineFlag(argv: readonly string[], flag: string): boolean {
+  const exact = `--${flag}`;
+  const prefix = `--${flag}=`;
+  return argv.some((token) => token === exact || token.startsWith(prefix));
+}
+
+function parseCsvFlag(argv: readonly string[], flag: string): string[] | undefined {
+  const raw = parseInlineFlag(argv, flag);
+  if (!raw) return undefined;
+  const values = raw
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+  return values.length > 0 ? values : undefined;
+}
+
+function parseIntegerFlag(
+  argv: readonly string[],
+  flag: string,
+): number | undefined {
+  const raw = parseInlineFlag(argv, flag);
+  if (!raw) return undefined;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function formatToolError(result: Record<string, unknown>, fallback: string): string {
+  const message =
+    typeof result.error === "string" && result.error.trim().length > 0
+      ? result.error.trim()
+      : fallback;
+  return `Command failed: ${message}`;
+}
+
+async function executeStructuredTool(
+  baseToolHandler: ToolHandler,
+  toolName: string,
+  args: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const raw = await baseToolHandler(toolName, args);
+  const parsed = JSON.parse(raw) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`Tool ${toolName} returned non-object output`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function groupCatalogBySource(
+  catalog: readonly ReturnType<ToolRegistry["listCatalog"]>[number][],
+): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const entry of catalog) {
+    const source = entry.metadata.source ?? "builtin";
+    counts[source] = (counts[source] ?? 0) + 1;
+  }
+  return counts;
+}
+
+function formatRepoInventoryReply(result: Record<string, unknown>): string {
+  if (typeof result.error === "string") {
+    return formatToolError(result, "repo inventory failed");
+  }
+  const repoRoot = typeof result.repoRoot === "string" ? result.repoRoot : "unknown";
+  const branch = typeof result.branch === "string" ? result.branch : null;
+  const fileCount =
+    typeof result.fileCount === "number" ? result.fileCount.toLocaleString("en-US") : "unknown";
+  const manifests = Array.isArray(result.manifests)
+    ? result.manifests.filter((value): value is string => typeof value === "string")
+    : [];
+  const directories = Array.isArray(result.topLevelDirectories)
+    ? result.topLevelDirectories.filter((value): value is string => typeof value === "string")
+    : [];
+  const languages = Array.isArray(result.languages)
+    ? result.languages
+        .filter(
+          (value): value is { language: string; count: number } =>
+            typeof value === "object" &&
+            value !== null &&
+            typeof (value as { language?: unknown }).language === "string" &&
+            typeof (value as { count?: unknown }).count === "number",
+        )
+        .slice(0, 8)
+        .map((entry) => `${entry.language}:${entry.count}`)
+    : [];
+  return [
+    "Repo inventory:",
+    `  Root: ${repoRoot}`,
+    `  Branch: ${branch ?? "detached/unknown"}`,
+    `  Files: ${fileCount}`,
+    `  Manifests: ${manifests.length > 0 ? manifests.join(", ") : "none"}`,
+    `  Top-level dirs: ${directories.length > 0 ? directories.join(", ") : "none"}`,
+    `  Languages: ${languages.length > 0 ? languages.join(", ") : "unknown"}`,
+  ].join("\n");
+}
+
+function formatSearchFilesReply(result: Record<string, unknown>): string {
+  if (typeof result.error === "string") {
+    return formatToolError(result, "file search failed");
+  }
+  const matches = Array.isArray(result.matches)
+    ? result.matches.filter((value): value is string => typeof value === "string")
+    : [];
+  if (matches.length === 0) {
+    return "No matching files found.";
+  }
+  return [
+    `Files (${matches.length}):`,
+    ...matches.slice(0, 50).map((match) => `  ${match}`),
+  ].join("\n");
+}
+
+function formatGrepReply(result: Record<string, unknown>): string {
+  if (typeof result.error === "string") {
+    return formatToolError(result, "grep failed");
+  }
+  const matches = Array.isArray(result.matches)
+    ? result.matches.filter(
+        (value): value is {
+          filePath: string;
+          line: number;
+          column: number;
+          matchText: string;
+        } =>
+          typeof value === "object" &&
+          value !== null &&
+          typeof (value as { filePath?: unknown }).filePath === "string" &&
+          typeof (value as { line?: unknown }).line === "number" &&
+          typeof (value as { column?: unknown }).column === "number" &&
+          typeof (value as { matchText?: unknown }).matchText === "string",
+      )
+    : [];
+  if (matches.length === 0) {
+    return "No grep matches found.";
+  }
+  const lines = matches.slice(0, 25).map(
+    (match) =>
+      `  ${match.filePath}:${match.line}:${match.column}  ${match.matchText}`,
+  );
+  return [
+    `Matches (${matches.length}${result.truncated === true ? ", truncated" : ""}):`,
+    ...lines,
+  ].join("\n");
+}
+
+function formatGitStatusReply(result: Record<string, unknown>): string {
+  if (typeof result.error === "string") {
+    return formatToolError(result, "git status failed");
+  }
+  const summary =
+    typeof result.summary === "object" && result.summary !== null
+      ? (result.summary as Record<string, unknown>)
+      : {};
+  const changed = Array.isArray(result.changed)
+    ? result.changed.length
+    : undefined;
+  return [
+    "Git status:",
+    `  Repo: ${typeof result.repoRoot === "string" ? result.repoRoot : "unknown"}`,
+    `  Branch: ${typeof result.branch === "string" ? result.branch : result.detached === true ? "detached" : "unknown"}`,
+    `  Upstream: ${typeof result.upstream === "string" ? result.upstream : "none"}`,
+    `  Ahead/behind: ${typeof result.ahead === "number" ? result.ahead : 0}/${typeof result.behind === "number" ? result.behind : 0}`,
+    `  Changed files: ${changed ?? "unknown"}`,
+    `  Staged: ${typeof summary.staged === "number" ? summary.staged : 0}`,
+    `  Unstaged: ${typeof summary.unstaged === "number" ? summary.unstaged : 0}`,
+    `  Untracked: ${typeof summary.untracked === "number" ? summary.untracked : 0}`,
+    `  Conflicted: ${typeof summary.conflicted === "number" ? summary.conflicted : 0}`,
+  ].join("\n");
+}
+
+function formatGitBranchReply(result: Record<string, unknown>): string {
+  if (typeof result.error === "string") {
+    return formatToolError(result, "git branch info failed");
+  }
+  return [
+    "Git branch:",
+    `  Repo: ${typeof result.repoRoot === "string" ? result.repoRoot : "unknown"}`,
+    `  Branch: ${typeof result.branch === "string" ? result.branch : result.detached === true ? "detached" : "unknown"}`,
+    `  HEAD: ${typeof result.head === "string" ? result.head : "unknown"}`,
+    `  Upstream: ${typeof result.upstream === "string" ? result.upstream : "none"}`,
+    `  Ahead/behind: ${typeof result.ahead === "number" ? result.ahead : 0}/${typeof result.behind === "number" ? result.behind : 0}`,
+  ].join("\n");
+}
+
+function formatGitSummaryReply(result: Record<string, unknown>): string {
+  if (typeof result.error === "string") {
+    return formatToolError(result, "git summary failed");
+  }
+  const summary =
+    typeof result.summary === "object" && result.summary !== null
+      ? (result.summary as Record<string, unknown>)
+      : {};
+  return [
+    "Git change summary:",
+    `  Staged: ${typeof summary.staged === "number" ? summary.staged : 0}`,
+    `  Unstaged: ${typeof summary.unstaged === "number" ? summary.unstaged : 0}`,
+    `  Untracked: ${typeof summary.untracked === "number" ? summary.untracked : 0}`,
+    `  Renamed: ${typeof summary.renamed === "number" ? summary.renamed : 0}`,
+    `  Deleted: ${typeof summary.deleted === "number" ? summary.deleted : 0}`,
+    `  Conflicted: ${typeof summary.conflicted === "number" ? summary.conflicted : 0}`,
+  ].join("\n");
+}
+
+function formatGitDiffReply(result: Record<string, unknown>): string {
+  if (typeof result.error === "string") {
+    return formatToolError(result, "git diff failed");
+  }
+  const diff = typeof result.diff === "string" ? result.diff.trimEnd() : "";
+  if (diff.length === 0) {
+    return "No git diff output.";
+  }
+  return (
+    `Git diff${result.truncated === true ? " (truncated)" : ""}:\n` +
+    diff
+  );
+}
+
+function formatGitShowReply(result: Record<string, unknown>): string {
+  if (typeof result.error === "string") {
+    return formatToolError(result, "git show failed");
+  }
+  const output = typeof result.output === "string" ? result.output.trimEnd() : "";
+  return output.length > 0 ? output : "No git show output.";
+}
+
+function formatGitWorktreeListReply(result: Record<string, unknown>): string {
+  if (typeof result.error === "string") {
+    return formatToolError(result, "git worktree list failed");
+  }
+  const worktrees = Array.isArray(result.worktrees)
+    ? result.worktrees.filter(
+        (value): value is {
+          path: string;
+          branch: string | null;
+          head: string | null;
+          detached: boolean;
+        } =>
+          typeof value === "object" &&
+          value !== null &&
+          typeof (value as { path?: unknown }).path === "string",
+      )
+    : [];
+  if (worktrees.length === 0) {
+    return "No git worktrees found.";
+  }
+  return [
+    `Worktrees (${worktrees.length}):`,
+    ...worktrees.map(
+      (worktree) =>
+        `  ${worktree.path} — ${worktree.branch ?? (worktree.detached ? "detached" : "unknown")} (${worktree.head ?? "no head"})`,
+    ),
+  ].join("\n");
+}
+
+function formatGitWorktreeMutationReply(
+  action: "create" | "remove",
+  result: Record<string, unknown>,
+): string {
+  if (typeof result.error === "string") {
+    return formatToolError(
+      result,
+      action === "create" ? "git worktree create failed" : "git worktree remove failed",
+    );
+  }
+  if (action === "create") {
+    return [
+      "Worktree created:",
+      `  Path: ${typeof result.worktreePath === "string" ? result.worktreePath : "unknown"}`,
+      `  Branch: ${typeof result.branch === "string" ? result.branch : "none"}`,
+      `  Ref: ${typeof result.ref === "string" ? result.ref : "none"}`,
+    ].join("\n");
+  }
+  return [
+    "Worktree removed:",
+    `  Path: ${typeof result.worktreePath === "string" ? result.worktreePath : "unknown"}`,
+    `  Dirty before removal: ${result.dirty === true ? "yes" : "no"}`,
+  ].join("\n");
+}
+
+function formatGitWorktreeStatusReply(result: Record<string, unknown>): string {
+  if (typeof result.error === "string") {
+    return formatToolError(result, "git worktree status failed");
+  }
+  const statusLines = Array.isArray(result.statusLines)
+    ? result.statusLines.filter((value): value is string => typeof value === "string")
+    : [];
+  return [
+    "Worktree status:",
+    `  Path: ${typeof result.worktreePath === "string" ? result.worktreePath : "unknown"}`,
+    `  Branch: ${typeof result.branch === "string" ? result.branch : "unknown"}`,
+    `  HEAD: ${typeof result.head === "string" ? result.head : "unknown"}`,
+    `  Dirty: ${result.dirty === true ? "yes" : "no"}`,
+    ...(statusLines.length > 0 ? ["  Status lines:", ...statusLines.map((line) => `    ${line}`)] : []),
+  ].join("\n");
+}
+
+function formatTaskListReply(result: Record<string, unknown>): string {
+  if (typeof result.error === "string") {
+    return formatToolError(result, "task list failed");
+  }
+  const tasks = Array.isArray(result.tasks)
+    ? result.tasks.filter(
+        (value): value is { id: string; subject: string; status: string } =>
+          typeof value === "object" &&
+          value !== null &&
+          typeof (value as { id?: unknown }).id === "string" &&
+          typeof (value as { subject?: unknown }).subject === "string" &&
+          typeof (value as { status?: unknown }).status === "string",
+      )
+    : [];
+  if (tasks.length === 0) {
+    return "No tasks for this session.";
+  }
+  return [
+    `Tasks (${tasks.length}):`,
+    ...tasks.map((task) => `  ${task.id} [${task.status}] ${task.subject}`),
+  ].join("\n");
+}
+
+function formatTaskDetailReply(result: Record<string, unknown>): string {
+  if (typeof result.error === "string") {
+    return formatToolError(result, "task lookup failed");
+  }
+  const task =
+    typeof result.task === "object" && result.task !== null
+      ? (result.task as Record<string, unknown>)
+      : undefined;
+  if (!task) {
+    return "Task detail unavailable.";
+  }
+  return [
+    `Task ${typeof task.id === "string" ? task.id : "unknown"}:`,
+    `  Status: ${typeof task.status === "string" ? task.status : "unknown"}`,
+    `  Subject: ${typeof task.subject === "string" ? task.subject : "unknown"}`,
+    `  Description: ${typeof task.description === "string" ? task.description : "none"}`,
+  ].join("\n");
 }
 
 function summarizeStoredResponse(response: LLMStoredResponse): string {
@@ -981,6 +1356,618 @@ export function createDaemonCommandRegistry(
     },
   });
   commandRegistry.register({
+    name: "files",
+    description: "Show repo inventory or search files in the active workspace",
+    args: "[query|json]",
+    global: true,
+    handler: async (cmdCtx) => {
+      let jsonArgs: Record<string, unknown> | undefined;
+      try {
+        jsonArgs = parseCommandJsonArgs(cmdCtx.args);
+      } catch (error) {
+        await cmdCtx.reply(
+          `Usage: /files [query] [--regex] [--path <dir>] [--glob <pattern1,pattern2>] [--max <n>]\n${toErrorMessage(error)}`,
+        );
+        return;
+      }
+      if (jsonArgs) {
+        const query =
+          typeof jsonArgs.query === "string" ? jsonArgs.query.trim() : "";
+        const result = await executeStructuredTool(
+          baseToolHandler,
+          query.length > 0 ? "system.searchFiles" : "system.repoInventory",
+          jsonArgs,
+        );
+        await cmdCtx.reply(
+          query.length > 0
+            ? formatSearchFilesReply(result)
+            : formatRepoInventoryReply(result),
+        );
+        return;
+      }
+      const query = cmdCtx.argv
+        .filter((token) => !token.startsWith("--"))
+        .join(" ")
+        .trim();
+      if (!query) {
+        const result = await executeStructuredTool(
+          baseToolHandler,
+          "system.repoInventory",
+          {},
+        );
+        await cmdCtx.reply(formatRepoInventoryReply(result));
+        return;
+      }
+      const result = await executeStructuredTool(
+        baseToolHandler,
+        "system.searchFiles",
+        {
+          query,
+          ...(parseInlineFlag(cmdCtx.argv, "path")
+            ? { path: parseInlineFlag(cmdCtx.argv, "path") }
+            : {}),
+          ...(hasInlineFlag(cmdCtx.argv, "regex") ? { regex: true } : {}),
+          ...(parseCsvFlag(cmdCtx.argv, "glob")
+            ? { filePatterns: parseCsvFlag(cmdCtx.argv, "glob") }
+            : {}),
+          ...(parseIntegerFlag(cmdCtx.argv, "max")
+            ? { maxResults: parseIntegerFlag(cmdCtx.argv, "max") }
+            : {}),
+        },
+      );
+      await cmdCtx.reply(formatSearchFilesReply(result));
+    },
+  });
+  commandRegistry.register({
+    name: "grep",
+    description: "Search repo-local files with the native coding grep tool",
+    args: "<pattern|json>",
+    global: true,
+    handler: async (cmdCtx) => {
+      let jsonArgs: Record<string, unknown> | undefined;
+      try {
+        jsonArgs = parseCommandJsonArgs(cmdCtx.args);
+      } catch (error) {
+        await cmdCtx.reply(
+          `Usage: /grep <pattern> [--regex] [--path <dir>] [--glob <pattern1,pattern2>] [--context <n>] [--max <n>]\n${toErrorMessage(error)}`,
+        );
+        return;
+      }
+      const args =
+        jsonArgs ??
+        {
+          pattern: cmdCtx.argv
+            .filter((token) => !token.startsWith("--"))
+            .join(" ")
+            .trim(),
+          ...(parseInlineFlag(cmdCtx.argv, "path")
+            ? { path: parseInlineFlag(cmdCtx.argv, "path") }
+            : {}),
+          ...(hasInlineFlag(cmdCtx.argv, "regex") ? { regex: true } : {}),
+          ...(parseCsvFlag(cmdCtx.argv, "glob")
+            ? { filePatterns: parseCsvFlag(cmdCtx.argv, "glob") }
+            : {}),
+          ...(parseIntegerFlag(cmdCtx.argv, "context")
+            ? { contextLines: parseIntegerFlag(cmdCtx.argv, "context") }
+            : {}),
+          ...(parseIntegerFlag(cmdCtx.argv, "max")
+            ? { maxResults: parseIntegerFlag(cmdCtx.argv, "max") }
+            : {}),
+        };
+      if (typeof args.pattern !== "string" || args.pattern.trim().length === 0) {
+        await cmdCtx.reply(
+          "Usage: /grep <pattern> [--regex] [--path <dir>] [--glob <pattern1,pattern2>] [--context <n>] [--max <n>]",
+        );
+        return;
+      }
+      const result = await executeStructuredTool(
+        baseToolHandler,
+        "system.grep",
+        args,
+      );
+      await cmdCtx.reply(formatGrepReply(result));
+    },
+  });
+  commandRegistry.register({
+    name: "git",
+    description: "Run structured git status, diff, branch, show, summary, or worktree commands",
+    args: "<status|diff|show|branch|summary|worktree>",
+    global: true,
+    handler: async (cmdCtx) => {
+      let jsonArgs: Record<string, unknown> | undefined;
+      try {
+        jsonArgs = parseCommandJsonArgs(cmdCtx.args);
+      } catch (error) {
+        await cmdCtx.reply(`Usage: /git <status|diff|show|branch|summary|worktree>\n${toErrorMessage(error)}`);
+        return;
+      }
+
+      const subcommand =
+        typeof jsonArgs?.subcommand === "string"
+          ? jsonArgs.subcommand.trim().toLowerCase()
+          : cmdCtx.argv[0]?.toLowerCase();
+      if (!subcommand) {
+        await cmdCtx.reply(
+          "Usage: /git <status|diff|show|branch|summary|worktree>",
+        );
+        return;
+      }
+
+      if (subcommand === "status") {
+        const result = await executeStructuredTool(
+          baseToolHandler,
+          "system.gitStatus",
+          jsonArgs ?? {},
+        );
+        await cmdCtx.reply(formatGitStatusReply(result));
+        return;
+      }
+
+      if (subcommand === "branch") {
+        const result = await executeStructuredTool(
+          baseToolHandler,
+          "system.gitBranchInfo",
+          jsonArgs ?? {},
+        );
+        await cmdCtx.reply(formatGitBranchReply(result));
+        return;
+      }
+
+      if (subcommand === "summary") {
+        const result = await executeStructuredTool(
+          baseToolHandler,
+          "system.gitChangeSummary",
+          jsonArgs ?? {},
+        );
+        await cmdCtx.reply(formatGitSummaryReply(result));
+        return;
+      }
+
+      if (subcommand === "show") {
+        const ref =
+          typeof jsonArgs?.ref === "string"
+            ? jsonArgs.ref.trim()
+            : cmdCtx.argv[1]?.trim();
+        if (!ref) {
+          await cmdCtx.reply("Usage: /git show <ref> [--stat]");
+          return;
+        }
+        const result = await executeStructuredTool(
+          baseToolHandler,
+          "system.gitShow",
+          jsonArgs ?? {
+            ref,
+            ...(hasInlineFlag(cmdCtx.argv, "stat") ? { noPatch: true } : {}),
+          },
+        );
+        await cmdCtx.reply(formatGitShowReply(result));
+        return;
+      }
+
+      if (subcommand === "diff") {
+        const result = await executeStructuredTool(
+          baseToolHandler,
+          "system.gitDiff",
+          jsonArgs ?? {
+            ...(hasInlineFlag(cmdCtx.argv, "staged") ? { staged: true } : {}),
+            ...(parseInlineFlag(cmdCtx.argv, "from")
+              ? { fromRef: parseInlineFlag(cmdCtx.argv, "from") }
+              : {}),
+            ...(parseInlineFlag(cmdCtx.argv, "to")
+              ? { toRef: parseInlineFlag(cmdCtx.argv, "to") }
+              : {}),
+            ...(parseCsvFlag(cmdCtx.argv, "files")
+              ? { filePaths: parseCsvFlag(cmdCtx.argv, "files") }
+              : {}),
+          },
+        );
+        await cmdCtx.reply(formatGitDiffReply(result));
+        return;
+      }
+
+      if (subcommand === "worktree") {
+        const worktreeCommand =
+          typeof jsonArgs?.action === "string"
+            ? jsonArgs.action.trim().toLowerCase()
+            : cmdCtx.argv[1]?.toLowerCase();
+        if (!worktreeCommand) {
+          await cmdCtx.reply(
+            "Usage: /git worktree <list|create|remove|status> [...]",
+          );
+          return;
+        }
+        if (worktreeCommand === "list") {
+          const result = await executeStructuredTool(
+            baseToolHandler,
+            "system.gitWorktreeList",
+            jsonArgs ?? {},
+          );
+          await cmdCtx.reply(formatGitWorktreeListReply(result));
+          return;
+        }
+        if (worktreeCommand === "create") {
+          const worktreePath =
+            typeof jsonArgs?.worktreePath === "string"
+              ? jsonArgs.worktreePath.trim()
+              : cmdCtx.argv[2]?.trim();
+          if (!worktreePath) {
+            await cmdCtx.reply(
+              "Usage: /git worktree create <path> [--branch <name>] [--ref <ref>] [--detached]",
+            );
+            return;
+          }
+          const result = await executeStructuredTool(
+            baseToolHandler,
+            "system.gitWorktreeCreate",
+            jsonArgs ?? {
+              worktreePath,
+              ...(parseInlineFlag(cmdCtx.argv, "branch")
+                ? { branch: parseInlineFlag(cmdCtx.argv, "branch") }
+                : {}),
+              ...(parseInlineFlag(cmdCtx.argv, "ref")
+                ? { ref: parseInlineFlag(cmdCtx.argv, "ref") }
+                : {}),
+              ...(hasInlineFlag(cmdCtx.argv, "detached") ? { detached: true } : {}),
+            },
+          );
+          await cmdCtx.reply(formatGitWorktreeMutationReply("create", result));
+          return;
+        }
+        if (worktreeCommand === "remove") {
+          const worktreePath =
+            typeof jsonArgs?.worktreePath === "string"
+              ? jsonArgs.worktreePath.trim()
+              : cmdCtx.argv[2]?.trim();
+          if (!worktreePath) {
+            await cmdCtx.reply(
+              "Usage: /git worktree remove <path> [--force]",
+            );
+            return;
+          }
+          const result = await executeStructuredTool(
+            baseToolHandler,
+            "system.gitWorktreeRemove",
+            jsonArgs ?? {
+              worktreePath,
+              ...(hasInlineFlag(cmdCtx.argv, "force") ? { force: true } : {}),
+            },
+          );
+          await cmdCtx.reply(formatGitWorktreeMutationReply("remove", result));
+          return;
+        }
+        if (worktreeCommand === "status") {
+          const worktreePath =
+            typeof jsonArgs?.worktreePath === "string"
+              ? jsonArgs.worktreePath.trim()
+              : cmdCtx.argv[2]?.trim();
+          if (!worktreePath) {
+            await cmdCtx.reply(
+              "Usage: /git worktree status <path>",
+            );
+            return;
+          }
+          const result = await executeStructuredTool(
+            baseToolHandler,
+            "system.gitWorktreeStatus",
+            jsonArgs ?? { worktreePath },
+          );
+          await cmdCtx.reply(formatGitWorktreeStatusReply(result));
+          return;
+        }
+        await cmdCtx.reply(
+          "Usage: /git worktree <list|create|remove|status> [...]",
+        );
+        return;
+      }
+
+      await cmdCtx.reply(
+        "Usage: /git <status|diff|show|branch|summary|worktree>",
+      );
+    },
+  });
+  commandRegistry.register({
+    name: "branch",
+    description: "Alias for /git branch",
+    global: true,
+    handler: async (cmdCtx) => {
+      await commandRegistry
+        .get("git")
+        ?.handler({
+          ...cmdCtx,
+          args: "branch",
+          argv: ["branch"],
+        });
+    },
+  });
+  commandRegistry.register({
+    name: "worktree",
+    description: "Alias for /git worktree",
+    args: "<list|create|remove|status>",
+    global: true,
+    handler: async (cmdCtx) => {
+      const args = cmdCtx.args.trim();
+      const forwardedArgs =
+        args.startsWith("{")
+          ? JSON.stringify({
+              subcommand: "worktree",
+              ...(JSON.parse(args) as Record<string, unknown>),
+            })
+          : `worktree${args.length > 0 ? ` ${args}` : ""}`;
+      await commandRegistry
+        .get("git")
+        ?.handler({
+          ...cmdCtx,
+          args: forwardedArgs,
+          argv: args.startsWith("{") ? ["worktree"] : ["worktree", ...cmdCtx.argv],
+        });
+    },
+  });
+  commandRegistry.register({
+    name: "diff",
+    description: "Show repo change summary plus a structured git diff",
+    args: "[--staged|json]",
+    global: true,
+    handler: async (cmdCtx) => {
+      let jsonArgs: Record<string, unknown> | undefined;
+      try {
+        jsonArgs = parseCommandJsonArgs(cmdCtx.args);
+      } catch (error) {
+        await cmdCtx.reply(`Usage: /diff [--staged] [--from <ref>] [--to <ref>] [--files <a,b>]\n${toErrorMessage(error)}`);
+        return;
+      }
+      const summary = await executeStructuredTool(
+        baseToolHandler,
+        "system.gitChangeSummary",
+        jsonArgs ?? {},
+      );
+      const diff = await executeStructuredTool(
+        baseToolHandler,
+        "system.gitDiff",
+        jsonArgs ?? {
+          ...(hasInlineFlag(cmdCtx.argv, "staged") ? { staged: true } : {}),
+          ...(parseInlineFlag(cmdCtx.argv, "from")
+            ? { fromRef: parseInlineFlag(cmdCtx.argv, "from") }
+            : {}),
+          ...(parseInlineFlag(cmdCtx.argv, "to")
+            ? { toRef: parseInlineFlag(cmdCtx.argv, "to") }
+            : {}),
+          ...(parseCsvFlag(cmdCtx.argv, "files")
+            ? { filePaths: parseCsvFlag(cmdCtx.argv, "files") }
+            : {}),
+        },
+      );
+      await cmdCtx.reply(
+        `${formatGitSummaryReply(summary)}\n\n${formatGitDiffReply(diff)}`,
+      );
+    },
+  });
+  commandRegistry.register({
+    name: "review",
+    description: "Summarize the current repo state for human or agent review",
+    args: "[--staged]",
+    global: true,
+    handler: async (cmdCtx) => {
+      let jsonArgs: Record<string, unknown> | undefined;
+      try {
+        jsonArgs = parseCommandJsonArgs(cmdCtx.args);
+      } catch (error) {
+        await cmdCtx.reply(`Usage: /review [--staged]\n${toErrorMessage(error)}`);
+        return;
+      }
+      const branchInfo = await executeStructuredTool(
+        baseToolHandler,
+        "system.gitBranchInfo",
+        {},
+      );
+      const summary = await executeStructuredTool(
+        baseToolHandler,
+        "system.gitChangeSummary",
+        {},
+      );
+      const diff = await executeStructuredTool(
+        baseToolHandler,
+        "system.gitDiff",
+        jsonArgs ??
+          (hasInlineFlag(cmdCtx.argv, "staged") ? { staged: true } : {}),
+      );
+      await cmdCtx.reply(
+        [
+          "Review surface:",
+          formatGitBranchReply(branchInfo),
+          "",
+          formatGitSummaryReply(summary),
+          "",
+          typeof diff.diff === "string" && diff.diff.trim().length > 0
+            ? formatGitDiffReply(diff)
+            : "No diff content to review.",
+        ].join("\n"),
+      );
+    },
+  });
+  commandRegistry.register({
+    name: "tasks",
+    description: "List or inspect session task-tracker tasks",
+    args: "[list|get <taskId>|wait <taskId>|output <taskId>]",
+    global: true,
+    handler: async (cmdCtx) => {
+      let jsonArgs: Record<string, unknown> | undefined;
+      try {
+        jsonArgs = parseCommandJsonArgs(cmdCtx.args);
+      } catch (error) {
+        await cmdCtx.reply(
+          `Usage: /tasks [list|get <taskId>|wait <taskId>|output <taskId>]\n${toErrorMessage(error)}`,
+        );
+        return;
+      }
+      const subcommand =
+        typeof jsonArgs?.subcommand === "string"
+          ? jsonArgs.subcommand.trim().toLowerCase()
+          : cmdCtx.argv[0]?.toLowerCase() ?? "list";
+      if (subcommand === "list") {
+        const result = await executeStructuredTool(
+          baseToolHandler,
+          "task.list",
+          {
+            [TASK_LIST_ARG]: cmdCtx.sessionId,
+            ...(jsonArgs?.status ? { status: jsonArgs.status } : {}),
+            ...(parseInlineFlag(cmdCtx.argv, "status")
+              ? { status: parseInlineFlag(cmdCtx.argv, "status") }
+              : {}),
+          },
+        );
+        await cmdCtx.reply(formatTaskListReply(result));
+        return;
+      }
+
+      const taskId =
+        typeof jsonArgs?.taskId === "string"
+          ? jsonArgs.taskId.trim()
+          : cmdCtx.argv[1]?.trim();
+      if (!taskId) {
+        await cmdCtx.reply(
+          "Usage: /tasks [list|get <taskId>|wait <taskId>|output <taskId>]",
+        );
+        return;
+      }
+
+      if (subcommand === "get") {
+        const result = await executeStructuredTool(
+          baseToolHandler,
+          "task.get",
+          { [TASK_LIST_ARG]: cmdCtx.sessionId, taskId },
+        );
+        await cmdCtx.reply(formatTaskDetailReply(result));
+        return;
+      }
+
+      if (subcommand === "wait") {
+        const result = await executeStructuredTool(
+          baseToolHandler,
+          "task.wait",
+          {
+            [TASK_LIST_ARG]: cmdCtx.sessionId,
+            taskId,
+            ...(typeof jsonArgs?.timeoutMs === "number"
+              ? { timeoutMs: jsonArgs.timeoutMs }
+              : {}),
+            ...(parseIntegerFlag(cmdCtx.argv, "timeout")
+              ? { timeoutMs: parseIntegerFlag(cmdCtx.argv, "timeout") }
+              : {}),
+          },
+        );
+        await cmdCtx.reply(formatTaskDetailReply(result));
+        return;
+      }
+
+      if (subcommand === "output") {
+        const result = await executeStructuredTool(
+          baseToolHandler,
+          "task.output",
+          {
+            [TASK_LIST_ARG]: cmdCtx.sessionId,
+            taskId,
+            ...(jsonArgs?.block === true ? { block: true } : {}),
+            ...(typeof jsonArgs?.timeoutMs === "number"
+              ? { timeoutMs: jsonArgs.timeoutMs }
+              : {}),
+            ...(hasInlineFlag(cmdCtx.argv, "block") ? { block: true } : {}),
+            ...(parseIntegerFlag(cmdCtx.argv, "timeout")
+              ? { timeoutMs: parseIntegerFlag(cmdCtx.argv, "timeout") }
+              : {}),
+          },
+        );
+        await cmdCtx.reply(
+          typeof result.output === "string"
+            ? result.output
+            : formatTaskDetailReply(result),
+        );
+        return;
+      }
+
+      await cmdCtx.reply(
+        "Usage: /tasks [list|get <taskId>|wait <taskId>|output <taskId>]",
+      );
+    },
+  });
+  commandRegistry.register({
+    name: "plan",
+    description: "Show the current coding-plan surface for this session",
+    global: true,
+    handler: async (cmdCtx) => {
+      const sessionId = resolveSessionId(cmdCtx.sessionId);
+      const session = sessionMgr.get(sessionId);
+      const shellProfile = resolveSessionShellProfile(session?.metadata ?? {});
+      const branchInfo = await executeStructuredTool(
+        baseToolHandler,
+        "system.gitBranchInfo",
+        {},
+      );
+      const summary = await executeStructuredTool(
+        baseToolHandler,
+        "system.gitChangeSummary",
+        {},
+      );
+      const tasks = await executeStructuredTool(
+        baseToolHandler,
+        "task.list",
+        { [TASK_LIST_ARG]: cmdCtx.sessionId },
+      );
+      const activePipelines = pipelineExecutor
+        ? await pipelineExecutor.listActive()
+        : [];
+      await cmdCtx.reply(
+        [
+          "Plan surface:",
+          `  Session: ${cmdCtx.sessionId}`,
+          `  Shell profile: ${shellProfile}`,
+          `  History messages: ${session?.history.length ?? 0}`,
+          `  Active pipelines: ${activePipelines.length}`,
+          "",
+          formatGitBranchReply(branchInfo),
+          "",
+          formatGitSummaryReply(summary),
+          "",
+          formatTaskListReply(tasks),
+          "",
+          "Phase 4 will add explicit plan mode and review stages. Today, use /tasks, /review, /diff, and /worktree directly.",
+        ].join("\n"),
+      );
+    },
+  });
+  commandRegistry.register({
+    name: "session",
+    description: "Show the current shell session identity and workspace context",
+    global: true,
+    handler: async (cmdCtx) => {
+      const resolvedSessionId = resolveSessionId(cmdCtx.sessionId);
+      const session = sessionMgr.get(resolvedSessionId);
+      const workspaceRoot =
+        (session?.metadata?.workspaceRoot as string | undefined) ??
+        (typeof ctx.getWebChatChannel()?.loadSessionWorkspaceRoot === "function"
+          ? await ctx.getWebChatChannel()!.loadSessionWorkspaceRoot(cmdCtx.sessionId)
+          : undefined) ??
+        ctx.getHostWorkspacePath() ??
+        process.cwd();
+      const modelInfo = ctx.getSessionModelInfo(cmdCtx.sessionId);
+      const shellProfile = resolveSessionShellProfile(session?.metadata ?? {});
+      await cmdCtx.reply(
+        [
+          "Shell session:",
+          `  Session id: ${cmdCtx.sessionId}`,
+          `  Runtime session id: ${resolvedSessionId}`,
+          `  Profile: ${shellProfile}`,
+          `  Workspace root: ${workspaceRoot}`,
+          `  History messages: ${session?.history.length ?? 0}`,
+          `  Model: ${
+            modelInfo
+              ? `${modelInfo.provider}:${modelInfo.model}${modelInfo.usedFallback ? " (fallback)" : ""}`
+              : "unknown"
+          }`,
+        ].join("\n"),
+      );
+    },
+  });
+  commandRegistry.register({
     name: "response",
     description: "Inspect or delete stored xAI Responses API objects",
     args: "[status|get [response-id|latest] [--json]|delete [response-id|latest]]",
@@ -1255,6 +2242,74 @@ export function createDaemonCommandRegistry(
             : "Approval preview: none",
         ].join("\n"),
       );
+    },
+  });
+  commandRegistry.register({
+    name: "permissions",
+    description: "Alias for /policy with coding-shell wording",
+    args: "[status|simulate <toolName> [jsonArgs]|credentials|revoke-credentials [credentialId]|update <allow|deny|clear|reset> [pattern]]",
+    global: true,
+    handler: async (cmdCtx) => {
+      const policy = commandRegistry.get("policy");
+      if (!policy) {
+        await cmdCtx.reply("Policy command is unavailable.");
+        return;
+      }
+      await policy.handler(cmdCtx);
+    },
+  });
+  commandRegistry.register({
+    name: "mcp",
+    description: "Show configured MCP servers and discovered MCP tools",
+    args: "[status|list|tools]",
+    global: true,
+    handler: async (cmdCtx) => {
+      const subcommand = cmdCtx.argv[0]?.toLowerCase() ?? "status";
+      const catalog = registry.listCatalog();
+      const mcpCatalog = catalog.filter((entry) => entry.metadata.source === "mcp");
+      const sourceCounts = groupCatalogBySource(catalog);
+      const configuredServers = Array.isArray(ctx.gateway?.config.mcp?.servers)
+        ? ctx.gateway?.config.mcp?.servers
+        : [];
+      const renderStatus = (): string => [
+        "MCP surface:",
+        `  Configured servers: ${configuredServers.length}`,
+        `  Connected MCP tools: ${mcpCatalog.length}`,
+        `  Builtin tools: ${sourceCounts.builtin ?? 0}`,
+        `  Plugin tools: ${sourceCounts.plugin ?? 0}`,
+        `  Skill tools: ${sourceCounts.skill ?? 0}`,
+      ].join("\n");
+
+      if (subcommand === "status") {
+        await cmdCtx.reply(renderStatus());
+        return;
+      }
+      if (subcommand === "list") {
+        if (configuredServers.length === 0) {
+          await cmdCtx.reply(`${renderStatus()}\n\nNo MCP servers are configured.`);
+          return;
+        }
+        const lines = configuredServers.map((server) => {
+          const toolCount = mcpCatalog.filter((entry) =>
+            entry.name.startsWith(`mcp.${server.name}.`)
+          ).length;
+          return `  ${server.name} — ${server.enabled === false ? "disabled" : "enabled"} — trust=${server.trustTier ?? "unknown"} — tools=${toolCount}`;
+        });
+        await cmdCtx.reply(`${renderStatus()}\n\nServers:\n${lines.join("\n")}`);
+        return;
+      }
+      if (subcommand === "tools") {
+        if (mcpCatalog.length === 0) {
+          await cmdCtx.reply(`${renderStatus()}\n\nNo MCP tools are currently connected.`);
+          return;
+        }
+        const lines = mcpCatalog
+          .slice(0, 100)
+          .map((entry) => `  ${entry.name} — ${entry.description}`);
+        await cmdCtx.reply(`${renderStatus()}\n\nTools:\n${lines.join("\n")}`);
+        return;
+      }
+      await cmdCtx.reply("Usage: /mcp [status|list|tools]");
     },
   });
   commandRegistry.register({
@@ -1674,6 +2729,70 @@ export function createDaemonCommandRegistry(
       } catch (err) {
         ctx.logger.error("Failed to update model config", { error: toErrorMessage(err) });
         await cmdCtx.reply(`Failed to switch model: ${toErrorMessage(err)}`);
+      }
+    },
+  });
+  commandRegistry.register({
+    name: "effort",
+    description: "Show or switch the configured reasoning effort",
+    args: "[current|list|low|medium|high|xhigh]",
+    global: true,
+    handler: async (cmdCtx) => {
+      const arg = cmdCtx.args.trim().toLowerCase();
+      const configuredEffort =
+        ctx.gateway?.config.llm?.reasoningEffort ?? "medium";
+
+      if (!arg || arg === "current" || arg === "status") {
+        await cmdCtx.reply(
+          [
+            "Reasoning effort:",
+            `  Current: ${configuredEffort}`,
+            `  Available: ${REASONING_EFFORTS.join(", ")}`,
+            "",
+            "Switch with: /effort <low|medium|high|xhigh>",
+          ].join("\n"),
+        );
+        return;
+      }
+
+      if (arg === "list") {
+        await cmdCtx.reply(
+          `Reasoning efforts:\n${REASONING_EFFORTS.map((effort) => `  ${effort}${effort === configuredEffort ? " (active)" : ""}`).join("\n")}`,
+        );
+        return;
+      }
+
+      if (!REASONING_EFFORTS.includes(arg as (typeof REASONING_EFFORTS)[number])) {
+        await cmdCtx.reply(
+          "Usage: /effort [current|list|low|medium|high|xhigh]",
+        );
+        return;
+      }
+
+      if (arg === configuredEffort) {
+        await cmdCtx.reply(`Already using reasoning effort "${arg}".`);
+        return;
+      }
+
+      try {
+        const raw = await readFile(ctx.configPath, "utf-8");
+        const config = JSON.parse(raw) as Record<string, unknown>;
+        const llm = (config.llm ?? {}) as Record<string, unknown>;
+        llm.reasoningEffort = arg;
+        config.llm = llm;
+        await writeFile(ctx.configPath, JSON.stringify(config, null, 2) + "\n");
+        ctx.logger.info(`Reasoning effort switched to ${arg} via /effort command`);
+        await ctx.handleConfigReload();
+        await cmdCtx.reply(
+          `Reasoning effort switched: ${configuredEffort} → ${arg}`,
+        );
+      } catch (error) {
+        ctx.logger.error("Failed to update reasoning effort config", {
+          error: toErrorMessage(error),
+        });
+        await cmdCtx.reply(
+          `Failed to switch reasoning effort: ${toErrorMessage(error)}`,
+        );
       }
     },
   });

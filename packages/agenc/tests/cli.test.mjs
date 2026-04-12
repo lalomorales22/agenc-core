@@ -106,6 +106,8 @@ test("runAgencWrapper help includes the dashboard entrypoint", async () => {
   const help = stdout.read();
   assert.match(help, /agenc ui/u);
   assert.match(help, /agenc shell coding/u);
+  assert.match(help, /agenc plan/u);
+  assert.match(help, /agenc mcp list/u);
   assert.match(help, /agenc agent register/u);
   assert.match(help, /agenc market tasks create/u);
   assert.match(help, /Linux x64/u);

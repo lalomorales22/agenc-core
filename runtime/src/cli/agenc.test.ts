@@ -208,6 +208,7 @@ describe("agenc launcher CLI", () => {
     expect(code).toBe(0);
     expect(stdout.data()).toContain("agenc [--profile <name>]");
     expect(stdout.data()).toContain("agenc shell [profile]");
+    expect(stdout.data()).toContain("agenc plan | tasks | files | grep | git | branch | worktree | diff | review");
     expect(stdout.data()).toContain("agenc ui");
     expect(stdout.data()).toContain("agenc init");
     expect(stdout.data()).toContain("agenc status");

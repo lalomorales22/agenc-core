@@ -58,8 +58,27 @@ Current shell entrypoint:
 
 - `agenc` opens the `general` shell on the public wrapper path
 - `agenc shell [profile]`
+- `agenc resume [--profile <name>]`
 - `agenc-runtime shell [profile]` as the compatibility alias
 - `agenc console` for the explicit operator-console compatibility path
+
+Current coding shell command surface:
+
+- `agenc plan`
+- `agenc tasks`
+- `agenc files`
+- `agenc grep`
+- `agenc git status|diff|show|branch|summary|worktree`
+- `agenc branch`
+- `agenc worktree`
+- `agenc diff`
+- `agenc review`
+- `agenc session`
+- `agenc permissions`
+- `agenc mcp`
+- `agenc skills`
+- `agenc model`
+- `agenc effort`
 
 Current coding runtime surface:
 

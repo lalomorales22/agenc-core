@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { silentLogger } from "../utils/logger.js";
 import { createDaemonCommandRegistry } from "./daemon-command-registry.js";
@@ -13,7 +16,26 @@ function makeCommandRegistry(params?: {
   sessionOverrides?: Record<string, unknown>;
   memoryBackendOverrides?: Record<string, unknown>;
   gatewayLlmOverrides?: Record<string, unknown>;
+  toolResponses?: Record<string, unknown>;
+  toolCatalog?: Array<Record<string, unknown>>;
 }) {
+  const configDir = mkdtempSync(join(tmpdir(), "agenc-daemon-cmd-"));
+  const configPath = join(configDir, "config.json");
+  writeFileSync(
+    configPath,
+    JSON.stringify({
+      llm: {
+        provider: "grok",
+        model: "grok-4.20-beta-0309-reasoning",
+        reasoningEffort: "medium",
+        statefulResponses: { enabled: true, store: true },
+      },
+      mcp: {
+        servers: [{ name: "demo", enabled: true, trustTier: "trusted" }],
+      },
+    }),
+    "utf8",
+  );
   const session = {
     history: new Array(6).fill({}),
     metadata: {
@@ -88,11 +110,147 @@ function makeCommandRegistry(params?: {
     deniedPatterns:
       params.operation === "deny" && params.pattern ? [params.pattern] : [],
   }));
+  const defaultToolResponses: Record<string, unknown> = {
+    "system.repoInventory": {
+      repoRoot: "/tmp/project",
+      branch: "feature/coding-first-shell",
+      fileCount: 120,
+      manifests: ["package.json"],
+      topLevelDirectories: ["src", "docs", "tests"],
+      languages: [
+        { language: "TypeScript", count: 80 },
+        { language: "Markdown", count: 10 },
+      ],
+    },
+    "system.searchFiles": {
+      matches: ["src/shell-profile.ts", "src/cli/index.ts"],
+    },
+    "system.grep": {
+      matches: [
+        {
+          filePath: "src/shell-profile.ts",
+          line: 12,
+          column: 5,
+          matchText: "shellProfile",
+        },
+      ],
+      truncated: false,
+    },
+    "system.gitStatus": {
+      repoRoot: "/tmp/project",
+      branch: "feature/coding-first-shell",
+      upstream: "origin/main",
+      ahead: 1,
+      behind: 0,
+      changed: [{ path: "src/cli/index.ts" }],
+      summary: {
+        staged: 1,
+        unstaged: 2,
+        untracked: 0,
+        conflicted: 0,
+      },
+    },
+    "system.gitBranchInfo": {
+      repoRoot: "/tmp/project",
+      branch: "feature/coding-first-shell",
+      head: "abc123",
+      upstream: "origin/main",
+      ahead: 1,
+      behind: 0,
+    },
+    "system.gitChangeSummary": {
+      summary: {
+        staged: 1,
+        unstaged: 2,
+        untracked: 0,
+        renamed: 0,
+        deleted: 0,
+        conflicted: 0,
+      },
+    },
+    "system.gitDiff": {
+      diff: "diff --git a/src/cli/index.ts b/src/cli/index.ts\n+new line\n",
+      truncated: false,
+    },
+    "system.gitShow": {
+      output: "commit abc123\nAuthor: Test\n",
+    },
+    "system.gitWorktreeList": {
+      worktrees: [
+        {
+          path: "/tmp/project",
+          branch: "feature/coding-first-shell",
+          head: "abc123",
+          detached: false,
+        },
+      ],
+    },
+    "system.gitWorktreeCreate": {
+      worktreePath: "/tmp/project-alt",
+      branch: "alt",
+      ref: null,
+    },
+    "system.gitWorktreeRemove": {
+      worktreePath: "/tmp/project-alt",
+      dirty: false,
+    },
+    "system.gitWorktreeStatus": {
+      worktreePath: "/tmp/project-alt",
+      branch: "alt",
+      head: "def456",
+      dirty: false,
+      statusLines: [],
+    },
+    "task.list": {
+      tasks: [{ id: "1", subject: "Ship shell", status: "in_progress" }],
+    },
+    "task.get": {
+      task: {
+        id: "1",
+        subject: "Ship shell",
+        status: "in_progress",
+        description: "Do the work",
+      },
+    },
+    "task.wait": {
+      task: {
+        id: "1",
+        subject: "Ship shell",
+        status: "completed",
+        description: "Do the work",
+      },
+    },
+    "task.output": {
+      output: "done",
+    },
+  };
+  const toolResponses = {
+    ...defaultToolResponses,
+    ...(params?.toolResponses ?? {}),
+  };
+  const baseToolHandler = vi.fn(async (name: string) =>
+    JSON.stringify(toolResponses[name] ?? { error: `Unknown tool: ${name}` }),
+  );
+  const toolCatalog =
+    params?.toolCatalog ?? [
+      {
+        name: "mcp.demo.lookup",
+        description: "Lookup from MCP",
+        inputSchema: {},
+        metadata: { source: "mcp", family: "mcp", hiddenByDefault: false, mutating: false },
+      },
+      {
+        name: "system.grep",
+        description: "Search files",
+        inputSchema: {},
+        metadata: { source: "builtin", family: "coding", hiddenByDefault: false, mutating: false },
+      },
+    ];
 
   const registry = createDaemonCommandRegistry(
     {
       logger: silentLogger,
-      configPath: "/tmp/config.json",
+      configPath,
       gateway: {
         config: {
           llm: {
@@ -105,6 +263,11 @@ function makeCommandRegistry(params?: {
             },
             includeEncryptedReasoning: true,
             ...(params?.gatewayLlmOverrides ?? {}),
+          },
+          mcp: {
+            servers: [
+              { name: "demo", enabled: true, trustTier: "trusted" },
+            ],
           },
         },
       },
@@ -168,11 +331,14 @@ function makeCommandRegistry(params?: {
     (value) => value,
     providers as any,
     memoryBackend,
-    { size: 181 } as any,
+    {
+      size: 181,
+      listCatalog: () => toolCatalog,
+    } as any,
     [],
     [],
     {} as any,
-    {} as any,
+    baseToolHandler as any,
     null,
     undefined,
     undefined,
@@ -185,6 +351,7 @@ function makeCommandRegistry(params?: {
     providers,
     getSessionPolicyState,
     updateSessionPolicyState,
+    baseToolHandler,
   };
 }
 
@@ -399,5 +566,76 @@ describe("createDaemonCommandRegistry /response", () => {
     expect(replies).toHaveLength(1);
     expect(replies[0]).toContain("\"id\": \"resp-anchor-1\"");
     expect(replies[0]).toContain("\"output_text\": \"stored response content\"");
+  });
+});
+
+describe("createDaemonCommandRegistry coding shell commands", () => {
+  it("shows repo inventory for /files", async () => {
+    const { registry, baseToolHandler } = makeCommandRegistry();
+
+    const replies = await dispatchAndCollect(registry, "/files");
+
+    expect(replies[0]).toContain("Repo inventory:");
+    expect(replies[0]).toContain("feature/coding-first-shell");
+    expect(baseToolHandler).toHaveBeenCalledWith("system.repoInventory", {});
+  });
+
+  it("runs the structured grep command", async () => {
+    const { registry, baseToolHandler } = makeCommandRegistry();
+
+    const replies = await dispatchAndCollect(
+      registry,
+      '/grep {"pattern":"shellProfile"}',
+    );
+
+    expect(replies[0]).toContain("src/shell-profile.ts:12:5");
+    expect(baseToolHandler).toHaveBeenCalledWith(
+      "system.grep",
+      expect.objectContaining({ pattern: "shellProfile" }),
+    );
+  });
+
+  it("runs structured git status and worktree commands", async () => {
+    const { registry, baseToolHandler } = makeCommandRegistry();
+
+    const statusReplies = await dispatchAndCollect(registry, "/git status");
+    const worktreeReplies = await dispatchAndCollect(
+      registry,
+      '/worktree {"action":"list"}',
+    );
+
+    expect(statusReplies[0]).toContain("Git status:");
+    expect(statusReplies[0]).toContain("Changed files: 1");
+    expect(worktreeReplies[0]).toContain("Worktrees (1):");
+    expect(baseToolHandler).toHaveBeenCalledWith("system.gitStatus", {});
+    expect(baseToolHandler).toHaveBeenCalledWith("system.gitWorktreeList", {
+      action: "list",
+      subcommand: "worktree",
+    });
+  });
+
+  it("shows task state and MCP state", async () => {
+    const { registry, baseToolHandler } = makeCommandRegistry();
+
+    const taskReplies = await dispatchAndCollect(registry, "/tasks list");
+    const mcpReplies = await dispatchAndCollect(registry, "/mcp list");
+
+    expect(taskReplies[0]).toContain("Tasks (1):");
+    expect(taskReplies[0]).toContain("Ship shell");
+    expect(mcpReplies[0]).toContain("Configured servers: 1");
+    expect(mcpReplies[0]).toContain("Connected MCP tools: 1");
+    expect(baseToolHandler).toHaveBeenCalledWith("task.list", {
+      __agencTaskListId: "session-1",
+    });
+  });
+
+  it("shows and updates reasoning effort", async () => {
+    const { registry } = makeCommandRegistry();
+
+    const statusReplies = await dispatchAndCollect(registry, "/effort");
+    const updateReplies = await dispatchAndCollect(registry, "/effort high");
+
+    expect(statusReplies[0]).toContain("Reasoning effort:");
+    expect(updateReplies[0]).toContain("Reasoning effort switched: medium → high");
   });
 });
