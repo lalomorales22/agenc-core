@@ -141,6 +141,7 @@ import {
   type DiscoveredSkill,
 } from "../skills/markdown/discovery.js";
 import { MarkdownSkillInjector } from "../skills/markdown/injector.js";
+import { PluginCatalog } from "../skills/catalog.js";
 import { VoiceBridge } from "./voice-bridge.js";
 import { createSessionToolHandler } from "./tool-handler-factory.js";
 import {
@@ -4107,6 +4108,12 @@ export class DaemonManager {
       getSessionModelInfo: (sessionId) =>
         this._sessionModelInfo.get(sessionId),
       handleConfigReload: () => this.handleConfigReload(),
+      getMcpManager: () => this._mcpManager,
+      getPluginCatalog: () => new PluginCatalog(),
+      discoverShellSkills: async ({ sessionId }) =>
+        await this.discoverShellSkills(sessionId),
+      resolveShellSkillDiscoveryPaths: async ({ sessionId }) =>
+        await this.resolveShellSkillDiscoveryPaths(sessionId),
       getVoiceBridge: () => this._voiceBridge,
       getDesktopManager: () => this._desktopManager as any,
       getDesktopBridges: () => this._desktopBridges,
@@ -6263,6 +6270,41 @@ export class DaemonManager {
       return [];
     }
   }
+
+  private async resolveShellSkillDiscoveryPaths(
+    sessionId: string,
+  ): Promise<DiscoveryPaths> {
+    const runtimeDiscovery = resolveRuntimeSkillDiscoveryPaths();
+    const sessionWorkspaceRoot =
+      (typeof this._webChatChannel?.loadSessionWorkspaceRoot === "function"
+        ? await this._webChatChannel.loadSessionWorkspaceRoot(sessionId)
+        : undefined) ??
+      this._hostWorkspacePath ??
+      process.cwd();
+
+    return {
+      builtinSkills: runtimeDiscovery.builtinSkills,
+      userSkills: join(homedir(), ".agenc", "skills"),
+      ...(sessionWorkspaceRoot
+        ? { projectSkills: join(sessionWorkspaceRoot, "skills") }
+        : {}),
+    };
+  }
+
+  private async discoverShellSkills(
+    sessionId: string,
+  ): Promise<DiscoveredSkill[]> {
+    try {
+      const discovery = new SkillDiscovery(
+        await this.resolveShellSkillDiscoveryPaths(sessionId),
+      );
+      return await discovery.discoverAll();
+    } catch (err) {
+      this.logger.warn?.("Shell skill discovery failed:", err);
+      return [];
+    }
+  }
+
   private stopRecurringWorkForShutdown(): void {
     if (this._heartbeatScheduler !== null) {
       this._heartbeatScheduler.stop();

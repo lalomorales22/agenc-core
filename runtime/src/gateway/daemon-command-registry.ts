@@ -8,11 +8,12 @@
  * @module
  */
 
-import { readFile, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { readFile, unlink, writeFile } from "node:fs/promises";
 import { resolve as resolvePath } from "node:path";
 import type { Logger } from "../utils/logger.js";
 import { toErrorMessage } from "../utils/async.js";
-import type { GatewayConfig } from "./types.js";
+import type { GatewayConfig, GatewayMCPServerConfig } from "./types.js";
 import type {
   LLMProvider,
   LLMProviderTraceEvent,
@@ -42,6 +43,7 @@ import {
   type SessionWorkflowStage,
 } from "./workflow-state.js";
 import type { DiscoveredSkill } from "../skills/markdown/discovery.js";
+import type { DiscoveryPaths } from "../skills/markdown/discovery.js";
 import { ToolRegistry } from "../tools/registry.js";
 import { HookDispatcher } from "./hooks.js";
 import { ApprovalEngine } from "./approvals.js";
@@ -76,12 +78,18 @@ import {
   normalizeGrokModel,
 } from "./context-window.js";
 import { getDefaultWorkspacePath } from "./workspace-files.js";
+import {
+  computeMCPToolCatalogSha256,
+  validateMCPServerBinaryIntegrity,
+  validateMCPServerStaticPolicy,
+} from "../policy/mcp-governance.js";
 import type {
   DelegationAggressivenessProfile,
   ResolvedSubAgentRuntimeConfig,
 } from "./subagent-infrastructure.js";
 import type { VoiceBridge } from "./voice-bridge.js";
 import type { WebChatChannel } from "../channels/webchat/plugin.js";
+import { PluginCatalog } from "../skills/catalog.js";
 import { TASK_LIST_ARG } from "../tools/system/task-tracker.js";
 
 // ============================================================================
@@ -465,6 +473,49 @@ function groupCatalogBySource(
     counts[source] = (counts[source] ?? 0) + 1;
   }
   return counts;
+}
+
+function formatMcpTrustLine(server: GatewayMCPServerConfig): string {
+  const trustTier = server.trustTier ?? "trusted";
+  const approvalRequired =
+    server.riskControls?.requireApproval === true || trustTier === "untrusted";
+  return `${trustTier}${approvalRequired ? " (approval required)" : ""}`;
+}
+
+function stripMcpToolPrefix(toolName: string, serverName: string): string {
+  return toolName.startsWith(`mcp.${serverName}.`)
+    ? toolName.slice(`mcp.${serverName}.`.length)
+    : toolName;
+}
+
+function getMcpCatalogEntries(
+  catalog: readonly ReturnType<ToolRegistry["listCatalog"]>[number][],
+  serverName?: string,
+): readonly ReturnType<ToolRegistry["listCatalog"]>[number][] {
+  return catalog.filter((entry) => {
+    if (entry.metadata.source !== "mcp") return false;
+    if (!serverName) return true;
+    return entry.name.startsWith(`mcp.${serverName}.`);
+  });
+}
+
+function getSkillDisabledMarker(sourcePath: string | undefined): boolean {
+  return typeof sourcePath === "string" && existsSync(`${sourcePath}.disabled`);
+}
+
+function formatSkillState(params: {
+  available: boolean;
+  disabled: boolean;
+}): string {
+  if (params.disabled) return "disabled";
+  return params.available ? "enabled" : "unavailable";
+}
+
+function renderPluginMutationNote(): string {
+  return (
+    "Catalog updated. Live plugin effects depend on the owning integration " +
+    "surface and may require reconnect, restart, or a host-specific reload."
+  );
 }
 
 function formatRepoInventoryReply(result: Record<string, unknown>): string {
@@ -1316,6 +1367,14 @@ export interface CommandRegistryDaemonContext {
     usedFallback: boolean;
   } | undefined;
   handleConfigReload(): Promise<void>;
+  getMcpManager(): import("../mcp-client/manager.js").MCPManager | null;
+  getPluginCatalog(): PluginCatalog;
+  discoverShellSkills(params: {
+    sessionId: string;
+  }): Promise<DiscoveredSkill[]>;
+  resolveShellSkillDiscoveryPaths(params: {
+    sessionId: string;
+  }): Promise<DiscoveryPaths>;
   getVoiceBridge(): VoiceBridge | null;
   getDesktopManager(): {
     getOrCreate(sessionId: string, opts?: { maxMemory?: string; maxCpu?: string }): Promise<{
@@ -1418,7 +1477,7 @@ export function createDaemonCommandRegistry(
   progressTracker?: ProgressTracker,
   pipelineExecutor?: PipelineExecutor,
 ): SlashCommandRegistry {
-  void hooks; void baseToolHandler; void approvalEngine;
+  void hooks; void baseToolHandler; void approvalEngine; void skillList;
   const commandRegistry = new SlashCommandRegistry({ logger: ctx.logger });
   for (const command of createDefaultCommands()) {
     commandRegistry.register(command);
@@ -3144,25 +3203,30 @@ export function createDaemonCommandRegistry(
   });
   commandRegistry.register({
     name: "mcp",
-    description: "Show configured MCP servers and discovered MCP tools",
-    args: "[status|list|tools]",
+    description: "Inspect and control already-configured MCP servers",
+    args: "[status|list|inspect <server>|tools [server]|validate [server]|reconnect <server>|enable <server>|disable <server>]",
     global: true,
     handler: async (cmdCtx) => {
       const subcommand = cmdCtx.argv[0]?.toLowerCase() ?? "status";
       const catalog = registry.listCatalog();
-      const mcpCatalog = catalog.filter((entry) => entry.metadata.source === "mcp");
+      const mcpCatalog = getMcpCatalogEntries(catalog);
       const sourceCounts = groupCatalogBySource(catalog);
       const configuredServers = Array.isArray(ctx.gateway?.config.mcp?.servers)
         ? ctx.gateway?.config.mcp?.servers
         : [];
+      const mcpManager = ctx.getMcpManager();
+      const connectedServers = new Set(mcpManager?.getConnectedServers() ?? []);
       const renderStatus = (): string => [
         "MCP surface:",
         `  Configured servers: ${configuredServers.length}`,
-        `  Connected MCP tools: ${mcpCatalog.length}`,
+        `  Connected servers: ${connectedServers.size}`,
+        `  Visible MCP tools: ${mcpCatalog.length}`,
         `  Builtin tools: ${sourceCounts.builtin ?? 0}`,
         `  Plugin tools: ${sourceCounts.plugin ?? 0}`,
         `  Skill tools: ${sourceCounts.skill ?? 0}`,
       ].join("\n");
+      const findServer = (name: string | undefined) =>
+        configuredServers.find((server) => server.name === name);
 
       if (subcommand === "status") {
         await cmdCtx.reply(renderStatus());
@@ -3174,26 +3238,235 @@ export function createDaemonCommandRegistry(
           return;
         }
         const lines = configuredServers.map((server) => {
-          const toolCount = mcpCatalog.filter((entry) =>
-            entry.name.startsWith(`mcp.${server.name}.`)
-          ).length;
-          return `  ${server.name} — ${server.enabled === false ? "disabled" : "enabled"} — trust=${server.trustTier ?? "unknown"} — tools=${toolCount}`;
+          const toolCount = getMcpCatalogEntries(mcpCatalog, server.name).length;
+          const state =
+            server.enabled === false
+              ? "disabled"
+              : server.container === "desktop"
+                ? "container-routed"
+                : connectedServers.has(server.name)
+                  ? "connected"
+                  : "disconnected";
+          return (
+            `  ${server.name} — ${state} — trust=${formatMcpTrustLine(server)} ` +
+            `— tools=${toolCount}`
+          );
         });
         await cmdCtx.reply(`${renderStatus()}\n\nServers:\n${lines.join("\n")}`);
         return;
       }
       if (subcommand === "tools") {
-        if (mcpCatalog.length === 0) {
+        const serverName = cmdCtx.argv[1];
+        const visibleCatalog =
+          serverName && serverName.trim().length > 0
+            ? getMcpCatalogEntries(mcpCatalog, serverName.trim())
+            : mcpCatalog;
+        if (visibleCatalog.length === 0) {
           await cmdCtx.reply(`${renderStatus()}\n\nNo MCP tools are currently connected.`);
           return;
         }
-        const lines = mcpCatalog
+        const lines = visibleCatalog
           .slice(0, 100)
           .map((entry) => `  ${entry.name} — ${entry.description}`);
-        await cmdCtx.reply(`${renderStatus()}\n\nTools:\n${lines.join("\n")}`);
+        await cmdCtx.reply(
+          `${renderStatus()}\n\nTools${serverName ? ` (${serverName.trim()})` : ""}:\n${lines.join("\n")}`,
+        );
         return;
       }
-      await cmdCtx.reply("Usage: /mcp [status|list|tools]");
+      if (subcommand === "inspect") {
+        const serverName = cmdCtx.argv[1]?.trim();
+        const server = findServer(serverName);
+        if (!serverName || !server) {
+          await cmdCtx.reply("Usage: /mcp inspect <server>");
+          return;
+        }
+        const serverCatalog = getMcpCatalogEntries(mcpCatalog, serverName);
+        const allowList = server.riskControls?.toolAllowList?.join(", ") ?? "none";
+        const denyList = server.riskControls?.toolDenyList?.join(", ") ?? "none";
+        const lines = [
+          `MCP server: ${server.name}`,
+          `  Enabled: ${server.enabled === false ? "no" : "yes"}`,
+          `  Runtime state: ${
+            server.enabled === false
+              ? "disabled"
+              : server.container === "desktop"
+                ? "container-routed"
+                : connectedServers.has(server.name)
+                  ? "connected"
+                  : "disconnected"
+          }`,
+          `  Trust: ${formatMcpTrustLine(server)}`,
+          `  Route: ${server.container === "desktop" ? "desktop container" : "host process"}`,
+          `  Timeout: ${server.timeout ?? 30000}ms`,
+          `  Tool allow-list: ${allowList}`,
+          `  Tool deny-list: ${denyList}`,
+          `  Supply chain: pinnedPackage=${
+            server.supplyChain?.requirePinnedPackageVersion === true ? "yes" : "no"
+          }, desktopDigest=${
+            server.supplyChain?.requireDesktopImageDigest === true ? "yes" : "no"
+          }, binarySha=${server.supplyChain?.binarySha256 ? "set" : "unset"}, catalogSha=${
+            server.supplyChain?.catalogSha256 ? "set" : "unset"
+          }`,
+          `  Visible tools: ${serverCatalog.length}`,
+        ];
+        if (serverCatalog.length > 0) {
+          lines.push(
+            "",
+            "Tools:",
+            ...serverCatalog
+              .slice(0, 25)
+              .map((entry) => `  ${stripMcpToolPrefix(entry.name, server.name)} — ${entry.description}`),
+          );
+        }
+        await cmdCtx.reply(lines.join("\n"));
+        return;
+      }
+      if (subcommand === "validate") {
+        const serverName = cmdCtx.argv[1]?.trim();
+        const targets =
+          serverName && serverName.length > 0
+            ? configuredServers.filter((server) => server.name === serverName)
+            : configuredServers;
+        if (targets.length === 0) {
+          await cmdCtx.reply(
+            serverName
+              ? `MCP server "${serverName}" is not configured.`
+              : "No MCP servers are configured.",
+          );
+          return;
+        }
+        const desktopImage = ctx.gateway?.config.desktop?.image ?? "agenc/desktop:latest";
+        const sections: string[] = [];
+        for (const server of targets) {
+          const violations = [
+            ...validateMCPServerStaticPolicy(server, { desktopImage }),
+            ...(server.container
+              ? []
+              : await validateMCPServerBinaryIntegrity({ server })),
+          ];
+          const serverCatalog = getMcpCatalogEntries(mcpCatalog, server.name);
+          const liveCatalogSha =
+            serverCatalog.length > 0
+              ? computeMCPToolCatalogSha256(
+                  serverCatalog.map((entry) => ({
+                    name: stripMcpToolPrefix(entry.name, server.name),
+                    description: entry.description,
+                    inputSchema: entry.inputSchema,
+                  })),
+                )
+              : undefined;
+          sections.push(
+            [
+              `MCP validate: ${server.name}`,
+              `  Static policy: ${violations.length === 0 ? "ok" : "violations"}`,
+              ...(violations.length > 0
+                ? violations.map(
+                    (violation) => `  - ${violation.code}: ${violation.message}`,
+                  )
+                : []),
+              `  Trust: ${formatMcpTrustLine(server)}`,
+              `  Runtime state: ${
+                server.enabled === false
+                  ? "disabled"
+                  : server.container === "desktop"
+                    ? "container-routed"
+                    : connectedServers.has(server.name)
+                      ? "connected"
+                      : "disconnected"
+              }`,
+              `  Binary integrity: ${
+                server.container
+                  ? "n/a (container-routed)"
+                  : server.supplyChain?.binarySha256
+                    ? violations.some((item) => item.code === "binary_integrity_mismatch")
+                      ? "mismatch"
+                      : "ok"
+                    : "not configured"
+              }`,
+              `  Catalog integrity: ${
+                server.supplyChain?.catalogSha256
+                  ? liveCatalogSha
+                    ? liveCatalogSha === server.supplyChain.catalogSha256.trim().toLowerCase()
+                      ? "ok"
+                      : "mismatch"
+                    : "not visible at runtime"
+                  : "not configured"
+              }`,
+              ...(liveCatalogSha ? [`  Live catalog sha256: ${liveCatalogSha}`] : []),
+            ].join("\n"),
+          );
+        }
+        await cmdCtx.reply(sections.join("\n\n"));
+        return;
+      }
+      if (subcommand === "reconnect") {
+        const serverName = cmdCtx.argv[1]?.trim();
+        const server = findServer(serverName);
+        if (!serverName || !server) {
+          await cmdCtx.reply("Usage: /mcp reconnect <server>");
+          return;
+        }
+        if (server.container === "desktop") {
+          await cmdCtx.reply(
+            `MCP server "${server.name}" is desktop-container routed and cannot be reconnected from the daemon shell.`,
+          );
+          return;
+        }
+        if (!mcpManager) {
+          await cmdCtx.reply("MCP manager is unavailable in this daemon.");
+          return;
+        }
+        const result = await mcpManager.reconnectServer(server.name);
+        await cmdCtx.reply(
+          result.success
+            ? `MCP server "${server.name}" reconnected (${result.toolCount} tools).`
+            : `MCP server "${server.name}" reconnect failed: ${result.error ?? "unknown error"}`,
+        );
+        return;
+      }
+      if (subcommand === "enable" || subcommand === "disable") {
+        const serverName = cmdCtx.argv[1]?.trim();
+        const server = findServer(serverName);
+        if (!serverName || !server) {
+          await cmdCtx.reply(`Usage: /mcp ${subcommand} <server>`);
+          return;
+        }
+        const nextEnabled = subcommand === "enable";
+        if ((server.enabled !== false) === nextEnabled) {
+          await cmdCtx.reply(
+            `MCP server "${server.name}" is already ${nextEnabled ? "enabled" : "disabled"}.`,
+          );
+          return;
+        }
+        try {
+          const raw = await readFile(ctx.configPath, "utf-8");
+          const parsed = JSON.parse(raw) as GatewayConfig;
+          const servers = Array.isArray(parsed.mcp?.servers) ? parsed.mcp.servers : [];
+          const index = servers.findIndex((entry) => entry.name === server.name);
+          if (index < 0) {
+            await cmdCtx.reply(`MCP server "${server.name}" is not present in ${ctx.configPath}.`);
+            return;
+          }
+          servers[index] = {
+            ...servers[index],
+            enabled: nextEnabled,
+          };
+          parsed.mcp = { ...(parsed.mcp ?? {}), servers };
+          await writeFile(ctx.configPath, JSON.stringify(parsed, null, 2) + "\n");
+          await ctx.handleConfigReload();
+          await cmdCtx.reply(
+            `MCP server "${server.name}" ${nextEnabled ? "enabled" : "disabled"} via config reload.`,
+          );
+        } catch (error) {
+          await cmdCtx.reply(
+            `Failed to ${subcommand} MCP server "${server.name}": ${toErrorMessage(error)}`,
+          );
+        }
+        return;
+      }
+      await cmdCtx.reply(
+        "Usage: /mcp [status|list|inspect <server>|tools [server]|validate [server]|reconnect <server>|enable <server>|disable <server>]",
+      );
     },
   });
   commandRegistry.register({
@@ -3475,18 +3748,240 @@ export function createDaemonCommandRegistry(
   });
   commandRegistry.register({
     name: "skills",
-    description: "List available skills",
+    description: "Inspect and toggle local discovered skills",
+    args: "[list|inspect <name>|enable <name>|disable <name>|sources]",
     global: true,
     handler: async (cmdCtx) => {
-      if (skillList.length === 0) {
-        await cmdCtx.reply("No skills available.");
+      const subcommand = cmdCtx.argv[0]?.toLowerCase() ?? "list";
+      const discovered = await ctx.discoverShellSkills({
+        sessionId: cmdCtx.sessionId,
+      });
+      const resolveState = (entry: DiscoveredSkill) => {
+        const disabled = getSkillDisabledMarker(entry.skill.sourcePath);
+        return {
+          disabled,
+          state: formatSkillState({
+            available: entry.available,
+            disabled,
+          }),
+        };
+      };
+      const resolveByName = (name: string | undefined) =>
+        discovered.find((entry) => entry.skill.name === name);
+
+      if (subcommand === "list") {
+        if (discovered.length === 0) {
+          await cmdCtx.reply(
+            "No local skills discovered.\nMarketplace listings remain under `agenc market skills ...`.",
+          );
+          return;
+        }
+        const lines = discovered.map((entry) => {
+          const { state } = resolveState(entry);
+          return (
+            `  ${entry.skill.name} — ${entry.skill.description} ` +
+            `(${entry.tier}, ${state})`
+          );
+        });
+        await cmdCtx.reply(
+          "Local skills:\n" +
+            lines.join("\n") +
+            "\n\nMarketplace listings: use `agenc market skills ...`.",
+        );
         return;
       }
-      const lines = skillList.map(
-        (skill) =>
-          `  ${skill.enabled ? "●" : "○"} ${skill.name} — ${skill.description}`,
+
+      if (subcommand === "inspect") {
+        const skillName = cmdCtx.argv[1]?.trim();
+        const skill = resolveByName(skillName);
+        if (!skillName || !skill) {
+          await cmdCtx.reply("Usage: /skills inspect <name>");
+          return;
+        }
+        const { disabled, state } = resolveState(skill);
+        const lines = [
+          `Skill: ${skill.skill.name}`,
+          `  State: ${state}`,
+          `  Tier: ${skill.tier}`,
+          `  Description: ${skill.skill.description}`,
+          `  Source: ${skill.skill.sourcePath ?? "inline/unknown"}`,
+          `  Tags: ${
+            skill.skill.metadata.tags.length > 0
+              ? skill.skill.metadata.tags.join(", ")
+              : "none"
+          }`,
+          `  Primary env: ${skill.skill.metadata.primaryEnv ?? "none"}`,
+          `  Disabled marker: ${disabled ? "present" : "absent"}`,
+          `  Availability: ${skill.available ? "usable" : "blocked"}`,
+          ...(skill.missingRequirements && skill.missingRequirements.length > 0
+            ? [
+                "  Missing requirements:",
+                ...skill.missingRequirements.map(
+                  (item) => `    - ${item.message}`,
+                ),
+              ]
+            : []),
+        ];
+        const preview =
+          skill.skill.body.length > 240
+            ? `${skill.skill.body.slice(0, 240)}...`
+            : skill.skill.body;
+        if (preview.trim().length > 0) {
+          lines.push("", "Preview:", preview);
+        }
+        await cmdCtx.reply(lines.join("\n"));
+        return;
+      }
+
+      if (subcommand === "sources") {
+        const sources = await ctx.resolveShellSkillDiscoveryPaths({
+          sessionId: cmdCtx.sessionId,
+        });
+        await cmdCtx.reply(
+          [
+            "Skill discovery sources:",
+            `  Agent: ${sources.agentSkills ?? "not configured"}`,
+            `  Project: ${sources.projectSkills ?? "not configured"}`,
+            `  User: ${sources.userSkills ?? "not configured"}`,
+            `  Builtin: ${sources.builtinSkills ?? "not configured"}`,
+            "",
+            "Marketplace listings: use `agenc market skills ...`.",
+          ].join("\n"),
+        );
+        return;
+      }
+
+      if (subcommand === "enable" || subcommand === "disable") {
+        const skillName = cmdCtx.argv[1]?.trim();
+        const skill = resolveByName(skillName);
+        if (!skillName || !skill) {
+          await cmdCtx.reply(`Usage: /skills ${subcommand} <name>`);
+          return;
+        }
+        const sourcePath = skill.skill.sourcePath;
+        if (!sourcePath) {
+          await cmdCtx.reply(
+            `Skill "${skill.skill.name}" has no source path and cannot be toggled.`,
+          );
+          return;
+        }
+        const markerPath = `${sourcePath}.disabled`;
+        try {
+          if (subcommand === "enable") {
+            if (existsSync(markerPath)) {
+              await unlink(markerPath);
+            }
+          } else if (!existsSync(markerPath)) {
+            await writeFile(markerPath, "", "utf8");
+          }
+          await cmdCtx.reply(
+            `Skill "${skill.skill.name}" ${subcommand}d.\n` +
+              "Marketplace listings remain separate under `agenc market skills ...`.",
+          );
+        } catch (error) {
+          await cmdCtx.reply(
+            `Failed to ${subcommand} skill "${skill.skill.name}": ${toErrorMessage(error)}`,
+          );
+        }
+        return;
+      }
+
+      await cmdCtx.reply(
+        "Usage: /skills [list|inspect <name>|enable <name>|disable <name>|sources]",
       );
-      await cmdCtx.reply("Skills:\n" + lines.join("\n"));
+    },
+  });
+  commandRegistry.register({
+    name: "plugin",
+    description: "Inspect and toggle the local plugin catalog",
+    args: "[list|inspect <pluginId>|enable <pluginId>|disable <pluginId>|reload <pluginId>]",
+    global: true,
+    handler: async (cmdCtx) => {
+      const subcommand = cmdCtx.argv[0]?.toLowerCase() ?? "list";
+      const catalog = ctx.getPluginCatalog();
+
+      if (subcommand === "list") {
+        const entries = catalog.list();
+        if (entries.length === 0) {
+          await cmdCtx.reply("No plugins are registered in the local catalog.");
+          return;
+        }
+        const lines = entries.map(
+          (entry) =>
+            `  ${entry.manifest.id} — ${entry.enabled ? "enabled" : "disabled"} ` +
+            `(${entry.precedence}${entry.slot ? `, slot=${entry.slot}` : ""})`,
+        );
+        await cmdCtx.reply("Plugin catalog:\n" + lines.join("\n"));
+        return;
+      }
+
+      const pluginId = cmdCtx.argv[1]?.trim();
+      const entry = catalog.list().find((item) => item.manifest.id === pluginId);
+
+      if (subcommand === "inspect") {
+        if (!pluginId || !entry) {
+          await cmdCtx.reply("Usage: /plugin inspect <pluginId>");
+          return;
+        }
+        const permissions =
+          entry.manifest.permissions.length > 0
+            ? entry.manifest.permissions.map(
+                (permission) =>
+                  `  - ${permission.type}:${permission.scope} (${permission.required ? "required" : "optional"})`,
+              )
+            : ["  - none"];
+        const allowList =
+          entry.manifest.allowDeny?.allow?.length
+            ? entry.manifest.allowDeny.allow.join(", ")
+            : "all";
+        const denyList =
+          entry.manifest.allowDeny?.deny?.length
+            ? entry.manifest.allowDeny.deny.join(", ")
+            : "none";
+        await cmdCtx.reply(
+          [
+            `Plugin: ${entry.manifest.id}`,
+            `  Display name: ${entry.manifest.displayName}`,
+            `  State: ${entry.enabled ? "enabled" : "disabled"}`,
+            `  Version: ${entry.manifest.version}`,
+            `  Schema version: ${entry.manifest.schemaVersion}`,
+            `  Precedence: ${entry.precedence}`,
+            `  Slot: ${entry.slot ?? "none"}`,
+            `  Source path: ${entry.sourcePath ?? "unknown"}`,
+            `  Labels: ${entry.manifest.labels.join(", ") || "none"}`,
+            `  Description: ${entry.manifest.description ?? "none"}`,
+            `  Allow: ${allowList}`,
+            `  Deny: ${denyList}`,
+            "Permissions:",
+            ...permissions,
+          ].join("\n"),
+        );
+        return;
+      }
+
+      if (subcommand === "enable" || subcommand === "disable" || subcommand === "reload") {
+        if (!pluginId || !entry) {
+          await cmdCtx.reply(`Usage: /plugin ${subcommand} <pluginId>`);
+          return;
+        }
+        const result =
+          subcommand === "enable"
+            ? catalog.enable(pluginId)
+            : subcommand === "disable"
+              ? catalog.disable(pluginId)
+              : catalog.reload(pluginId);
+        await cmdCtx.reply(
+          [
+            result.message,
+            renderPluginMutationNote(),
+          ].join("\n"),
+        );
+        return;
+      }
+
+      await cmdCtx.reply(
+        "Usage: /plugin [list|inspect <pluginId>|enable <pluginId>|disable <pluginId>|reload <pluginId>]",
+      );
     },
   });
   commandRegistry.register({

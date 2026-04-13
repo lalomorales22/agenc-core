@@ -42,3 +42,10 @@ export interface MCPToolBridge {
   /** Disconnect from the server and clean up resources */
   dispose(): Promise<void>;
 }
+
+export interface MCPReconnectResult {
+  readonly serverName: string;
+  readonly success: boolean;
+  readonly toolCount: number;
+  readonly error?: string;
+}

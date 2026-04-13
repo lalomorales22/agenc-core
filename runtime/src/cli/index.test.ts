@@ -560,6 +560,47 @@ describe("runtime root CLI", () => {
     );
   });
 
+  it("routes skills aliases through one-shot shell execution", async () => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+
+    const code = await runCli({
+      argv: ["skills", "inspect", "local-skill"],
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(code).toBe(0);
+    expect(runShellExecCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        profile: "general",
+        quietConnection: true,
+        commandText: "/skills inspect local-skill",
+      }),
+    );
+  });
+
+  it("keeps plugin commands on the direct CLI path instead of the shell alias", async () => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+    const previousCwd = process.cwd();
+    process.chdir(workspace);
+
+    try {
+      const code = await runCli({
+        argv: ["plugin", "list"],
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      });
+
+      expect(code).toBe(0);
+      expect(runShellExecCommand).not.toHaveBeenCalled();
+    } finally {
+      process.chdir(previousCwd);
+    }
+  });
+
   it("routes init flags through the root CLI command surface", async () => {
     const stdout = captureStream();
     const stderr = captureStream();

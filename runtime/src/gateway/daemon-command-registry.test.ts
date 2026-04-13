@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { silentLogger } from "../utils/logger.js";
 import { createDaemonCommandRegistry } from "./daemon-command-registry.js";
+import { PluginCatalog } from "../skills/catalog.js";
 import {
   SESSION_SHELL_PROFILE_METADATA_KEY,
   SESSION_STATEFUL_HISTORY_COMPACTED_METADATA_KEY,
@@ -19,9 +20,32 @@ function makeCommandRegistry(params?: {
   gatewayLlmOverrides?: Record<string, unknown>;
   toolResponses?: Record<string, unknown>;
   toolCatalog?: Array<Record<string, unknown>>;
+  shellSkills?: Array<Record<string, unknown>>;
+  skillDiscoveryPaths?: Record<string, unknown>;
+  mcpManagerOverrides?: Record<string, unknown>;
+  pluginCatalogSetup?: (catalog: PluginCatalog) => void;
 }) {
   const configDir = mkdtempSync(join(tmpdir(), "agenc-daemon-cmd-"));
   const configPath = join(configDir, "config.json");
+  const localSkillsDir = join(configDir, "skills");
+  mkdirSync(localSkillsDir, { recursive: true });
+  const localSkillPath = join(localSkillsDir, "local-skill.md");
+  writeFileSync(
+    localSkillPath,
+    [
+      "---",
+      "name: local-skill",
+      "description: Local shell helper",
+      "---",
+      "",
+      "# local skill",
+      "",
+      "Use this for local shell testing.",
+    ].join("\n"),
+    "utf8",
+  );
+  const pluginCatalogPath = join(configDir, ".agenc", "plugins.json");
+  mkdirSync(join(configDir, ".agenc"), { recursive: true });
   writeFileSync(
     configPath,
     JSON.stringify({
@@ -171,6 +195,56 @@ function makeCommandRegistry(params?: {
     deniedPatterns:
       params.operation === "deny" && params.pattern ? [params.pattern] : [],
   }));
+  const handleConfigReload = vi.fn(async () => {});
+  const mcpManager = {
+    getConnectedServers: vi.fn(() => ["demo"]),
+    reconnectServer: vi.fn(async (serverName: string) => ({
+      serverName,
+      success: true,
+      toolCount: 1,
+    })),
+    ...(params?.mcpManagerOverrides ?? {}),
+  } as any;
+  const pluginCatalog = new PluginCatalog(pluginCatalogPath);
+  pluginCatalog.install(
+    {
+      id: "agenc.demo.plugin",
+      version: "1.0.0",
+      schemaVersion: 1,
+      displayName: "Demo Plugin",
+      description: "Demo plugin for shell command tests",
+      labels: ["demo", "shell"],
+      permissions: [{ type: "tool_call", scope: "system.grep", required: true }],
+      allowDeny: { allow: ["system.grep"], deny: ["wallet.sign"] },
+    },
+    "workspace",
+    { slot: "llm", sourcePath: "/tmp/plugins/demo-plugin" },
+  );
+  params?.pluginCatalogSetup?.(pluginCatalog);
+  const shellSkills = (params?.shellSkills ?? [
+    {
+      skill: {
+        name: "local-skill",
+        description: "Local shell helper",
+        sourcePath: localSkillPath,
+        body: "Use this for local shell testing.",
+        metadata: {
+          tags: ["local", "shell"],
+          primaryEnv: "AGENC_TEST_ENV",
+        },
+      },
+      available: true,
+      tier: "project",
+      missingRequirements: [],
+    },
+  ]) as any[];
+  const skillDiscoveryPaths = {
+    agentSkills: undefined,
+    projectSkills: localSkillsDir,
+    userSkills: "/tmp/user-skills",
+    builtinSkills: "/tmp/builtin-skills",
+    ...(params?.skillDiscoveryPaths ?? {}),
+  } as any;
   const defaultToolResponses: Record<string, unknown> = {
     "system.repoInventory": {
       repoRoot: "/tmp/project",
@@ -374,7 +448,11 @@ function makeCommandRegistry(params?: {
         model: "grok-4.20-reasoning",
         usedFallback: false,
       }),
-      handleConfigReload: vi.fn(async () => {}),
+      handleConfigReload,
+      getMcpManager: () => mcpManager,
+      getPluginCatalog: () => pluginCatalog,
+      discoverShellSkills: vi.fn(async () => shellSkills),
+      resolveShellSkillDiscoveryPaths: vi.fn(async () => skillDiscoveryPaths),
       getVoiceBridge: () => null,
       getDesktopManager: () => null,
       getDesktopBridges: () => new Map(),
@@ -418,6 +496,11 @@ function makeCommandRegistry(params?: {
     webChatChannel,
     updateSessionPolicyState,
     baseToolHandler,
+    configPath,
+    localSkillPath,
+    handleConfigReload,
+    mcpManager,
+    pluginCatalog,
   };
 }
 
@@ -801,10 +884,72 @@ describe("createDaemonCommandRegistry coding shell commands", () => {
     expect(taskReplies[0]).toContain("Tasks (1):");
     expect(taskReplies[0]).toContain("Ship shell");
     expect(mcpReplies[0]).toContain("Configured servers: 1");
-    expect(mcpReplies[0]).toContain("Connected MCP tools: 1");
+    expect(mcpReplies[0]).toContain("Connected servers: 1");
+    expect(mcpReplies[0]).toContain("Visible MCP tools: 1");
     expect(baseToolHandler).toHaveBeenCalledWith("task.list", {
       __agencTaskListId: "session-1",
     });
+  });
+
+  it("inspects, validates, reconnects, and disables an MCP server", async () => {
+    const { registry, baseToolHandler, configPath, handleConfigReload, mcpManager } =
+      makeCommandRegistry();
+
+    const inspectReplies = await dispatchAndCollect(registry, "/mcp inspect demo");
+    const validateReplies = await dispatchAndCollect(registry, "/mcp validate demo");
+    const reconnectReplies = await dispatchAndCollect(registry, "/mcp reconnect demo");
+    const disableReplies = await dispatchAndCollect(registry, "/mcp disable demo");
+
+    expect(inspectReplies[0]).toContain("MCP server: demo");
+    expect(inspectReplies[0]).toContain("Visible tools: 1");
+    expect(validateReplies[0]).toContain("MCP validate: demo");
+    expect(validateReplies[0]).toContain("Catalog integrity: not configured");
+    expect(reconnectReplies[0]).toContain('MCP server "demo" reconnected (1 tools).');
+    expect(disableReplies[0]).toContain('MCP server "demo" disabled via config reload.');
+    expect(baseToolHandler).not.toHaveBeenCalledWith("mcp.reconnect", expect.anything());
+    expect(mcpManager.reconnectServer).toHaveBeenCalledWith("demo");
+    expect(handleConfigReload).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(readFileSync(configPath, "utf8")).mcp.servers[0].enabled).toBe(false);
+  });
+
+  it("shows local skill inventory, sources, and toggle state", async () => {
+    const { registry, localSkillPath } = makeCommandRegistry();
+
+    const listReplies = await dispatchAndCollect(registry, "/skills list");
+    const inspectReplies = await dispatchAndCollect(registry, "/skills inspect local-skill");
+    const sourcesReplies = await dispatchAndCollect(registry, "/skills sources");
+    const disableReplies = await dispatchAndCollect(registry, "/skills disable local-skill");
+
+    expect(listReplies[0]).toContain("Local skills:");
+    expect(listReplies[0]).toContain("local-skill");
+    expect(listReplies[0]).toContain("Marketplace listings: use `agenc market skills ...`.");
+    expect(inspectReplies[0]).toContain("Skill: local-skill");
+    expect(inspectReplies[0]).toContain("Tier: project");
+    expect(sourcesReplies[0]).toContain("Skill discovery sources:");
+    expect(sourcesReplies[0]).toContain("Agent: not configured");
+    expect(disableReplies[0]).toContain('Skill "local-skill" disabled.');
+    expect(existsSync(`${localSkillPath}.disabled`)).toBe(true);
+  });
+
+  it("lists, inspects, and toggles the shell plugin catalog", async () => {
+    const { registry } = makeCommandRegistry();
+
+    const listReplies = await dispatchAndCollect(registry, "/plugin list");
+    const inspectReplies = await dispatchAndCollect(
+      registry,
+      "/plugin inspect agenc.demo.plugin",
+    );
+    const disableReplies = await dispatchAndCollect(
+      registry,
+      "/plugin disable agenc.demo.plugin",
+    );
+
+    expect(listReplies[0]).toContain("Plugin catalog:");
+    expect(listReplies[0]).toContain("agenc.demo.plugin");
+    expect(inspectReplies[0]).toContain("Plugin: agenc.demo.plugin");
+    expect(inspectReplies[0]).toContain("Display name: Demo Plugin");
+    expect(disableReplies[0]).toContain('Plugin "agenc.demo.plugin" disabled');
+    expect(disableReplies[0]).toContain("Catalog updated. Live plugin effects depend");
   });
 
   it("shows and updates reasoning effort", async () => {

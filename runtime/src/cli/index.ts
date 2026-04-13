@@ -3719,8 +3719,9 @@ async function dispatchPhase3ShellCommands(
   if (root === "skills") {
     try {
       validateUnknownStandaloneOptions(parsed.flags, SHELL_EXEC_COMMAND_OPTIONS);
+      const args = parsed.positional.slice(1).join(" ").trim();
       return await runShellExec(
-        "/skills",
+        args.length > 0 ? `/skills ${args}` : "/skills",
         resolveShellAliasProfile(parsed, "general"),
       );
     } catch (error) {

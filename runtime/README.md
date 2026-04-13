@@ -82,10 +82,18 @@ Current coding shell command surface:
 - `agenc session resume <sessionId>`
 - `agenc session fork <sessionId> --objective "Investigate variant"`
 - `agenc permissions`
-- `agenc mcp`
-- `agenc skills`
+- `agenc mcp status|list|inspect|tools|validate|reconnect|enable|disable`
+- `agenc skills list|inspect|enable|disable|sources`
+- `/plugin list|inspect|enable|disable|reload` inside the shell for the local plugin catalog
 - `agenc model`
 - `agenc effort`
+
+Extension surfaces stay distinct:
+
+- `agenc mcp ...` controls already-configured MCP servers only; server creation and transport/auth/secrets edits remain config-admin work
+- `agenc skills ...` covers local discovered skills only across agent/user/project/builtin tiers
+- `agenc market skills ...` remains the marketplace listing and purchase surface
+- `agenc plugin ...` remains the lower-level direct plugin catalog/admin CLI, while `/plugin ...` is the shell-native day-to-day catalog surface
 
 Current coding runtime surface:
 

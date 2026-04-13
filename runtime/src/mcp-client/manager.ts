@@ -7,7 +7,11 @@
  * @module
  */
 
-import type { MCPServerConfig, MCPToolBridge } from "./types.js";
+import type {
+  MCPReconnectResult,
+  MCPServerConfig,
+  MCPToolBridge,
+} from "./types.js";
 import type { Tool } from "../tools/types.js";
 import type { Logger } from "../utils/logger.js";
 import { silentLogger } from "../utils/logger.js";
@@ -70,28 +74,7 @@ export class MCPManager {
     this.logger.info(`Starting ${enabledConfigs.length} MCP server(s)...`);
 
     const results = await Promise.allSettled(
-      enabledConfigs.map(async (config) => {
-        const client = await createMCPConnection(config, this.logger);
-        try {
-          const rawBridge = await createToolBridge(
-            client,
-            config.name,
-            this.logger,
-            {
-              listToolsTimeoutMs: config.timeout,
-              callToolTimeoutMs: config.timeout,
-              serverConfig: toToolCatalogPolicyConfig(config),
-            },
-          );
-          const bridge = new ResilientMCPBridge(config, rawBridge, this.logger);
-          this.bridges.set(config.name, bridge);
-          return bridge;
-        } catch (error) {
-          // Close the client if tool bridge creation fails to avoid orphaned processes
-          try { await client.close(); } catch { /* best-effort */ }
-          throw error;
-        }
-      }),
+      enabledConfigs.map(async (config) => this.connectServer(config)),
     );
 
     let successCount = 0;
@@ -147,5 +130,92 @@ export class MCPManager {
    */
   getConnectedServers(): string[] {
     return Array.from(this.bridges.keys());
+  }
+
+  getConfiguredServers(): readonly MCPServerConfig[] {
+    return [...this.configs];
+  }
+
+  getServerConfig(name: string): MCPServerConfig | undefined {
+    return this.configs.find((config) => config.name === name);
+  }
+
+  isConnected(name: string): boolean {
+    return this.bridges.has(name);
+  }
+
+  async reconnectServer(name: string): Promise<MCPReconnectResult> {
+    const config = this.getServerConfig(name);
+    if (!config) {
+      return {
+        serverName: name,
+        success: false,
+        toolCount: 0,
+        error: `MCP server "${name}" is not configured.`,
+      };
+    }
+    if (config.enabled === false) {
+      return {
+        serverName: name,
+        success: false,
+        toolCount: 0,
+        error: `MCP server "${name}" is disabled in config.`,
+      };
+    }
+
+    const existing = this.bridges.get(name);
+    if (existing) {
+      this.bridges.delete(name);
+      try {
+        await existing.dispose();
+      } catch (error) {
+        this.logger.warn?.(
+          `Error disposing MCP server "${name}" before reconnect:`,
+          error,
+        );
+      }
+    }
+
+    try {
+      const bridge = await this.connectServer(config);
+      return {
+        serverName: name,
+        success: true,
+        toolCount: bridge.tools.length,
+      };
+    } catch (error) {
+      return {
+        serverName: name,
+        success: false,
+        toolCount: 0,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  private async connectServer(config: MCPServerConfig): Promise<MCPToolBridge> {
+    const client = await createMCPConnection(config, this.logger);
+    try {
+      const rawBridge = await createToolBridge(
+        client,
+        config.name,
+        this.logger,
+        {
+          listToolsTimeoutMs: config.timeout,
+          callToolTimeoutMs: config.timeout,
+          serverConfig: toToolCatalogPolicyConfig(config),
+        },
+      );
+      const bridge = new ResilientMCPBridge(config, rawBridge, this.logger);
+      this.bridges.set(config.name, bridge);
+      return bridge;
+    } catch (error) {
+      try {
+        await client.close();
+      } catch {
+        // best effort
+      }
+      throw error;
+    }
   }
 }
