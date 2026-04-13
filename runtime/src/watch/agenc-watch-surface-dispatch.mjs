@@ -136,15 +136,11 @@ function handleSessionListResult(data, state, api) {
   }
   const target = api.latestSessionSummary(sessions, state.sessionId);
   if (target?.sessionId) {
-    state.sessionId = target.sessionId;
-    api.persistSessionId(state.sessionId);
-    api.setTransientStatus(`resuming session ${state.sessionId}`);
+    api.setTransientStatus(`resuming session ${target.sessionId}`);
     api.send(
-      "session.command.execute",
+      "chat.session.resume",
       api.authPayload({
         sessionId: target.sessionId,
-        client: "console",
-        content: `/session resume ${target.sessionId}`,
       }),
     );
   } else {
@@ -1037,6 +1033,9 @@ function handleApprovalSurfaceEvent(surfaceEvent, api) {
 function handleErrorSurfaceEvent(surfaceEvent, rawMessage, state, api) {
   const errorMessage = surfaceEvent.message.error;
   const errorPayload = surfaceEvent.payloadRecord;
+  const isStaleSessionMissing =
+    typeof errorMessage === "string" &&
+    /^Session ".*" not found$/.test(errorMessage);
   if (surfaceEvent.type !== "error") {
     return false;
   }
@@ -1072,7 +1071,7 @@ function handleErrorSurfaceEvent(surfaceEvent, rawMessage, state, api) {
     return true;
   }
   if (
-    errorMessage === "Not authorized to access this session" &&
+    (errorMessage === "Not authorized to access this session" || isStaleSessionMissing) &&
     !state.bootstrapReady &&
     typeof state.sessionId === "string" &&
     state.sessionId.trim().length > 0
@@ -1082,7 +1081,11 @@ function handleErrorSurfaceEvent(surfaceEvent, rawMessage, state, api) {
     state.cockpitUpdatedAt = 0;
     state.cockpitFingerprint = null;
     api.persistSessionId(null);
-    api.scheduleBootstrap("stale session authorization failed");
+    api.scheduleBootstrap(
+      isStaleSessionMissing
+        ? "stale session missing; retrying bootstrap"
+        : "stale session authorization failed",
+    );
     return true;
   }
   api.eventStore.cancelAgentStream("error");

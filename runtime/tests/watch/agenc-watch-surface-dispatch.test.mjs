@@ -306,20 +306,17 @@ test("dispatchOperatorSurfaceEvent bootstraps from canonical session list result
     api,
   );
 
-  assert.equal(state.sessionId, "session-next");
+  assert.equal(state.sessionId, "session-prev");
   assert.deepEqual(calls, [
-    ["persistSessionId", "session-next"],
     [
       "status",
       "resuming session session-next",
     ],
     [
       "send",
-      "session.command.execute",
+      "chat.session.resume",
       {
         auth: true,
-        client: "console",
-        content: "/session resume session-next",
         sessionId: "session-next",
       },
     ],
@@ -1267,6 +1264,35 @@ test("dispatchOperatorSurfaceEvent schedules bootstrap retries for transient sta
   assert.equal(state.manualHistoryRequestPending, false);
   assert.deepEqual(calls, [
     ["scheduleBootstrap", "webchat handler still starting"],
+  ]);
+});
+
+test("dispatchOperatorSurfaceEvent clears stale missing sessions during bootstrap", () => {
+  const { api, state, calls } = createHarness({
+    state: {
+      sessionId: "session:stale-session",
+      bootstrapReady: false,
+    },
+  });
+
+  dispatchOperatorSurfaceEvent(
+    {
+      family: "error",
+      type: "error",
+      payload: {},
+      payloadRecord: {},
+      payloadList: null,
+      isSessionScoped: false,
+      message: { error: 'Session "session:stale-session" not found' },
+    },
+    null,
+    api,
+  );
+
+  assert.equal(state.sessionId, null);
+  assert.deepEqual(calls, [
+    ["persistSessionId", null],
+    ["scheduleBootstrap", "stale session missing; retrying bootstrap"],
   ]);
 });
 
