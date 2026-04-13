@@ -51,7 +51,7 @@ function createCommandHarness(overrides = {}) {
     { name: "/agents", usage: "/agents [query]", description: "agents", aliases: ["/threads"] },
     { name: "/extensibility", usage: "/extensibility [overview|skills|plugins|mcp|hooks]", description: "extensibility", aliases: ["/extensions"] },
     { name: "/skills", usage: "/skills [list|enable <name>|disable <name>]", description: "skills", aliases: [] },
-    { name: "/plugins", usage: "/plugins [list|trust <packageName> [subpath ...]|untrust <packageName>]", description: "plugins", aliases: [] },
+    { name: "/plugin", usage: "/plugin [list|inspect <pluginId>|enable <pluginId>|disable <pluginId>|reload <pluginId>]", description: "plugin", aliases: [], deprecatedAliases: ["/plugins"] },
     { name: "/mcp", usage: "/mcp [list|enable <serverName>|disable <serverName>]", description: "mcp", aliases: [] },
     { name: "/hooks", usage: "/hooks [list|events]", description: "hooks", aliases: [] },
     { name: "/xai", usage: "/xai [set|status|validate|clear]", description: "xai", aliases: ["/api"] },
@@ -63,9 +63,7 @@ function createCommandHarness(overrides = {}) {
     { name: "/logs", usage: "/logs [lines]", description: "logs", aliases: [] },
     { name: "/status", usage: "/status", description: "status", aliases: [] },
     { name: "/new", usage: "/new", description: "new session", aliases: [] },
-    { name: "/review", usage: "/review [scope]", description: "review", aliases: [] },
-    { name: "/security-review", usage: "/security-review [scope]", description: "security", aliases: [] },
-    { name: "/pr-comments", usage: "/pr-comments [scope]", description: "comments", aliases: [] },
+    { name: "/review", usage: "/review [scope]", description: "review", aliases: [], deprecatedAliases: ["/security-review", "/pr-comments"] },
     { name: "/diff", usage: "/diff", description: "diff", aliases: [] },
     { name: "/compact", usage: "/compact", description: "compact", aliases: [] },
     { name: "/permissions", usage: "/permissions", description: "permissions", aliases: [] },
@@ -85,7 +83,7 @@ function createCommandHarness(overrides = {}) {
     { name: "/run-fork", usage: "/run-fork <targetSessionId> [--objective <text>] [--reason <text>]", description: "run fork", aliases: [] },
     { name: "/verify-override", usage: "/verify-override <continue|complete|fail> <reason> [--user-update <text>]", description: "verify override", aliases: [] },
     { name: "/desktop", usage: "/desktop <start|stop|status|vnc|list|attach>", description: "desktop", aliases: [] },
-    { name: "/session", usage: "/session [status|list|inspect|history|resume|fork]", description: "session", aliases: [] },
+    { name: "/session", usage: "/session [status|list|inspect|history|resume|fork]", description: "session", aliases: [], deprecatedAliases: ["/sessions"] },
     { name: "/session-label", usage: "/session-label [show|clear|<label>]", description: "session label", aliases: ["/rename-session"] },
     { name: "/model", usage: "/model", description: "model", aliases: ["/models"] },
     { name: "/memory", usage: "/memory", description: "memory", aliases: [] },
@@ -97,6 +95,9 @@ function createCommandHarness(overrides = {}) {
   for (const command of watchCommands) {
     commandLookup.set(command.name, command);
     for (const alias of command.aliases ?? []) {
+      commandLookup.set(alias, command);
+    }
+    for (const alias of command.deprecatedAliases ?? []) {
       commandLookup.set(alias, command);
     }
   }
@@ -525,13 +526,13 @@ test("command controller shows agent threads through /agents", () => {
   );
 });
 
-test("command controller shows extensibility sections and forwards plugin and MCP commands", () => {
+test("command controller shows extensibility sections and forwards canonical plugin and MCP commands", () => {
   const { controller, calls } = createCommandHarness();
 
   assert.equal(controller.dispatchOperatorInput("/extensibility mcp"), true);
   assert.equal(controller.dispatchOperatorInput("/extensibility hooks"), true);
-  assert.equal(controller.dispatchOperatorInput("/plugins trust @demo/plugin channels"), true);
-  assert.equal(controller.dispatchOperatorInput("/plugins untrust @demo/plugin"), true);
+  assert.equal(controller.dispatchOperatorInput("/plugin trust @demo/plugin channels"), true);
+  assert.equal(controller.dispatchOperatorInput("/plugin untrust @demo/plugin"), true);
   assert.equal(controller.dispatchOperatorInput("/mcp enable browser"), true);
   assert.equal(controller.dispatchOperatorInput("/hooks"), true);
 
@@ -796,11 +797,11 @@ test("command controller routes review commands through the shared session comma
   assert.equal(reviewSend?.payload?.content, "/review runtime/src/watch");
 });
 
-test("command controller routes security review and pr comment aliases to canonical review modes", () => {
+test("command controller routes canonical review modes through /review", () => {
   const { controller, calls } = createCommandHarness();
 
-  assert.equal(controller.dispatchOperatorInput("/security-review auth"), true);
-  assert.equal(controller.dispatchOperatorInput("/pr-comments diff"), true);
+  assert.equal(controller.dispatchOperatorInput("/review --mode security auth"), true);
+  assert.equal(controller.dispatchOperatorInput("/review --mode pr-comments diff"), true);
 
   const chatPayloads = calls
     .filter((entry) => entry.type === "send" && entry.frameType === "session.command.execute")
@@ -1611,10 +1612,10 @@ test("command controller saves and lists checkpoints through dedicated commands"
   );
 });
 
-test("command controller routes /sessions through the canonical session list command", () => {
+test("command controller routes canonical /session list through the shared command bus", () => {
   const { controller, watchState, calls } = createCommandHarness({
     WATCH_COMMANDS: [
-      { name: "/sessions", usage: "/sessions [query]", description: "sessions", aliases: [] },
+      { name: "/session", usage: "/session list [query]", description: "session", aliases: [] },
     ],
     parseWatchSlashCommand(value) {
       const trimmed = String(value ?? "").trim();
@@ -1623,12 +1624,12 @@ test("command controller routes /sessions through the canonical session list com
       return {
         commandToken,
         args,
-        command: commandToken === "/sessions" ? { name: commandToken } : null,
+        command: commandToken === "/session" ? { name: commandToken } : null,
       };
     },
   });
 
-  assert.equal(controller.dispatchOperatorInput("/sessions runtime"), true);
+  assert.equal(controller.dispatchOperatorInput("/session list runtime"), true);
 
   assert.equal(watchState.manualSessionsRequestPending, true);
   assert.equal(watchState.manualSessionsQuery, "runtime");

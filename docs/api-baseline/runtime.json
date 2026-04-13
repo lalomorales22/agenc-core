@@ -7065,10 +7065,6 @@
       "kind": "const"
     },
     {
-      "name": "WS_CHAT_SESSIONS",
-      "kind": "const"
-    },
-    {
       "name": "WS_CHAT_TYPING",
       "kind": "const"
     },

@@ -2726,7 +2726,7 @@ export function createDaemonCommandRegistry(
       clients: ["shell", "console", "web"],
       rolloutFeature: "codingCommands",
       viewKind: "review",
-      aliases: ["security-review", "pr-comments"],
+      deprecatedAliases: ["security-review", "pr-comments"],
     },
     handler: async (cmdCtx) => {
       if (
@@ -3820,6 +3820,7 @@ export function createDaemonCommandRegistry(
       category: "session",
       clients: ["shell", "console", "web"],
       viewKind: "session",
+      deprecatedAliases: ["sessions"],
     },
     handler: async (cmdCtx) => {
       const subcommand = cmdCtx.argv[0]?.toLowerCase() ?? "status";
@@ -4448,6 +4449,7 @@ export function createDaemonCommandRegistry(
       clients: ["shell", "console", "web"],
       rolloutFeature: "shellExtensions",
       viewKind: "extensions",
+      deprecatedAliases: ["plugins"],
     },
     handler: async (cmdCtx) => {
       if (
