@@ -24,6 +24,10 @@ import type {
   ObservabilityTraceSummary,
   SessionContinuityDetail,
   SessionContinuityRecord,
+  DiffCommandData,
+  ExtensionsCommandData,
+  FilesCommandData,
+  GrepCommandData,
   SessionCommandData,
   SessionCommandResultData,
   SessionCommandResultPayload,
@@ -32,6 +36,8 @@ import type {
   WorkflowCommandData,
   AgentsCommandData,
   GitCommandData,
+  PolicyCommandData,
+  TasksCommandData,
   SlashCommandCatalogEntry,
   SlashCommandViewKind,
   WatchCockpitSnapshot,
@@ -388,6 +394,12 @@ export type SessionCommandViewSessionData = SessionCommandData;
 export type SessionCommandViewWorkflowData = WorkflowCommandData;
 export type SessionCommandViewAgentsData = AgentsCommandData;
 export type SessionCommandViewGitData = GitCommandData;
+export type SessionCommandViewDiffData = DiffCommandData;
+export type SessionCommandViewFilesData = FilesCommandData;
+export type SessionCommandViewGrepData = GrepCommandData;
+export type SessionCommandViewTasksData = TasksCommandData;
+export type SessionCommandViewPolicyData = PolicyCommandData;
+export type SessionCommandViewExtensionsData = ExtensionsCommandData;
 export type SessionCommandViewReviewData = ReviewCommandData;
 export type SessionCommandViewVerifyData = VerifyCommandData;
 export type CockpitSnapshot = WatchCockpitSnapshot;

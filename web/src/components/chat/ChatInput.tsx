@@ -25,17 +25,6 @@ interface SlashCommandOption {
 
 const FALLBACK_SLASH_COMMANDS: SlashCommandOption[] = [
   { name: 'help', description: 'Show available commands' },
-  { name: 'status', description: 'Show agent status' },
-  { name: 'new', description: 'Start a new session' },
-  { name: 'session', description: 'Show or resume shell sessions', args: '[status|list|resume <sessionId>]' },
-  { name: 'context', description: 'Show context window usage' },
-  { name: 'compact', description: 'Force conversation compaction' },
-  { name: 'model', description: 'Show current model', args: '[name]' },
-  { name: 'review', description: 'Review current changes', args: '[--delegate]' },
-  { name: 'tasks', description: 'List tasks' },
-  { name: 'mcp', description: 'Inspect configured MCP servers' },
-  { name: 'skills', description: 'List local discovered skills' },
-  { name: 'plugin', description: 'Inspect the local plugin catalog' },
 ];
 
 function getSlashQuery(value: string): string | null {

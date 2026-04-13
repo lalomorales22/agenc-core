@@ -1,10 +1,16 @@
 import type { ReactNode } from 'react';
 import type {
+  SessionCommandViewDiffData,
+  SessionCommandViewExtensionsData,
+  SessionCommandViewFilesData,
   SessionCommandResult,
   SessionCommandViewAgentsData,
+  SessionCommandViewGrepData,
   SessionCommandViewGitData,
+  SessionCommandViewPolicyData,
   SessionCommandViewReviewData,
   SessionCommandViewSessionData,
+  SessionCommandViewTasksData,
   SessionCommandViewVerifyData,
   SessionCommandViewWorkflowData,
 } from '../../types';
@@ -35,7 +41,7 @@ function InlineStat({
   value,
 }: {
   label: string;
-  value: React.ReactNode;
+  value: ReactNode;
 }) {
   return (
     <div className="flex items-center justify-between gap-3 border-b border-bbs-border/50 py-1 last:border-b-0">
@@ -52,6 +58,11 @@ function TextBlock({ content }: { content?: string }) {
       {content}
     </pre>
   );
+}
+
+function JsonBlock({ value }: { value: unknown }) {
+  if (value === undefined) return null;
+  return <TextBlock content={JSON.stringify(value, null, 2)} />;
 }
 
 function SessionResultView({
@@ -260,6 +271,120 @@ function GitResultView({
   );
 }
 
+function DiffResultView({
+  result,
+  data,
+}: {
+  result: SessionCommandResult;
+  data: SessionCommandViewDiffData;
+}) {
+  return (
+    <Section title="Diff">
+      <InlineStat label="Command" value={data.subcommand} />
+      <TextBlock content={result.content} />
+      {data.diff && <JsonBlock value={data.diff} />}
+    </Section>
+  );
+}
+
+function FilesResultView({
+  result,
+  data,
+}: {
+  result: SessionCommandResult;
+  data: SessionCommandViewFilesData;
+}) {
+  return (
+    <Section title="Files">
+      <InlineStat label="Mode" value={data.mode} />
+      {data.query && <InlineStat label="Query" value={data.query} />}
+      <TextBlock content={result.content} />
+      {data.result && <JsonBlock value={data.result} />}
+    </Section>
+  );
+}
+
+function GrepResultView({
+  result,
+  data,
+}: {
+  result: SessionCommandResult;
+  data: SessionCommandViewGrepData;
+}) {
+  return (
+    <Section title="Grep">
+      <InlineStat label="Pattern" value={data.pattern} />
+      <TextBlock content={result.content} />
+      {data.result && <JsonBlock value={data.result} />}
+    </Section>
+  );
+}
+
+function TasksResultView({
+  result,
+  data,
+}: {
+  result: SessionCommandResult;
+  data: SessionCommandViewTasksData;
+}) {
+  return (
+    <Section title="Tasks">
+      <InlineStat label="Command" value={data.subcommand} />
+      {data.taskId && <InlineStat label="Task" value={data.taskId} />}
+      <TextBlock content={result.content} />
+      {data.result && <JsonBlock value={data.result} />}
+    </Section>
+  );
+}
+
+function PolicyResultView({
+  result,
+  data,
+}: {
+  result: SessionCommandResult;
+  data: SessionCommandViewPolicyData;
+}) {
+  return (
+    <Section title="Policy">
+      <InlineStat label="Command" value={data.subcommand} />
+      {data.sessionPolicyState && (
+        <>
+          <InlineStat
+            label="Allow"
+            value={data.sessionPolicyState.elevatedPatterns.join(', ') || 'none'}
+          />
+          <InlineStat
+            label="Deny"
+            value={data.sessionPolicyState.deniedPatterns.join(', ') || 'none'}
+          />
+        </>
+      )}
+      <TextBlock content={result.content} />
+      {data.preview && <JsonBlock value={data.preview} />}
+      {data.leases && data.leases.length > 0 && <JsonBlock value={data.leases} />}
+    </Section>
+  );
+}
+
+function ExtensionsResultView({
+  result,
+  data,
+}: {
+  result: SessionCommandResult;
+  data: SessionCommandViewExtensionsData;
+}) {
+  return (
+    <Section title={data.surface.toUpperCase()}>
+      <InlineStat label="Command" value={data.subcommand} />
+      {data.target && <InlineStat label="Target" value={data.target} />}
+      <TextBlock content={result.content} />
+      {data.status && <JsonBlock value={data.status} />}
+      {data.detail && <JsonBlock value={data.detail} />}
+      {data.entries && data.entries.length > 0 && <JsonBlock value={data.entries} />}
+    </Section>
+  );
+}
+
 function ReviewResultView({
   result,
   data,
@@ -320,6 +445,7 @@ function VerifyResultView({
 
 export function CommandResultPanel({ result }: CommandResultPanelProps) {
   const data = result.data;
+  const panelKind = result.viewKind ?? data?.kind ?? null;
 
   return (
     <aside className="h-full overflow-y-auto border-l border-bbs-border bg-bbs-surface">
@@ -342,8 +468,26 @@ export function CommandResultPanel({ result }: CommandResultPanelProps) {
         {data?.kind === 'agents' && (
           <AgentsResultView result={result} data={data} />
         )}
-        {data?.kind === 'git' && (
+        {panelKind === 'git' && data?.kind === 'git' && (
           <GitResultView result={result} data={data} />
+        )}
+        {panelKind === 'diff' && data?.kind === 'diff' && (
+          <DiffResultView result={result} data={data} />
+        )}
+        {panelKind === 'files' && data?.kind === 'files' && (
+          <FilesResultView result={result} data={data} />
+        )}
+        {panelKind === 'grep' && data?.kind === 'grep' && (
+          <GrepResultView result={result} data={data} />
+        )}
+        {panelKind === 'tasks' && data?.kind === 'tasks' && (
+          <TasksResultView result={result} data={data} />
+        )}
+        {panelKind === 'policy' && data?.kind === 'policy' && (
+          <PolicyResultView result={result} data={data} />
+        )}
+        {panelKind === 'extensions' && data?.kind === 'extensions' && (
+          <ExtensionsResultView result={result} data={data} />
         )}
         {data?.kind === 'review' && (
           <ReviewResultView result={result} data={data} />

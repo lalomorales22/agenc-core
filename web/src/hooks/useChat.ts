@@ -860,12 +860,20 @@ export function useChat({ send, connected }: UseChatOptions): UseChatReturn {
               payload: authPayload(),
             });
             refreshSessions();
+            refreshCommandCatalog();
           }
           if (resultData.subcommand === 'fork' && resultData.forked?.targetSessionId) {
             refreshSessions();
           }
         }
-        if (resultContent) {
+        if (
+          payload.commandName === 'profile' ||
+          payload.commandName === 'plan' ||
+          payload.commandName === 'new'
+        ) {
+          refreshCommandCatalog();
+        }
+        if (resultContent && !resultData) {
           injectMessage(resultContent, 'agent');
         }
         pendingMsgIdRef.current = null;

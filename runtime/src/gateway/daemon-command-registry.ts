@@ -2021,11 +2021,20 @@ export function createDaemonCommandRegistry(
           query.length > 0 ? "system.searchFiles" : "system.repoInventory",
           jsonArgs,
         );
-        await cmdCtx.reply(
+        const text =
           query.length > 0
             ? formatSearchFilesReply(result)
-            : formatRepoInventoryReply(result),
-        );
+            : formatRepoInventoryReply(result);
+        await cmdCtx.replyResult({
+          text,
+          viewKind: "files",
+          data: {
+            kind: "files",
+            mode: query.length > 0 ? "search" : "inventory",
+            ...(query.length > 0 ? { query } : {}),
+            result,
+          },
+        });
         return;
       }
       const query = cmdCtx.argv
@@ -2038,7 +2047,15 @@ export function createDaemonCommandRegistry(
           "system.repoInventory",
           {},
         );
-        await cmdCtx.reply(formatRepoInventoryReply(result));
+        await cmdCtx.replyResult({
+          text: formatRepoInventoryReply(result),
+          viewKind: "files",
+          data: {
+            kind: "files",
+            mode: "inventory",
+            result,
+          },
+        });
         return;
       }
       const result = await executeStructuredTool(
@@ -2058,7 +2075,16 @@ export function createDaemonCommandRegistry(
             : {}),
         },
       );
-      await cmdCtx.reply(formatSearchFilesReply(result));
+      await cmdCtx.replyResult({
+        text: formatSearchFilesReply(result),
+        viewKind: "files",
+        data: {
+          kind: "files",
+          mode: "search",
+          query,
+          result,
+        },
+      });
     },
   });
   commandRegistry.register({
@@ -2124,7 +2150,15 @@ export function createDaemonCommandRegistry(
         "system.grep",
         args,
       );
-      await cmdCtx.reply(formatGrepReply(result));
+      await cmdCtx.replyResult({
+        text: formatGrepReply(result),
+        viewKind: "grep",
+        data: {
+          kind: "grep",
+          pattern: typeof args.pattern === "string" ? args.pattern : "",
+          result,
+        },
+      });
     },
   });
   commandRegistry.register({
@@ -2515,7 +2549,7 @@ export function createDaemonCommandRegistry(
         text: `${formatGitSummaryReply(summary)}\n\n${formatGitDiffReply(diff)}`,
         viewKind: "diff",
         data: {
-          kind: "git",
+          kind: "diff",
           subcommand: "diff",
           changeSummary: asRecord(summary),
           diff: asRecord(diff),
@@ -3017,7 +3051,15 @@ export function createDaemonCommandRegistry(
               : {}),
           },
         );
-        await cmdCtx.reply(formatTaskListReply(result));
+        await cmdCtx.replyResult({
+          text: formatTaskListReply(result),
+          viewKind: "tasks",
+          data: {
+            kind: "tasks",
+            subcommand,
+            result: asRecord(result),
+          },
+        });
         return;
       }
 
@@ -3038,7 +3080,16 @@ export function createDaemonCommandRegistry(
           "task.get",
           { [TASK_LIST_ARG]: cmdCtx.sessionId, taskId },
         );
-        await cmdCtx.reply(formatTaskDetailReply(result));
+        await cmdCtx.replyResult({
+          text: formatTaskDetailReply(result),
+          viewKind: "tasks",
+          data: {
+            kind: "tasks",
+            subcommand,
+            taskId,
+            result: asRecord(result),
+          },
+        });
         return;
       }
 
@@ -3057,7 +3108,16 @@ export function createDaemonCommandRegistry(
               : {}),
           },
         );
-        await cmdCtx.reply(formatTaskDetailReply(result));
+        await cmdCtx.replyResult({
+          text: formatTaskDetailReply(result),
+          viewKind: "tasks",
+          data: {
+            kind: "tasks",
+            subcommand,
+            taskId,
+            result: asRecord(result),
+          },
+        });
         return;
       }
 
@@ -3078,11 +3138,20 @@ export function createDaemonCommandRegistry(
               : {}),
           },
         );
-        await cmdCtx.reply(
+        const text =
           typeof result.output === "string"
             ? result.output
-            : formatTaskDetailReply(result),
-        );
+            : formatTaskDetailReply(result);
+        await cmdCtx.replyResult({
+          text,
+          viewKind: "tasks",
+          data: {
+            kind: "tasks",
+            subcommand,
+            taskId,
+            result: asRecord(result),
+          },
+        });
         return;
       }
 
@@ -4050,12 +4119,28 @@ export function createDaemonCommandRegistry(
       viewKind: "policy",
     },
     handler: async (cmdCtx) => {
+      const replyPolicyResult = async (
+        subcommandName: string,
+        text: string,
+        extras: Omit<import("../channels/webchat/protocol.js").PolicyCommandData, "kind" | "subcommand"> = {},
+      ) => {
+        await cmdCtx.replyResult({
+          text,
+          viewKind: "policy",
+          data: {
+            kind: "policy",
+            subcommand: subcommandName,
+            ...extras,
+          },
+        });
+      };
       const subcommand = cmdCtx.argv[0]?.toLowerCase();
       if (!subcommand || subcommand === "status") {
         const state = ctx.getPolicyEngineState();
         const policy = ctx.gateway?.config.policy;
         const sessionPolicyState = ctx.getSessionPolicyState(cmdCtx.sessionId);
-        await cmdCtx.reply(
+        await replyPolicyResult(
+          "status",
           [
             `Policy engine: ${ctx.isPolicyEngineEnabled() ? "enabled" : "disabled"}`,
             `Simulation mode: ${policy?.simulationMode ?? "off"}`,
@@ -4074,6 +4159,13 @@ export function createDaemonCommandRegistry(
                 : "none"
             }`,
           ].join("\n"),
+          {
+            sessionPolicyState: {
+              elevatedPatterns: sessionPolicyState.elevatedPatterns,
+              deniedPatterns: sessionPolicyState.deniedPatterns,
+            },
+            ...(state ? { preview: asRecord(state) } : {}),
+          },
         );
         return;
       }
@@ -4081,7 +4173,7 @@ export function createDaemonCommandRegistry(
         const leases =
           ctx.listSessionCredentialLeases(cmdCtx.sessionId) ?? [];
         if (leases.length === 0) {
-          await cmdCtx.reply("No active session credential leases.");
+          await replyPolicyResult("credentials", "No active session credential leases.");
           return;
         }
         const lines = leases.map(
@@ -4089,8 +4181,14 @@ export function createDaemonCommandRegistry(
             `- ${lease.credentialId}: expires ${new Date(lease.expiresAt).toISOString()} ` +
             `(domains=${lease.domains.join(", ") || "none"})`,
         );
-        await cmdCtx.reply(
+        await replyPolicyResult(
+          "credentials",
           `Active session credential leases:\n${lines.join("\n")}`,
+          {
+            leases: leases
+              .map((lease) => asRecord(lease))
+              .filter((lease): lease is Record<string, unknown> => Boolean(lease)),
+          },
         );
         return;
       }
@@ -4104,7 +4202,8 @@ export function createDaemonCommandRegistry(
               : undefined,
           reason: "manual",
         });
-        await cmdCtx.reply(
+        await replyPolicyResult(
+          "revoke-credentials",
           revoked > 0
             ? `Revoked ${revoked} session credential lease${revoked === 1 ? "" : "s"}.`
             : credentialId
@@ -4131,7 +4230,8 @@ export function createDaemonCommandRegistry(
           operation: operation as "allow" | "deny" | "clear" | "reset",
           pattern,
         });
-        await cmdCtx.reply(
+        await replyPolicyResult(
+          "update",
           [
             `Policy update: ${operation}${pattern ? ` ${pattern}` : ""}`,
             `Session allow patterns: ${
@@ -4145,6 +4245,12 @@ export function createDaemonCommandRegistry(
                 : "none"
             }`,
           ].join("\n"),
+          {
+            sessionPolicyState: {
+              elevatedPatterns: nextState.elevatedPatterns,
+              deniedPatterns: nextState.deniedPatterns,
+            },
+          },
         );
         return;
       }
@@ -4194,7 +4300,8 @@ export function createDaemonCommandRegistry(
               .join("\n")
           : "- none";
       const approvalPreview = preview.approval.requestPreview;
-      await cmdCtx.reply(
+      await replyPolicyResult(
+        "simulate",
         [
           `Policy simulation for ${preview.toolName}`,
           `Session: ${preview.sessionId}`,
@@ -4205,6 +4312,9 @@ export function createDaemonCommandRegistry(
             ? `Approval preview: ${approvalPreview.message}`
             : "Approval preview: none",
         ].join("\n"),
+        {
+          preview: asRecord(preview),
+        },
       );
     },
   });
@@ -4267,16 +4377,40 @@ export function createDaemonCommandRegistry(
         `  Plugin tools: ${sourceCounts.plugin ?? 0}`,
         `  Skill tools: ${sourceCounts.skill ?? 0}`,
       ].join("\n");
+      const replyExtensionResult = async (
+        text: string,
+        extras: Omit<import("../channels/webchat/protocol.js").ExtensionsCommandData, "kind" | "surface" | "subcommand"> = {},
+      ) => {
+        await cmdCtx.replyResult({
+          text,
+          viewKind: "extensions",
+          data: {
+            kind: "extensions",
+            surface: "mcp",
+            subcommand,
+            ...extras,
+          },
+        });
+      };
       const findServer = (name: string | undefined) =>
         configuredServers.find((server) => server.name === name);
 
       if (subcommand === "status") {
-        await cmdCtx.reply(renderStatus());
+        await replyExtensionResult(renderStatus(), {
+          status: {
+            configuredServers: configuredServers.length,
+            connectedServers: connectedServers.size,
+            visibleTools: mcpCatalog.length,
+            builtinTools: sourceCounts.builtin ?? 0,
+            pluginTools: sourceCounts.plugin ?? 0,
+            skillTools: sourceCounts.skill ?? 0,
+          },
+        });
         return;
       }
       if (subcommand === "list") {
         if (configuredServers.length === 0) {
-          await cmdCtx.reply(`${renderStatus()}\n\nNo MCP servers are configured.`);
+          await replyExtensionResult(`${renderStatus()}\n\nNo MCP servers are configured.`);
           return;
         }
         const lines = configuredServers.map((server) => {
@@ -4294,7 +4428,13 @@ export function createDaemonCommandRegistry(
             `— tools=${toolCount}`
           );
         });
-        await cmdCtx.reply(`${renderStatus()}\n\nServers:\n${lines.join("\n")}`);
+        await replyExtensionResult(`${renderStatus()}\n\nServers:\n${lines.join("\n")}`, {
+          entries: configuredServers.map((server) => ({
+            ...asRecord(server),
+            visibleToolCount: getMcpCatalogEntries(mcpCatalog, server.name).length,
+            connected: connectedServers.has(server.name),
+          })),
+        });
         return;
       }
       if (subcommand === "tools") {
@@ -4304,14 +4444,20 @@ export function createDaemonCommandRegistry(
             ? getMcpCatalogEntries(mcpCatalog, serverName.trim())
             : mcpCatalog;
         if (visibleCatalog.length === 0) {
-          await cmdCtx.reply(`${renderStatus()}\n\nNo MCP tools are currently connected.`);
+          await replyExtensionResult(`${renderStatus()}\n\nNo MCP tools are currently connected.`);
           return;
         }
         const lines = visibleCatalog
           .slice(0, 100)
           .map((entry) => `  ${entry.name} — ${entry.description}`);
-        await cmdCtx.reply(
+        await replyExtensionResult(
           `${renderStatus()}\n\nTools${serverName ? ` (${serverName.trim()})` : ""}:\n${lines.join("\n")}`,
+          {
+            ...(serverName ? { target: serverName.trim() } : {}),
+            entries: visibleCatalog
+              .map((entry) => asRecord(entry))
+              .filter((entry): entry is Record<string, unknown> => Boolean(entry)),
+          },
         );
         return;
       }
@@ -4360,7 +4506,15 @@ export function createDaemonCommandRegistry(
               .map((entry) => `  ${stripMcpToolPrefix(entry.name, server.name)} — ${entry.description}`),
           );
         }
-        await cmdCtx.reply(lines.join("\n"));
+        await replyExtensionResult(lines.join("\n"), {
+          target: serverName,
+          detail: {
+            ...asRecord(server),
+            visibleTools: serverCatalog
+              .map((entry) => asRecord(entry))
+              .filter((entry): entry is Record<string, unknown> => Boolean(entry)),
+          },
+        });
         return;
       }
       if (subcommand === "validate") {
@@ -4438,7 +4592,12 @@ export function createDaemonCommandRegistry(
             ].join("\n"),
           );
         }
-        await cmdCtx.reply(sections.join("\n\n"));
+        await replyExtensionResult(sections.join("\n\n"), {
+          ...(serverName ? { target: serverName } : {}),
+          entries: targets
+            .map((server) => asRecord(server))
+            .filter((entry): entry is Record<string, unknown> => Boolean(entry)),
+        });
         return;
       }
       if (subcommand === "reconnect") {
@@ -4459,10 +4618,14 @@ export function createDaemonCommandRegistry(
           return;
         }
         const result = await mcpManager.reconnectServer(server.name);
-        await cmdCtx.reply(
+        await replyExtensionResult(
           result.success
             ? `MCP server "${server.name}" reconnected (${result.toolCount} tools).`
             : `MCP server "${server.name}" reconnect failed: ${result.error ?? "unknown error"}`,
+          {
+            target: server.name,
+            detail: asRecord(result),
+          },
         );
         return;
       }
@@ -4496,8 +4659,14 @@ export function createDaemonCommandRegistry(
           parsed.mcp = { ...(parsed.mcp ?? {}), servers };
           await writeFile(ctx.configPath, JSON.stringify(parsed, null, 2) + "\n");
           await ctx.handleConfigReload();
-          await cmdCtx.reply(
+          await replyExtensionResult(
             `MCP server "${server.name}" ${nextEnabled ? "enabled" : "disabled"} via config reload.`,
+            {
+              target: server.name,
+              detail: {
+                enabled: nextEnabled,
+              },
+            },
           );
         } catch (error) {
           await cmdCtx.reply(
@@ -4826,10 +4995,25 @@ export function createDaemonCommandRegistry(
       };
       const resolveByName = (name: string | undefined) =>
         discovered.find((entry) => entry.skill.name === name);
+      const replyExtensionResult = async (
+        text: string,
+        extras: Omit<import("../channels/webchat/protocol.js").ExtensionsCommandData, "kind" | "surface" | "subcommand"> = {},
+      ) => {
+        await cmdCtx.replyResult({
+          text,
+          viewKind: "extensions",
+          data: {
+            kind: "extensions",
+            surface: "skills",
+            subcommand,
+            ...extras,
+          },
+        });
+      };
 
       if (subcommand === "list") {
         if (discovered.length === 0) {
-          await cmdCtx.reply(
+          await replyExtensionResult(
             "No local skills discovered.\nMarketplace listings remain under `agenc market skills ...`.",
           );
           return;
@@ -4841,10 +5025,20 @@ export function createDaemonCommandRegistry(
             `(${entry.tier}, ${state})`
           );
         });
-        await cmdCtx.reply(
+        await replyExtensionResult(
           "Local skills:\n" +
             lines.join("\n") +
             "\n\nMarketplace listings: use `agenc market skills ...`.",
+          {
+            entries: discovered
+              .map((entry) =>
+                asRecord({
+                  ...entry,
+                  ...resolveState(entry),
+                }),
+              )
+              .filter((entry): entry is Record<string, unknown> => Boolean(entry)),
+          },
         );
         return;
       }
@@ -4887,7 +5081,13 @@ export function createDaemonCommandRegistry(
         if (preview.trim().length > 0) {
           lines.push("", "Preview:", preview);
         }
-        await cmdCtx.reply(lines.join("\n"));
+        await replyExtensionResult(lines.join("\n"), {
+          target: skillName,
+          detail: asRecord({
+            ...skill,
+            ...resolveState(skill),
+          }),
+        });
         return;
       }
 
@@ -4895,7 +5095,7 @@ export function createDaemonCommandRegistry(
         const sources = await ctx.resolveShellSkillDiscoveryPaths({
           sessionId: cmdCtx.sessionId,
         });
-        await cmdCtx.reply(
+        await replyExtensionResult(
           [
             "Skill discovery sources:",
             `  Agent: ${sources.agentSkills ?? "not configured"}`,
@@ -4905,6 +5105,9 @@ export function createDaemonCommandRegistry(
             "",
             "Marketplace listings: use `agenc market skills ...`.",
           ].join("\n"),
+          {
+            detail: asRecord(sources),
+          },
         );
         return;
       }
@@ -4932,9 +5135,15 @@ export function createDaemonCommandRegistry(
           } else if (!existsSync(markerPath)) {
             await writeFile(markerPath, "", "utf8");
           }
-          await cmdCtx.reply(
+          await replyExtensionResult(
             `Skill "${skill.skill.name}" ${subcommand}d.\n` +
               "Marketplace listings remain separate under `agenc market skills ...`.",
+            {
+              target: skill.skill.name,
+              detail: {
+                disabled: subcommand !== "enable",
+              },
+            },
           );
         } catch (error) {
           await cmdCtx.reply(
@@ -4973,11 +5182,26 @@ export function createDaemonCommandRegistry(
       }
       const subcommand = cmdCtx.argv[0]?.toLowerCase() ?? "list";
       const catalog = ctx.getPluginCatalog();
+      const replyExtensionResult = async (
+        text: string,
+        extras: Omit<import("../channels/webchat/protocol.js").ExtensionsCommandData, "kind" | "surface" | "subcommand"> = {},
+      ) => {
+        await cmdCtx.replyResult({
+          text,
+          viewKind: "extensions",
+          data: {
+            kind: "extensions",
+            surface: "plugin",
+            subcommand,
+            ...extras,
+          },
+        });
+      };
 
       if (subcommand === "list") {
         const entries = catalog.list();
         if (entries.length === 0) {
-          await cmdCtx.reply("No plugins are registered in the local catalog.");
+          await replyExtensionResult("No plugins are registered in the local catalog.");
           return;
         }
         const lines = entries.map(
@@ -4985,7 +5209,11 @@ export function createDaemonCommandRegistry(
             `  ${entry.manifest.id} — ${entry.enabled ? "enabled" : "disabled"} ` +
             `(${entry.precedence}${entry.slot ? `, slot=${entry.slot}` : ""})`,
         );
-        await cmdCtx.reply("Plugin catalog:\n" + lines.join("\n"));
+        await replyExtensionResult("Plugin catalog:\n" + lines.join("\n"), {
+          entries: entries
+            .map((entry) => asRecord(entry))
+            .filter((entry): entry is Record<string, unknown> => Boolean(entry)),
+        });
         return;
       }
 
@@ -5012,7 +5240,7 @@ export function createDaemonCommandRegistry(
           entry.manifest.allowDeny?.deny?.length
             ? entry.manifest.allowDeny.deny.join(", ")
             : "none";
-        await cmdCtx.reply(
+        await replyExtensionResult(
           [
             `Plugin: ${entry.manifest.id}`,
             `  Display name: ${entry.manifest.displayName}`,
@@ -5029,6 +5257,10 @@ export function createDaemonCommandRegistry(
             "Permissions:",
             ...permissions,
           ].join("\n"),
+          {
+            target: pluginId,
+            detail: asRecord(entry),
+          },
         );
         return;
       }
@@ -5044,11 +5276,15 @@ export function createDaemonCommandRegistry(
             : subcommand === "disable"
               ? catalog.disable(pluginId)
               : catalog.reload(pluginId);
-        await cmdCtx.reply(
+        await replyExtensionResult(
           [
             result.message,
             renderPluginMutationNote(),
           ].join("\n"),
+          {
+            target: pluginId,
+            detail: asRecord(result),
+          },
         );
         return;
       }

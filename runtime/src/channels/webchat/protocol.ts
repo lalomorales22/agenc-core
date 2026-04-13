@@ -198,7 +198,7 @@ export interface SessionCommandData {
     readonly sourceSessionId: string;
     readonly targetSessionId: string;
     readonly forkSource?: string;
-    readonly session?: Record<string, unknown>;
+    readonly session?: SessionContinuityRecord;
   };
 }
 
@@ -236,6 +236,55 @@ export interface GitCommandData {
   readonly branchInfo?: Record<string, unknown>;
   readonly changeSummary?: Record<string, unknown>;
   readonly diff?: Record<string, unknown>;
+}
+
+export interface DiffCommandData {
+  readonly kind: "diff";
+  readonly subcommand: string;
+  readonly branchInfo?: Record<string, unknown>;
+  readonly changeSummary?: Record<string, unknown>;
+  readonly diff?: Record<string, unknown>;
+}
+
+export interface FilesCommandData {
+  readonly kind: "files";
+  readonly mode: "inventory" | "search";
+  readonly query?: string;
+  readonly result?: Record<string, unknown>;
+}
+
+export interface GrepCommandData {
+  readonly kind: "grep";
+  readonly pattern: string;
+  readonly result?: Record<string, unknown>;
+}
+
+export interface TasksCommandData {
+  readonly kind: "tasks";
+  readonly subcommand: string;
+  readonly taskId?: string;
+  readonly result?: Record<string, unknown>;
+}
+
+export interface PolicyCommandData {
+  readonly kind: "policy";
+  readonly subcommand: string;
+  readonly sessionPolicyState?: {
+    readonly elevatedPatterns: readonly string[];
+    readonly deniedPatterns: readonly string[];
+  };
+  readonly leases?: readonly Record<string, unknown>[];
+  readonly preview?: Record<string, unknown>;
+}
+
+export interface ExtensionsCommandData {
+  readonly kind: "extensions";
+  readonly surface: "mcp" | "skills" | "plugin";
+  readonly subcommand: string;
+  readonly target?: string;
+  readonly entries?: readonly Record<string, unknown>[];
+  readonly detail?: Record<string, unknown>;
+  readonly status?: Record<string, unknown>;
 }
 
 export interface ReviewCommandData {
@@ -284,6 +333,12 @@ export type SessionCommandResultData =
   | WorkflowCommandData
   | AgentsCommandData
   | GitCommandData
+  | DiffCommandData
+  | FilesCommandData
+  | GrepCommandData
+  | TasksCommandData
+  | PolicyCommandData
+  | ExtensionsCommandData
   | ReviewCommandData
   | VerifyCommandData;
 
