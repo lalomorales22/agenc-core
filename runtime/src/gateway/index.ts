@@ -217,10 +217,13 @@ export type {
   AutonomyCanaryDecision,
   AutonomyRolloutEvaluation,
   AutonomyRolloutEvaluationInput,
+  ShellRolloutReadinessArtifact,
+  ShellRolloutReadinessCheck,
 } from "./autonomy-rollout.js";
 export {
   AUTONOMY_ROLLOUT_MANIFEST_SCHEMA_VERSION,
   parseAutonomyRolloutManifest,
+  parseShellRolloutReadinessArtifact,
   buildObservedAutonomySloMetrics,
   evaluateAutonomyRolloutReadiness,
   evaluateAutonomyCanaryAdmission,

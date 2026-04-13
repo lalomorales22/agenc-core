@@ -109,6 +109,11 @@ import type {
   ShellAgentRoleSource,
   ShellAgentToolBundleName,
 } from "./shell-agent-roles.js";
+import {
+  evaluateShellFeatureRollout,
+  formatShellRolloutHoldback,
+  resolveConfiguredShellProfile,
+} from "./shell-rollout.js";
 
 // ============================================================================
 // Eval script helpers (moved from daemon.ts top-level)
@@ -396,6 +401,47 @@ function formatShellProfileList(current: SessionShellProfile): string {
   return SESSION_SHELL_PROFILES.map((profile) =>
     `  ${profile}${profile === current ? " (current)" : ""}`,
   ).join("\n");
+}
+
+function evaluateSessionShellRollout(params: {
+  readonly ctx: CommandRegistryDaemonContext;
+  readonly sessionId: string;
+  readonly feature:
+    | "shellProfiles"
+    | "codingCommands"
+    | "shellExtensions"
+    | "watchCockpit"
+    | "multiAgent";
+  readonly domain: "shell" | "extensions" | "watch";
+}) {
+  const scope = params.ctx.resolvePolicyScopeForSession({
+    sessionId: params.sessionId,
+    channel: "webchat",
+  });
+  return evaluateShellFeatureRollout({
+    autonomy: params.ctx.gateway?.config.autonomy,
+    tenantId: scope.tenantId,
+    feature: params.feature,
+    domain: params.domain,
+    stableKey: params.sessionId,
+  });
+}
+
+function resolveEffectiveShellProfileForSession(params: {
+  readonly ctx: CommandRegistryDaemonContext;
+  readonly sessionId: string;
+  readonly preferred?: unknown;
+}): SessionShellProfile {
+  const scope = params.ctx.resolvePolicyScopeForSession({
+    sessionId: params.sessionId,
+    channel: "webchat",
+  });
+  return resolveConfiguredShellProfile({
+    autonomy: params.ctx.gateway?.config.autonomy,
+    tenantId: scope.tenantId,
+    requested: params.preferred,
+    stableKey: params.sessionId,
+  }).profile;
 }
 
 function coerceShellAgentToolBundleName(
@@ -1576,6 +1622,37 @@ export function createDaemonCommandRegistry(
 ): SlashCommandRegistry {
   void hooks; void baseToolHandler; void approvalEngine; void skillList;
   const commandRegistry = new SlashCommandRegistry({ logger: ctx.logger });
+  const requireShellFeature = async (params: {
+    readonly cmdCtx: {
+      sessionId: string;
+      reply: (content: string) => Promise<void>;
+    };
+    readonly feature:
+      | "shellProfiles"
+      | "codingCommands"
+      | "shellExtensions"
+      | "watchCockpit"
+      | "multiAgent";
+    readonly domain: "shell" | "extensions" | "watch";
+    readonly label: string;
+  }): Promise<boolean> => {
+    const decision = evaluateSessionShellRollout({
+      ctx,
+      sessionId: resolveSessionId(params.cmdCtx.sessionId),
+      feature: params.feature,
+      domain: params.domain,
+    });
+    if (decision.allowed) {
+      return true;
+    }
+    await params.cmdCtx.reply(
+      formatShellRolloutHoldback({
+        label: params.label,
+        decision,
+      }),
+    );
+    return false;
+  };
   for (const command of createDefaultCommands()) {
     commandRegistry.register(command);
   }
@@ -1821,7 +1898,11 @@ export function createDaemonCommandRegistry(
       const encryptedReasoningEnabled =
         ctx.gateway?.config.llm?.includeEncryptedReasoning === true;
       const responseAnchor = getSessionResumeAnchorResponseId(session);
-      const shellProfile = resolveSessionShellProfile(session?.metadata ?? {});
+      const shellProfile = resolveEffectiveShellProfileForSession({
+        ctx,
+        sessionId,
+        preferred: resolveSessionShellProfile(session?.metadata ?? {}),
+      });
       const workflowState = resolveSessionWorkflowState(session?.metadata ?? {});
       await cmdCtx.reply(
         `Agent is running.\n` +
@@ -1855,7 +1936,11 @@ export function createDaemonCommandRegistry(
         return;
       }
 
-      const current = resolveSessionShellProfile(session.metadata);
+      const current = resolveEffectiveShellProfileForSession({
+        ctx,
+        sessionId,
+        preferred: resolveSessionShellProfile(session.metadata),
+      });
       const arg = cmdCtx.argv[0]?.toLowerCase();
 
       if (!arg || arg === "status") {
@@ -1884,7 +1969,16 @@ export function createDaemonCommandRegistry(
         return;
       }
 
-      ensureSessionShellProfile(session.metadata, nextProfile);
+      const resolvedProfile = resolveConfiguredShellProfile({
+        autonomy: ctx.gateway?.config.autonomy,
+        tenantId: ctx.resolvePolicyScopeForSession({
+          sessionId,
+          channel: "webchat",
+        }).tenantId,
+        requested: nextProfile,
+        stableKey: sessionId,
+      });
+      ensureSessionShellProfile(session.metadata, resolvedProfile.profile);
       if (cmdCtx.channel === "webchat") {
         await persistWebSessionRuntimeState(
           memoryBackend,
@@ -1894,8 +1988,15 @@ export function createDaemonCommandRegistry(
       }
 
       await cmdCtx.reply(
-        `Shell profile set to ${nextProfile}.\n` +
-          "This currently updates session metadata; profile-aware routing and tool curation build on top of it.",
+        resolvedProfile.coerced
+          ? [
+              `Shell profile set to ${resolvedProfile.profile}.`,
+              formatShellRolloutHoldback({
+                label: `Profile "${resolvedProfile.requestedProfile}"`,
+                decision: resolvedProfile.decision,
+              }),
+            ].join("\n")
+          : `Shell profile set to ${resolvedProfile.profile}.\nThis currently updates session metadata; profile-aware routing and tool curation build on top of it.`,
       );
     },
   });
@@ -1905,6 +2006,16 @@ export function createDaemonCommandRegistry(
     args: "[query|json]",
     global: true,
     handler: async (cmdCtx) => {
+      if (
+        !(await requireShellFeature({
+          cmdCtx,
+          feature: "codingCommands",
+          domain: "shell",
+          label: "Files command",
+        }))
+      ) {
+        return;
+      }
       let jsonArgs: Record<string, unknown> | undefined;
       try {
         jsonArgs = parseCommandJsonArgs(cmdCtx.args);
@@ -1968,6 +2079,16 @@ export function createDaemonCommandRegistry(
     args: "<pattern|json>",
     global: true,
     handler: async (cmdCtx) => {
+      if (
+        !(await requireShellFeature({
+          cmdCtx,
+          feature: "codingCommands",
+          domain: "shell",
+          label: "Grep command",
+        }))
+      ) {
+        return;
+      }
       let jsonArgs: Record<string, unknown> | undefined;
       try {
         jsonArgs = parseCommandJsonArgs(cmdCtx.args);
@@ -2018,6 +2139,16 @@ export function createDaemonCommandRegistry(
     args: "<status|diff|show|branch|summary|worktree>",
     global: true,
     handler: async (cmdCtx) => {
+      if (
+        !(await requireShellFeature({
+          cmdCtx,
+          feature: "codingCommands",
+          domain: "shell",
+          label: "Git command",
+        }))
+      ) {
+        return;
+      }
       let jsonArgs: Record<string, unknown> | undefined;
       try {
         jsonArgs = parseCommandJsonArgs(cmdCtx.args);
@@ -2252,6 +2383,16 @@ export function createDaemonCommandRegistry(
     args: "[--staged|json]",
     global: true,
     handler: async (cmdCtx) => {
+      if (
+        !(await requireShellFeature({
+          cmdCtx,
+          feature: "codingCommands",
+          domain: "shell",
+          label: "Diff command",
+        }))
+      ) {
+        return;
+      }
       let jsonArgs: Record<string, unknown> | undefined;
       try {
         jsonArgs = parseCommandJsonArgs(cmdCtx.args);
@@ -2291,6 +2432,16 @@ export function createDaemonCommandRegistry(
     args: "[--staged|--delegate]",
     global: true,
     handler: async (cmdCtx) => {
+      if (
+        !(await requireShellFeature({
+          cmdCtx,
+          feature: "codingCommands",
+          domain: "shell",
+          label: "Review command",
+        }))
+      ) {
+        return;
+      }
       let jsonArgs: Record<string, unknown> | undefined;
       try {
         jsonArgs = parseCommandJsonArgs(cmdCtx.args);
@@ -2328,6 +2479,11 @@ export function createDaemonCommandRegistry(
       ].join("\n");
       const resolvedSessionId = resolveSessionId(cmdCtx.sessionId);
       const session = sessionMgr.get(resolvedSessionId);
+      const effectiveShellProfile = resolveEffectiveShellProfileForSession({
+        ctx,
+        sessionId: resolvedSessionId,
+        preferred: resolveSessionShellProfile(session?.metadata ?? {}),
+      });
       if (!wantsDelegate) {
         if (session) {
           updateReviewSurfaceState(session, {
@@ -2359,7 +2515,7 @@ export function createDaemonCommandRegistry(
               ? formatGitDiffReply(diff)
               : "No diff content to review.",
         }),
-        shellProfile: resolveSessionShellProfile(session?.metadata ?? {}),
+        shellProfile: effectiveShellProfile,
         wait: true,
       });
       if (session) {
@@ -2393,6 +2549,16 @@ export function createDaemonCommandRegistry(
       const session = sessionMgr.get(sessionId);
       if (!session) {
         await cmdCtx.reply("No active session.");
+        return;
+      }
+      if (
+        !(await requireShellFeature({
+          cmdCtx,
+          feature: "multiAgent",
+          domain: "shell",
+          label: "Agents command",
+        }))
+      ) {
         return;
       }
       let jsonArgs: Record<string, unknown> | undefined;
@@ -2709,6 +2875,16 @@ export function createDaemonCommandRegistry(
         await cmdCtx.reply("No active session.");
         return;
       }
+      if (
+        !(await requireShellFeature({
+          cmdCtx,
+          feature: "codingCommands",
+          domain: "shell",
+          label: "Plan command",
+        }))
+      ) {
+        return;
+      }
       let jsonArgs: Record<string, unknown> | undefined;
       try {
         jsonArgs = parseCommandJsonArgs(cmdCtx.args);
@@ -2722,10 +2898,25 @@ export function createDaemonCommandRegistry(
         typeof jsonArgs?.subcommand === "string"
           ? jsonArgs.subcommand.trim().toLowerCase()
           : cmdCtx.argv[0]?.toLowerCase() ?? "status";
-      const shellProfile = resolveSessionShellProfile(session?.metadata ?? {});
+      const shellProfile = resolveEffectiveShellProfileForSession({
+        ctx,
+        sessionId,
+        preferred: resolveSessionShellProfile(session?.metadata ?? {}),
+      });
       const currentWorkflowState = resolveSessionWorkflowState(session.metadata);
       const wantsDelegate =
         jsonArgs?.delegate === true || hasInlineFlag(cmdCtx.argv, "delegate");
+      if (
+        wantsDelegate &&
+        !(await requireShellFeature({
+          cmdCtx,
+          feature: "multiAgent",
+          domain: "shell",
+          label: `Plan ${subcommand} delegation`,
+        }))
+      ) {
+        return;
+      }
       const wantsStaged =
         jsonArgs?.staged === true || hasInlineFlag(cmdCtx.argv, "staged");
       const branchInfo = await executeStructuredTool(
@@ -2977,6 +3168,16 @@ export function createDaemonCommandRegistry(
         await cmdCtx.reply("No active session.");
         return;
       }
+      if (
+        !(await requireShellFeature({
+          cmdCtx,
+          feature: "codingCommands",
+          domain: "shell",
+          label: "Verify command",
+        }))
+      ) {
+        return;
+      }
       let jsonArgs: Record<string, unknown> | undefined;
       try {
         jsonArgs = parseCommandJsonArgs(cmdCtx.args);
@@ -2986,6 +3187,17 @@ export function createDaemonCommandRegistry(
       }
       const wantsDelegate =
         jsonArgs?.delegate === true || hasInlineFlag(cmdCtx.argv, "delegate");
+      if (
+        wantsDelegate &&
+        !(await requireShellFeature({
+          cmdCtx,
+          feature: "multiAgent",
+          domain: "shell",
+          label: "Verify delegation",
+        }))
+      ) {
+        return;
+      }
       const branchInfo = await executeStructuredTool(
         baseToolHandler,
         "system.gitBranchInfo",
@@ -3053,7 +3265,11 @@ export function createDaemonCommandRegistry(
           taskReply: formatTaskListReply(tasks),
           runtimeStatusSnapshot,
         }),
-        shellProfile: resolveSessionShellProfile(session.metadata),
+        shellProfile: resolveEffectiveShellProfileForSession({
+          ctx,
+          sessionId: resolvedSessionId,
+          preferred: resolveSessionShellProfile(session.metadata),
+        }),
         wait: true,
       });
       updateVerificationSurfaceState(session, {
@@ -3094,7 +3310,11 @@ export function createDaemonCommandRegistry(
           ctx.getHostWorkspacePath() ??
           process.cwd();
         const modelInfo = ctx.getSessionModelInfo(cmdCtx.sessionId);
-        const shellProfile = resolveSessionShellProfile(session?.metadata ?? {});
+        const shellProfile = resolveEffectiveShellProfileForSession({
+          ctx,
+          sessionId: resolvedSessionId,
+          preferred: resolveSessionShellProfile(session?.metadata ?? {}),
+        });
         const workflowState = resolveSessionWorkflowState(session?.metadata ?? {});
         const runtimeStatusSnapshot = buildSessionRuntimeContractStatusSnapshot(
           session?.metadata ?? {},
@@ -3287,6 +3507,16 @@ export function createDaemonCommandRegistry(
     args: "[status|get [response-id|latest] [--json]|delete [response-id|latest]]",
     global: true,
     handler: async (cmdCtx) => {
+      if (
+        !(await requireShellFeature({
+          cmdCtx,
+          feature: "shellExtensions",
+          domain: "extensions",
+          label: "MCP command",
+        }))
+      ) {
+        return;
+      }
       const subcommand = cmdCtx.argv[0]?.toLowerCase() ?? "status";
       const sessionId = resolveSessionId(cmdCtx.sessionId);
       const session = sessionMgr.get(sessionId);
@@ -3578,6 +3808,16 @@ export function createDaemonCommandRegistry(
     args: "[status|list|inspect <server>|tools [server]|validate [server]|reconnect <server>|enable <server>|disable <server>]",
     global: true,
     handler: async (cmdCtx) => {
+      if (
+        !(await requireShellFeature({
+          cmdCtx,
+          feature: "shellExtensions",
+          domain: "extensions",
+          label: "MCP command",
+        }))
+      ) {
+        return;
+      }
       const subcommand = cmdCtx.argv[0]?.toLowerCase() ?? "status";
       const catalog = registry.listCatalog();
       const mcpCatalog = getMcpCatalogEntries(catalog);
@@ -4123,6 +4363,16 @@ export function createDaemonCommandRegistry(
     args: "[list|inspect <name>|enable <name>|disable <name>|sources]",
     global: true,
     handler: async (cmdCtx) => {
+      if (
+        !(await requireShellFeature({
+          cmdCtx,
+          feature: "shellExtensions",
+          domain: "extensions",
+          label: "Skills command",
+        }))
+      ) {
+        return;
+      }
       const subcommand = cmdCtx.argv[0]?.toLowerCase() ?? "list";
       const discovered = await ctx.discoverShellSkills({
         sessionId: cmdCtx.sessionId,
@@ -4268,6 +4518,16 @@ export function createDaemonCommandRegistry(
     args: "[list|inspect <pluginId>|enable <pluginId>|disable <pluginId>|reload <pluginId>]",
     global: true,
     handler: async (cmdCtx) => {
+      if (
+        !(await requireShellFeature({
+          cmdCtx,
+          feature: "shellExtensions",
+          domain: "extensions",
+          label: "Plugin command",
+        }))
+      ) {
+        return;
+      }
       const subcommand = cmdCtx.argv[0]?.toLowerCase() ?? "list";
       const catalog = ctx.getPluginCatalog();
 

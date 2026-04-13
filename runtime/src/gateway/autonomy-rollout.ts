@@ -4,14 +4,18 @@ import { evaluateBackgroundRunQualityGates } from "../eval/background-run-gates.
 import { fnv1aHashUnit } from "../utils/encoding.js";
 import type { GatewayAutonomyConfig } from "./types.js";
 
-export const AUTONOMY_ROLLOUT_MANIFEST_SCHEMA_VERSION = 1 as const;
+export const AUTONOMY_ROLLOUT_MANIFEST_SCHEMA_VERSION = 2 as const;
 
 export type AutonomyRolloutFeature =
   | "backgroundRuns"
   | "multiAgent"
   | "notifications"
   | "replayGates"
-  | "canaryRollout";
+  | "canaryRollout"
+  | "shellProfiles"
+  | "codingCommands"
+  | "shellExtensions"
+  | "watchCockpit";
 
 export type AutonomyIncidentScenario =
   | "stuck_run"
@@ -41,6 +45,12 @@ export interface AutonomyRolloutManifest {
     readonly strategy: AutonomyRolloutDocRef;
     readonly successCriteria: readonly string[];
     readonly automatedGate: string;
+  };
+  readonly shell: {
+    readonly strategy: AutonomyRolloutDocRef;
+    readonly successCriteria: readonly string[];
+    readonly automatedGate: string;
+    readonly testRefs: readonly string[];
   };
   readonly runbooks: Record<AutonomyIncidentScenario, AutonomyRolloutDocRef>;
   readonly drills: Record<AutonomyIncidentScenario | "rollback", AutonomyDrillCheck>;
@@ -96,6 +106,21 @@ export interface AutonomyRolloutEvaluationInput {
   readonly backgroundRunQualityArtifact?: BackgroundRunQualityArtifact;
   readonly delegationBenchmark?: DelegationBenchmarkSummary;
   readonly manifest?: AutonomyRolloutManifest;
+  readonly shellArtifact?: ShellRolloutReadinessArtifact;
+}
+
+export interface ShellRolloutReadinessCheck {
+  readonly name: string;
+  readonly passed: boolean;
+  readonly command: string;
+  readonly testRefs: readonly string[];
+}
+
+export interface ShellRolloutReadinessArtifact {
+  readonly schemaVersion: 1;
+  readonly generatedAtMs: number;
+  readonly allPassed: boolean;
+  readonly checks: readonly ShellRolloutReadinessCheck[];
 }
 
 const REQUIRED_FEATURE_FLAGS: readonly AutonomyRolloutFeature[] = [
@@ -104,6 +129,10 @@ const REQUIRED_FEATURE_FLAGS: readonly AutonomyRolloutFeature[] = [
   "notifications",
   "replayGates",
   "canaryRollout",
+  "shellProfiles",
+  "codingCommands",
+  "shellExtensions",
+  "watchCockpit",
 ];
 
 const REQUIRED_INCIDENT_SCENARIOS: readonly AutonomyIncidentScenario[] = [
@@ -171,6 +200,7 @@ export function parseAutonomyRolloutManifest(
   );
   assert(isRecord(value.migration), "migration must be an object");
   assert(isRecord(value.canary), "canary must be an object");
+  assert(isRecord(value.shell), "shell must be an object");
   assert(isRecord(value.runbooks), "runbooks must be an object");
   assert(isRecord(value.drills), "drills must be an object");
   assert(isRecord(value.rollback), "rollback must be an object");
@@ -207,6 +237,12 @@ export function parseAutonomyRolloutManifest(
       successCriteria: asStringArray(value.canary.successCriteria, "canary.successCriteria"),
       automatedGate: asString(value.canary.automatedGate, "canary.automatedGate"),
     },
+    shell: {
+      strategy: parseDocRef(value.shell.strategy, "shell.strategy"),
+      successCriteria: asStringArray(value.shell.successCriteria, "shell.successCriteria"),
+      automatedGate: asString(value.shell.automatedGate, "shell.automatedGate"),
+      testRefs: asStringArray(value.shell.testRefs, "shell.testRefs"),
+    },
     runbooks,
     drills,
     rollback: {
@@ -219,6 +255,42 @@ export function parseAutonomyRolloutManifest(
       privacy: asBoolean(value.externalReview.privacy, "externalReview.privacy"),
       compliance: asBoolean(value.externalReview.compliance, "externalReview.compliance"),
     },
+  };
+}
+
+export function parseShellRolloutReadinessArtifact(
+  value: unknown,
+): ShellRolloutReadinessArtifact {
+  assert(isRecord(value), "shell rollout readiness artifact must be an object");
+  assert(
+    value.schemaVersion === 1,
+    "shell rollout readiness artifact schemaVersion must be 1",
+  );
+  assert(
+    typeof value.generatedAtMs === "number" && Number.isFinite(value.generatedAtMs),
+    "shell rollout readiness artifact generatedAtMs must be a number",
+  );
+  assert(
+    typeof value.allPassed === "boolean",
+    "shell rollout readiness artifact allPassed must be a boolean",
+  );
+  assert(
+    Array.isArray(value.checks),
+    "shell rollout readiness artifact checks must be an array",
+  );
+  return {
+    schemaVersion: 1,
+    generatedAtMs: value.generatedAtMs,
+    allPassed: value.allPassed,
+    checks: value.checks.map((entry, index) => {
+      assert(isRecord(entry), `checks[${index}] must be an object`);
+      return {
+        name: asString(entry.name, `checks[${index}].name`),
+        passed: asBoolean(entry.passed, `checks[${index}].passed`),
+        command: asString(entry.command, `checks[${index}].command`),
+        testRefs: asStringArray(entry.testRefs, `checks[${index}].testRefs`),
+      };
+    }),
   };
 }
 
@@ -299,6 +371,7 @@ function evaluateAutonomyConfig(
 
 function evaluateManifest(
   manifest: AutonomyRolloutManifest | undefined,
+  shellArtifact: ShellRolloutReadinessArtifact | undefined,
 ): {
   violations: AutonomyRolloutViolation[];
   externalGates: AutonomyExternalGate[];
@@ -323,6 +396,33 @@ function evaluateManifest(
     violations.push({
       code: "autonomy.canary.success_criteria",
       message: "Canary rollout success criteria must be documented.",
+      severity: "high",
+    });
+  }
+  if (manifest.shell.successCriteria.length === 0) {
+    violations.push({
+      code: "autonomy.shell.success_criteria",
+      message: "Shell rollout success criteria must be documented.",
+      severity: "high",
+    });
+  }
+  if (manifest.shell.testRefs.length === 0) {
+    violations.push({
+      code: "autonomy.shell.test_refs",
+      message: "Shell rollout manifest must link shell validation coverage.",
+      severity: "high",
+    });
+  }
+  if (!shellArtifact) {
+    violations.push({
+      code: "autonomy.shell.artifact_missing",
+      message: "Shell rollout readiness artifact is required for rollout evaluation.",
+      severity: "critical",
+    });
+  } else if (!shellArtifact.allPassed) {
+    violations.push({
+      code: "autonomy.shell.artifact_failed",
+      message: "Shell rollout readiness artifact contains failing checks.",
       severity: "high",
     });
   }
@@ -556,7 +656,7 @@ export function evaluateAutonomyRolloutReadiness(
   input: AutonomyRolloutEvaluationInput,
 ): AutonomyRolloutEvaluation {
   const configViolations = evaluateAutonomyConfig(input.autonomy);
-  const manifestEvaluation = evaluateManifest(input.manifest);
+  const manifestEvaluation = evaluateManifest(input.manifest, input.shellArtifact);
   const observedEvaluation = evaluateObservedMetrics(
     input.autonomy,
     input.backgroundRunQualityArtifact,

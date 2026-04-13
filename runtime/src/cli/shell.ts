@@ -24,6 +24,7 @@ import {
   coerceSessionShellProfile,
   type SessionShellProfile,
 } from "../gateway/shell-profile.js";
+import { resolveConfiguredShellProfile } from "../gateway/shell-rollout.js";
 import { createLogger } from "../utils/logger.js";
 
 const TURN_IDLE_SETTLE_MS = 150;
@@ -157,10 +158,10 @@ async function openShellSession(
     onMessage?: (content: string) => void;
   },
 ): Promise<OpenShellSessionResult> {
-  const profile =
+  const requestedProfile =
     coerceSessionShellProfile(options.profile) ?? DEFAULT_SESSION_SHELL_PROFILE;
+  let profile = requestedProfile;
   const workspaceRoot = realpathSync.native(resolve(deps.cwd()));
-  const shellKey = buildShellResumeKey({ workspaceRoot, profile });
   const state = loadShellState(deps.homeDir());
 
   const daemon = await deps.ensureDaemon(
@@ -179,6 +180,20 @@ async function openShellSession(
       createLogger,
     },
   );
+  try {
+    const config = await loadGatewayConfig(options.configPath);
+    profile = resolveConfiguredShellProfile({
+      autonomy: config.autonomy,
+      requested: requestedProfile,
+      stableKey: buildShellResumeKey({
+        workspaceRoot,
+        profile: requestedProfile,
+      }),
+    }).profile;
+  } catch {
+    profile = requestedProfile;
+  }
+  const shellKey = buildShellResumeKey({ workspaceRoot, profile });
 
   const WsConstructor = await deps.loadWsConstructor();
   const ws = new WsConstructor(

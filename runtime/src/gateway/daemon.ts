@@ -325,6 +325,10 @@ import {
 import type { RuntimeExecutionLocation } from "../runtime-contract/types.js";
 import { evaluateAutonomyCanaryAdmission } from "./autonomy-rollout.js";
 import {
+  evaluateShellFeatureRollout,
+  resolveConfiguredShellProfile,
+} from "./shell-rollout.js";
+import {
   formatBackgroundRunAdmissionDenied,
   formatBackgroundRunStatus,
   formatInactiveBackgroundRunStatus,
@@ -386,6 +390,7 @@ export {
   persistWebSessionRuntimeState,
   resolveSessionStatefulContinuation,
 } from "./daemon-session-state.js";
+import { persistWebSessionRuntimeState } from "./daemon-session-state.js";
 import {
   coerceReviewSurfaceState,
   coerceVerificationSurfaceState,
@@ -2396,16 +2401,22 @@ export class DaemonManager {
           }),
         buildToolRoutingDecision: (sessionId, content, _history, shellProfile) =>
           {
-            const effectiveProfile =
-              shellProfile ??
-              resolveSessionShellProfile(
-                sessionMgr.get(sessionId)?.metadata ?? {},
-              );
+            const effectiveProfile = this.resolveEffectiveShellProfile({
+              sessionId,
+              metadata: sessionMgr.get(sessionId)?.metadata ?? {},
+              preferred: shellProfile,
+            });
             return buildStaticToolRoutingDecision({
               content,
               availableToolNames: this.getAdvertisedToolNames(
                 undefined,
-                effectiveProfile,
+                this.evaluateShellFeatureAdmission({
+                  sessionId,
+                  feature: "codingCommands",
+                  domain: "shell",
+                }).allowed
+                  ? effectiveProfile
+                  : DEFAULT_SESSION_SHELL_PROFILE,
               ),
               shellProfile: effectiveProfile,
             });
@@ -2868,6 +2879,48 @@ export class DaemonManager {
         return summary as DelegationBenchmarkSummary;
       },
     );
+  }
+
+  private evaluateShellFeatureAdmission(params: {
+    sessionId: string;
+    feature:
+      | "shellProfiles"
+      | "codingCommands"
+      | "shellExtensions"
+      | "watchCockpit"
+      | "multiAgent";
+    domain: "shell" | "extensions" | "watch";
+  }) {
+    const scope = this.resolvePolicyScopeForSession({
+      sessionId: params.sessionId,
+      channel: "webchat",
+    });
+    return evaluateShellFeatureRollout({
+      autonomy: this.gateway?.config.autonomy,
+      tenantId: scope.tenantId,
+      feature: params.feature,
+      domain: params.domain,
+      stableKey: params.sessionId,
+    });
+  }
+
+  private resolveEffectiveShellProfile(params: {
+    sessionId: string;
+    metadata?: Record<string, unknown>;
+    preferred?: unknown;
+  }): SessionShellProfile {
+    const scope = this.resolvePolicyScopeForSession({
+      sessionId: params.sessionId,
+      channel: "webchat",
+    });
+    return resolveConfiguredShellProfile({
+      autonomy: this.gateway?.config.autonomy,
+      tenantId: scope.tenantId,
+      requested:
+        params.preferred ??
+        resolveSessionShellProfile(params.metadata ?? {}),
+      stableKey: params.sessionId,
+    }).profile;
   }
 
   private evaluateBackgroundRunAdmission(params: {
@@ -3417,15 +3470,23 @@ export class DaemonManager {
         this.registerTextApprovalDispatcher(sessionId, channelName, send),
       createTextChannelSessionToolHandler: (params) =>
         this.createTextChannelSessionToolHandler(params),
-      buildToolRoutingDecision: (_sessionId, content, _history, shellProfile) =>
+      buildToolRoutingDecision: (sessionId, content, _history, shellProfile) =>
         {
-          const effectiveProfile =
-            shellProfile ?? resolveSessionShellProfile({});
+          const effectiveProfile = this.resolveEffectiveShellProfile({
+            sessionId,
+            preferred: shellProfile ?? DEFAULT_SESSION_SHELL_PROFILE,
+          });
           return buildStaticToolRoutingDecision({
             content,
             availableToolNames: this.getAdvertisedToolNames(
               undefined,
-              effectiveProfile,
+              this.evaluateShellFeatureAdmission({
+                sessionId,
+                feature: "codingCommands",
+                domain: "shell",
+              }).allowed
+                ? effectiveProfile
+                : DEFAULT_SESSION_SHELL_PROFILE,
             ),
             shellProfile: effectiveProfile,
           });
@@ -4366,10 +4427,25 @@ export class DaemonManager {
       definitions: this._agentDefinitions,
       toolCatalog: toolRegistry.listCatalog(),
       ...(params.toolBundle ? { toolBundleOverride: params.toolBundle } : {}),
-      ...(params.shellProfile ? { shellProfileOverride: params.shellProfile } : {}),
+      ...(params.shellProfile
+        ? {
+            shellProfileOverride: this.resolveEffectiveShellProfile({
+              sessionId: params.parentSessionId,
+              preferred: params.shellProfile,
+            }),
+          }
+        : {}),
     });
     if (!resolvedRole) {
       throw new Error(`Agent role "${params.roleId}" is unavailable.`);
+    }
+    const admission = this.evaluateShellFeatureAdmission({
+      sessionId: params.parentSessionId,
+      feature: "multiAgent",
+      domain: "shell",
+    });
+    if (!admission.allowed) {
+      throw new Error(admission.reason);
     }
 
     const scope = await this.resolveShellAgentScope({
@@ -5133,6 +5209,40 @@ export class DaemonManager {
     readonly continuity: SessionContinuityRecord;
     readonly redactionProfile: "watch_cockpit";
   }): Promise<WatchCockpitSnapshot | undefined> {
+    const admission = this.evaluateShellFeatureAdmission({
+      sessionId: params.sessionId,
+      feature: "watchCockpit",
+      domain: "watch",
+    });
+    if (!admission.allowed) {
+      return {
+        session: {
+          sessionId: params.continuity.sessionId,
+          shellProfile: this.resolveEffectiveShellProfile({
+            sessionId: params.sessionId,
+            preferred: params.continuity.shellProfile,
+          }),
+          workflowStage: params.continuity.workflowStage,
+          resumabilityState: params.continuity.resumabilityState,
+          ...(params.continuity.preview ? { preview: params.continuity.preview } : {}),
+          messageCount: params.continuity.messageCount,
+          lastActiveAt: params.continuity.lastActiveAt,
+        },
+        repo: {
+          available: false,
+          unavailableReason: `watch cockpit held back: ${admission.reason}`,
+        },
+        worktrees: {
+          available: false,
+          entries: [],
+          unavailableReason: `watch cockpit held back: ${admission.reason}`,
+        },
+        review: createIdleReviewSurfaceState(),
+        verification: createIdleVerificationSurfaceState(),
+        approvals: { count: 0, entries: [] },
+        ownership: [],
+      };
+    }
     const session = this._webSessionManager?.get(params.sessionId);
     const metadata =
       session?.metadata && typeof session.metadata === "object"
@@ -5174,7 +5284,11 @@ export class DaemonManager {
     return {
       session: {
         sessionId: params.continuity.sessionId,
-        shellProfile: params.continuity.shellProfile,
+        shellProfile: this.resolveEffectiveShellProfile({
+          sessionId: params.sessionId,
+          metadata,
+          preferred: params.continuity.shellProfile,
+        }),
         workflowStage: params.continuity.workflowStage,
         resumabilityState: params.continuity.resumabilityState,
         ...(params.continuity.preview ? { preview: params.continuity.preview } : {}),
@@ -5554,9 +5668,10 @@ export class DaemonManager {
       args,
       params.sessionId,
       {
-        shellProfile: resolveSessionShellProfile(
-          this._webSessionManager?.get(params.sessionId)?.metadata ?? {},
-        ),
+        shellProfile: this.resolveEffectiveShellProfile({
+          sessionId: params.sessionId,
+          metadata: this._webSessionManager?.get(params.sessionId)?.metadata ?? {},
+        }),
         message: `Policy simulation preview for ${params.toolName}`,
       },
     ) ?? {
@@ -6423,23 +6538,28 @@ export class DaemonManager {
       onToolEnd,
     } = params;
     const inFlightToolArgs = new Map<string, Record<string, unknown>>();
+    const effectiveShellProfile = this.resolveEffectiveShellProfile({
+      sessionId,
+      metadata: this._webSessionManager?.get(sessionId)?.metadata ?? {},
+      preferred: shellProfile,
+    });
+    const advertisedShellProfile = this.evaluateShellFeatureAdmission({
+      sessionId,
+      feature: "codingCommands",
+      domain: "shell",
+    }).allowed
+      ? effectiveShellProfile
+      : DEFAULT_SESSION_SHELL_PROFILE;
 
     const baseSessionHandler = createSessionToolHandler({
       sessionId,
-      shellProfile:
-        shellProfile ??
-        resolveSessionShellProfile(
-          this._webSessionManager?.get(sessionId)?.metadata ?? {},
-        ),
+      shellProfile: effectiveShellProfile,
       baseHandler: baseToolHandler,
       taskStore: this._taskTrackerStore,
       runtimeContractFlags: resolveRuntimeContractFlags(this.gateway?.config.llm),
       availableToolNames: this.getAdvertisedToolNames(
         undefined,
-        shellProfile ??
-          resolveSessionShellProfile(
-            this._webSessionManager?.get(sessionId)?.metadata ?? {},
-          ),
+        advertisedShellProfile,
       ),
       defaultWorkingDirectory: this._hostWorkspacePath ?? undefined,
       workspaceAliasRoot: this._hostWorkspacePath ?? undefined,
@@ -6544,16 +6664,27 @@ export class DaemonManager {
       traceId,
       shellProfile,
     } = params;
+    const effectiveShellProfile = this.resolveEffectiveShellProfile({
+      sessionId,
+      preferred: shellProfile ?? DEFAULT_SESSION_SHELL_PROFILE,
+    });
+    const advertisedShellProfile = this.evaluateShellFeatureAdmission({
+      sessionId,
+      feature: "codingCommands",
+      domain: "shell",
+    }).allowed
+      ? effectiveShellProfile
+      : DEFAULT_SESSION_SHELL_PROFILE;
 
     const baseSessionHandler = createSessionToolHandler({
       sessionId,
-      shellProfile: shellProfile ?? DEFAULT_SESSION_SHELL_PROFILE,
+      shellProfile: effectiveShellProfile,
       baseHandler: this._baseToolHandler!,
       taskStore: this._taskTrackerStore,
       runtimeContractFlags: resolveRuntimeContractFlags(this.gateway?.config.llm),
       availableToolNames: this.getAdvertisedToolNames(
         undefined,
-        shellProfile ?? DEFAULT_SESSION_SHELL_PROFILE,
+        advertisedShellProfile,
       ),
       defaultWorkingDirectory: this._hostWorkspacePath ?? undefined,
       workspaceAliasRoot: this._hostWorkspacePath ?? undefined,
@@ -6625,6 +6756,17 @@ export class DaemonManager {
       shellProfile:
         msg.metadata?.[SESSION_SHELL_PROFILE_METADATA_KEY],
     });
+    const effectiveShellProfile = this.resolveEffectiveShellProfile({
+      sessionId: msg.sessionId,
+      metadata: session.metadata,
+      preferred:
+        msg.metadata?.[SESSION_SHELL_PROFILE_METADATA_KEY] ??
+        resolveSessionShellProfile(session.metadata),
+    });
+    if (resolveSessionShellProfile(session.metadata) !== effectiveShellProfile) {
+      session.metadata[SESSION_SHELL_PROFILE_METADATA_KEY] = effectiveShellProfile;
+      await persistWebSessionRuntimeState(memoryBackend, msg.sessionId, session);
+    }
     this.applyWebSessionPolicyContext(session, msg);
 
     const traceConfig = resolveTraceLoggingConfig(getLoggingConfig());
@@ -6954,10 +7096,23 @@ export class DaemonManager {
         buildToolRoutingDecision: (sessionId, content, _history) =>
           buildStaticToolRoutingDecision({
             content,
-            availableToolNames: this.getAdvertisedToolNames(),
-            shellProfile: resolveSessionShellProfile(
-              sessionMgr.get(sessionId)?.metadata ?? {},
+            availableToolNames: this.getAdvertisedToolNames(
+              undefined,
+              this.evaluateShellFeatureAdmission({
+                sessionId,
+                feature: "codingCommands",
+                domain: "shell",
+              }).allowed
+                ? this.resolveEffectiveShellProfile({
+                    sessionId,
+                    metadata: sessionMgr.get(sessionId)?.metadata ?? {},
+                  })
+                : DEFAULT_SESSION_SHELL_PROFILE,
             ),
+            shellProfile: this.resolveEffectiveShellProfile({
+              sessionId,
+              metadata: sessionMgr.get(sessionId)?.metadata ?? {},
+            }),
           }),
         recordToolRoutingOutcome: () => {
           /* no-op */

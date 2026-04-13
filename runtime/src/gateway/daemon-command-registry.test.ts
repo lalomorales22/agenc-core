@@ -18,6 +18,7 @@ function makeCommandRegistry(params?: {
   sessionOverrides?: Record<string, unknown>;
   memoryBackendOverrides?: Record<string, unknown>;
   gatewayLlmOverrides?: Record<string, unknown>;
+  gatewayAutonomyOverrides?: Record<string, unknown>;
   toolResponses?: Record<string, unknown>;
   toolCatalog?: Array<Record<string, unknown>>;
   shellSkills?: Array<Record<string, unknown>>;
@@ -478,6 +479,32 @@ function makeCommandRegistry(params?: {
             },
             includeEncryptedReasoning: true,
             ...(params?.gatewayLlmOverrides ?? {}),
+          },
+          autonomy: {
+            enabled: true,
+            featureFlags: {
+              backgroundRuns: true,
+              multiAgent: true,
+              notifications: true,
+              replayGates: true,
+              canaryRollout: false,
+              shellProfiles: true,
+              codingCommands: true,
+              shellExtensions: true,
+              watchCockpit: true,
+            },
+            killSwitches: {
+              backgroundRuns: false,
+              multiAgent: false,
+              notifications: false,
+              replayGates: false,
+              canaryRollout: false,
+              shellProfiles: false,
+              codingCommands: false,
+              shellExtensions: false,
+              watchCockpit: false,
+            },
+            ...(params?.gatewayAutonomyOverrides ?? {}),
           },
           mcp: {
             servers: [
@@ -1200,5 +1227,94 @@ describe("createDaemonCommandRegistry coding shell commands", () => {
         wait: true,
       }),
     );
+  });
+
+  it("holds back coding commands when rollout disables them", async () => {
+    const { registry } = makeCommandRegistry({
+      gatewayAutonomyOverrides: {
+        featureFlags: {
+          backgroundRuns: true,
+          multiAgent: true,
+          notifications: true,
+          replayGates: true,
+          canaryRollout: false,
+          shellProfiles: true,
+          codingCommands: false,
+          shellExtensions: true,
+          watchCockpit: true,
+        },
+      },
+    });
+
+    const replies = await dispatchAndCollect(registry, "/files");
+
+    expect(replies[0]).toContain("Files command is unavailable for this session because rollout policy is holding it back.");
+  });
+
+  it("holds back shell extensions when rollout disables them", async () => {
+    const { registry } = makeCommandRegistry({
+      gatewayAutonomyOverrides: {
+        featureFlags: {
+          backgroundRuns: true,
+          multiAgent: true,
+          notifications: true,
+          replayGates: true,
+          canaryRollout: false,
+          shellProfiles: true,
+          codingCommands: true,
+          shellExtensions: false,
+          watchCockpit: true,
+        },
+      },
+    });
+
+    const replies = await dispatchAndCollect(registry, "/mcp list");
+
+    expect(replies[0]).toContain("MCP command is unavailable for this session because rollout policy is holding it back.");
+  });
+
+  it("holds back shell multi-agent orchestration when rollout disables it", async () => {
+    const { registry } = makeCommandRegistry({
+      gatewayAutonomyOverrides: {
+        featureFlags: {
+          backgroundRuns: true,
+          multiAgent: false,
+          notifications: true,
+          replayGates: true,
+          canaryRollout: false,
+          shellProfiles: true,
+          codingCommands: true,
+          shellExtensions: true,
+          watchCockpit: true,
+        },
+      },
+    });
+
+    const replies = await dispatchAndCollect(registry, "/agents list");
+
+    expect(replies[0]).toContain("Agents command is unavailable for this session because rollout policy is holding it back.");
+  });
+
+  it("coerces non-general profiles to general when shell profiles are held back", async () => {
+    const { registry, session } = makeCommandRegistry({
+      gatewayAutonomyOverrides: {
+        featureFlags: {
+          backgroundRuns: true,
+          multiAgent: true,
+          notifications: true,
+          replayGates: true,
+          canaryRollout: false,
+          shellProfiles: false,
+          codingCommands: true,
+          shellExtensions: true,
+          watchCockpit: true,
+        },
+      },
+    });
+
+    const replies = await dispatchAndCollect(registry, "/profile coding");
+
+    expect(replies[0]).toContain("Shell profile set to general.");
+    expect(session.metadata[SESSION_SHELL_PROFILE_METADATA_KEY]).toBe("general");
   });
 });
