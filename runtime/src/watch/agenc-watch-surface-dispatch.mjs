@@ -901,6 +901,14 @@ function handleAgentSurfaceEvent(surfaceEvent, state, api) {
   if (surfaceEvent.type !== "agent.status") {
     return false;
   }
+  if (typeof payload.workflowStage === "string" && payload.workflowStage.trim().length > 0) {
+    state.workflowStage = payload.workflowStage.trim();
+    state.workflowStageUpdatedAt = Date.now();
+  }
+  if (typeof payload.workflowOwnershipSummary === "string") {
+    state.workflowOwnershipSummary = payload.workflowOwnershipSummary.trim();
+    state.workflowOwnershipUpdatedAt = Date.now();
+  }
   state.runPhase = payload.phase ?? state.runPhase;
   if (payload.phase === "idle") {
     state.runState = "idle";

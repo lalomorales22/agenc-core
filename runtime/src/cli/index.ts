@@ -364,6 +364,9 @@ const SHELL_EXEC_COMMAND_OPTIONS = new Set([
   "timeout",
   "status",
   "block",
+  "objective",
+  "worktrees",
+  "delegate",
 ]);
 const JOBS_COMMAND_OPTIONS = new Set<string>([]);
 const CONNECTOR_LIST_OPTIONS = new Set(["pid-path", "port"]);
@@ -952,7 +955,7 @@ function buildHelp(): string {
     "  service install  Generate systemd/launchd service template",
     "",
     "Coding shell commands:",
-    "  plan                    Show the current coding-plan surface",
+    "  plan [status|enter|exit|implement|review|verify]  Control the coding workflow stage",
     "  tasks [list|get|wait|output]   Inspect session tasks",
     "  files [query]           Show repo inventory or search files",
     "  grep <pattern>          Search repo-local files",
@@ -3440,8 +3443,20 @@ async function dispatchPhase3ShellCommands(
   if (root === "plan") {
     try {
       validateUnknownStandaloneOptions(parsed.flags, SHELL_EXEC_COMMAND_OPTIONS);
+      const subcommand = parsed.positional[1] ?? "status";
+      const payload: Record<string, unknown> = {
+        subcommand,
+        ...(parseOptionalStringFlag(parsed.flags.objective)
+          ? { objective: parseOptionalStringFlag(parsed.flags.objective) }
+          : {}),
+        ...(parseOptionalStringFlag(parsed.flags.worktrees)
+          ? { worktreeMode: parseOptionalStringFlag(parsed.flags.worktrees) }
+          : {}),
+        ...(normalizeBool(parsed.flags.delegate, false) ? { delegate: true } : {}),
+        ...(normalizeBool(parsed.flags.staged, false) ? { staged: true } : {}),
+      };
       return await runShellExec(
-        "/plan",
+        `/plan ${serializeArgs(payload)}`,
         resolveShellAliasProfile(parsed, "coding"),
       );
     } catch (error) {
@@ -3651,6 +3666,7 @@ async function dispatchPhase3ShellCommands(
       validateUnknownStandaloneOptions(parsed.flags, SHELL_EXEC_COMMAND_OPTIONS);
       const payload: Record<string, unknown> = {
         ...(normalizeBool(parsed.flags.staged, false) ? { staged: true } : {}),
+        ...(normalizeBool(parsed.flags.delegate, false) ? { delegate: true } : {}),
       };
       return await runShellExec(
         Object.keys(payload).length > 0 ? `/review ${serializeArgs(payload)}` : "/review",

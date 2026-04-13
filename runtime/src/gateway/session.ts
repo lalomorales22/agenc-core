@@ -24,6 +24,15 @@ import {
   resolveSessionShellProfile,
   type SessionShellProfile,
 } from "./shell-profile.js";
+import {
+  DEFAULT_SESSION_WORKFLOW_STATE,
+  SESSION_WORKFLOW_STATE_METADATA_KEY,
+  coerceSessionWorkflowStage,
+  ensureSessionWorkflowState,
+  resolveSessionWorkflowState,
+  type SessionWorkflowStage,
+  type SessionWorkflowUpdate,
+} from "./workflow-state.js";
 
 export const SESSION_STATEFUL_RESUME_ANCHOR_METADATA_KEY =
   "statefulResumeAnchor";
@@ -81,6 +90,14 @@ export {
   resolveSessionShellProfile,
 };
 export type { SessionShellProfile };
+export {
+  DEFAULT_SESSION_WORKFLOW_STATE,
+  SESSION_WORKFLOW_STATE_METADATA_KEY,
+  coerceSessionWorkflowStage,
+  ensureSessionWorkflowState,
+  resolveSessionWorkflowState,
+};
+export type { SessionWorkflowStage, SessionWorkflowUpdate };
 
 // ---------------------------------------------------------------------------
 // Types
@@ -170,6 +187,7 @@ export interface SessionInfo {
   readonly channel: string;
   readonly senderId: string;
   readonly shellProfile: SessionShellProfile;
+  readonly workflowStage: SessionWorkflowStage;
   readonly messageCount: number;
   readonly createdAt: number;
   readonly lastActiveAt: number;
@@ -178,6 +196,7 @@ export interface SessionInfo {
 export interface SessionCreateOptions {
   readonly metadata?: Record<string, unknown>;
   readonly shellProfile?: unknown;
+  readonly workflowState?: SessionWorkflowUpdate;
 }
 
 /** Callback that summarizes messages into a single string. */
@@ -365,6 +384,7 @@ export class SessionManager {
   ): Session {
     const effective = this.resolveConfig(params);
     const id = deriveSessionId(params, effective.scope);
+    const now = Date.now();
 
     const existing = this.sessions.get(id);
     if (existing) {
@@ -373,14 +393,27 @@ export class SessionManager {
         options?.shellProfile ??
           options?.metadata?.[SESSION_SHELL_PROFILE_METADATA_KEY],
       );
+      ensureSessionWorkflowState(
+        existing.metadata,
+        options?.workflowState,
+        now,
+      );
+      existing.lastActiveAt = now;
       return existing;
     }
 
-    const now = Date.now();
     const metadata = { ...(options?.metadata ?? {}) };
     ensureSessionShellProfile(
       metadata,
       options?.shellProfile ?? metadata[SESSION_SHELL_PROFILE_METADATA_KEY],
+    );
+    ensureSessionWorkflowState(
+      metadata,
+      options?.workflowState ??
+        (metadata[SESSION_WORKFLOW_STATE_METADATA_KEY] as
+          | SessionWorkflowUpdate
+          | undefined),
+      now,
     );
     const session: Session = {
       id,
@@ -684,6 +717,7 @@ export class SessionManager {
         channel: params?.channel ?? "",
         senderId: params?.senderId ?? "",
         shellProfile: resolveSessionShellProfile(session.metadata),
+        workflowStage: resolveSessionWorkflowState(session.metadata).stage,
         messageCount: session.history.length,
         createdAt: session.createdAt,
         lastActiveAt: session.lastActiveAt,

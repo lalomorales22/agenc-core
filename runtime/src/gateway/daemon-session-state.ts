@@ -34,17 +34,24 @@ import {
   SESSION_STATEFUL_ARTIFACT_RECORDS_METADATA_KEY,
   SESSION_STATEFUL_HISTORY_COMPACTED_METADATA_KEY,
   SESSION_STATEFUL_RESUME_ANCHOR_METADATA_KEY,
+  SESSION_WORKFLOW_STATE_METADATA_KEY,
   coerceSessionShellProfile,
   resolveSessionShellProfile,
   type Session,
   type SessionShellProfile,
 } from "./session.js";
+import {
+  coerceSessionWorkflowState,
+  resolveSessionWorkflowState,
+  type SessionWorkflowState,
+} from "./workflow-state.js";
 
 const WEB_SESSION_RUNTIME_STATE_KEY_PREFIX = "webchat:runtime-state:";
 
 interface PersistedWebSessionRuntimeState {
-  readonly version: 4;
+  readonly version: 5;
   readonly shellProfile?: SessionShellProfile;
+  readonly workflowState?: SessionWorkflowState;
   readonly statefulResumeAnchor?: LLMStatefulResumeAnchor;
   readonly statefulHistoryCompacted?: boolean;
   readonly artifactSnapshotId?: string;
@@ -232,8 +239,14 @@ function buildPersistedWebSessionRuntimeState(
   const shellProfile = resolveSessionShellProfile(session.metadata);
   const hasPersistedShellProfile =
     shellProfile !== DEFAULT_SESSION_SHELL_PROFILE;
+  const workflowState = resolveSessionWorkflowState(session.metadata);
+  const hasPersistedWorkflowState =
+    workflowState.stage !== "idle" ||
+    workflowState.worktreeMode !== "off" ||
+    Boolean(workflowState.objective);
   if (
     !hasPersistedShellProfile &&
+    !hasPersistedWorkflowState &&
     !resumeAnchor &&
     !historyCompacted &&
     !artifactSnapshotId &&
@@ -244,8 +257,9 @@ function buildPersistedWebSessionRuntimeState(
     return undefined;
   }
   return {
-    version: 4,
+    version: 5,
     ...(hasPersistedShellProfile ? { shellProfile } : {}),
+    ...(hasPersistedWorkflowState ? { workflowState } : {}),
     ...(resumeAnchor ? { statefulResumeAnchor: resumeAnchor } : {}),
     ...(historyCompacted ? { statefulHistoryCompacted: true } : {}),
     ...(artifactSnapshotId ? { artifactSnapshotId } : {}),
@@ -265,11 +279,13 @@ function coercePersistedWebSessionRuntimeState(
     candidate.version !== 1 &&
     candidate.version !== 2 &&
     candidate.version !== 3 &&
-    candidate.version !== 4
+    candidate.version !== 4 &&
+    candidate.version !== 5
   ) {
     return undefined;
   }
   const shellProfile = coerceSessionShellProfile(candidate.shellProfile);
+  const workflowState = coerceSessionWorkflowState(candidate.workflowState);
   const resumeAnchor = isStatefulResumeAnchor(candidate.statefulResumeAnchor)
     ? cloneResumeAnchor(candidate.statefulResumeAnchor)
     : undefined;
@@ -298,6 +314,7 @@ function coercePersistedWebSessionRuntimeState(
     normalizeRuntimeContractStatusSnapshot(candidate.runtimeContractStatusSnapshot);
   if (
     !shellProfile &&
+    !workflowState &&
     !resumeAnchor &&
     !historyCompacted &&
     !artifactSnapshotId &&
@@ -308,8 +325,9 @@ function coercePersistedWebSessionRuntimeState(
     return undefined;
   }
   return {
-    version: 4,
+    version: 5,
     ...(shellProfile ? { shellProfile } : {}),
+    ...(workflowState ? { workflowState } : {}),
     ...(resumeAnchor ? { statefulResumeAnchor: resumeAnchor } : {}),
     ...(historyCompacted ? { statefulHistoryCompacted: true } : {}),
     ...(artifactSnapshotId ? { artifactSnapshotId } : {}),
@@ -399,6 +417,9 @@ export async function hydrateWebSessionRuntimeState(
   if (!persisted) return;
   if (persisted.shellProfile) {
     session.metadata[SESSION_SHELL_PROFILE_METADATA_KEY] = persisted.shellProfile;
+  }
+  if (persisted.workflowState) {
+    session.metadata[SESSION_WORKFLOW_STATE_METADATA_KEY] = persisted.workflowState;
   }
   if (persisted.statefulResumeAnchor) {
     session.metadata[SESSION_STATEFUL_RESUME_ANCHOR_METADATA_KEY] =

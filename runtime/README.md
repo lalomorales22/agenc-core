@@ -64,7 +64,7 @@ Current shell entrypoint:
 
 Current coding shell command surface:
 
-- `agenc plan`
+- `agenc plan status|enter|exit|implement|review|verify`
 - `agenc tasks`
 - `agenc files`
 - `agenc grep`
@@ -73,6 +73,7 @@ Current coding shell command surface:
 - `agenc worktree`
 - `agenc diff`
 - `agenc review`
+- `/verify` inside the shell for verification-stage checks or delegated verifier runs
 - `agenc session`
 - `agenc permissions`
 - `agenc mcp`

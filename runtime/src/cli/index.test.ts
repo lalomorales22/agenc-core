@@ -339,6 +339,37 @@ describe("runtime root CLI", () => {
     );
   });
 
+  it("routes plan workflow commands through one-shot shell execution", async () => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+
+    const code = await runCli({
+      argv: [
+        "plan",
+        "enter",
+        "--objective",
+        "Ship Phase 4",
+        "--worktrees",
+        "child",
+        "--delegate",
+        "--staged",
+      ],
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(code).toBe(0);
+    expect(runShellExecCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        profile: "coding",
+        quietConnection: true,
+        commandText:
+          '/plan {"subcommand":"enter","objective":"Ship Phase 4","worktreeMode":"child","delegate":true,"staged":true}',
+      }),
+    );
+  });
+
   it("routes session status through one-shot shell execution", async () => {
     const stdout = captureStream();
     const stderr = captureStream();
@@ -376,6 +407,27 @@ describe("runtime root CLI", () => {
       expect.objectContaining({
         profile: "coding",
         sessionId: "session-456",
+      }),
+    );
+  });
+
+  it("routes delegated review through one-shot shell execution", async () => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+
+    const code = await runCli({
+      argv: ["review", "--delegate", "--staged"],
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(code).toBe(0);
+    expect(runShellExecCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        profile: "coding",
+        quietConnection: true,
+        commandText: '/review {"staged":true,"delegate":true}',
       }),
     );
   });

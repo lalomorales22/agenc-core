@@ -175,9 +175,12 @@ import {
 } from "../telemetry/incident-diagnostics.js";
 import { computeRuntimeSloSnapshot } from "../telemetry/slo.js";
 import {
+  buildSessionRuntimeContractStatusSnapshot,
   DEFAULT_SESSION_SHELL_PROFILE,
   SESSION_SHELL_PROFILE_METADATA_KEY,
   type SessionShellProfile,
+  type SessionWorkflowStage,
+  resolveSessionWorkflowState,
   resolveSessionShellProfile,
   SessionManager,
 } from "./session.js";
@@ -185,7 +188,6 @@ import {
   getShellProfilePreferredToolNames,
 } from "./shell-profile.js";
 import {
-
   getDefaultWorkspacePath,
 } from "./workspace-files.js";
 import { SlashCommandRegistry } from "./commands.js";
@@ -2360,7 +2362,13 @@ export class DaemonManager {
         isSessionBusy: (sessionId) =>
           this._foregroundSessionLocks.has(sessionId),
         onStatus: (sessionId, payload) => {
-          webChat.pushToSession(sessionId, { type: "agent.status", payload });
+          webChat.pushToSession(sessionId, {
+            type: "agent.status",
+            payload: {
+              ...payload,
+              ...this.buildWorkflowStatusPayload(sessionId),
+            },
+          });
         },
         publishUpdate: async (sessionId, content) => {
           await webChat.send({ sessionId, content });
@@ -4166,6 +4174,51 @@ export class DaemonManager {
           started: true,
         };
       },
+      runNamedAgentTask: async (params) => {
+        const subAgentManager = this._subAgentManager;
+        if (!subAgentManager) {
+          throw new Error("Sub-agent runtime is unavailable");
+        }
+        const definition = this._agentDefinitions.find(
+          (entry) => entry.name === params.agentName,
+        );
+        if (!definition) {
+          throw new Error(`Agent definition "${params.agentName}" is unavailable`);
+        }
+        const childSessionId = await subAgentManager.spawn({
+          parentSessionId: params.parentSessionId,
+          ...(params.shellProfile ? { shellProfile: params.shellProfile } : {}),
+          task: params.task,
+          prompt: params.prompt,
+          systemPrompt:
+            definition.body.trim().length > 0 ? definition.body.trim() : undefined,
+          ...(definition.tools.length > 0 ? { tools: definition.tools } : {}),
+          ...(params.workingDirectory
+            ? { workingDirectory: params.workingDirectory }
+            : {}),
+          ...(params.timeoutMs ? { timeoutMs: params.timeoutMs } : {}),
+        });
+        const result = await subAgentManager.waitForResult(childSessionId);
+        return {
+          sessionId: childSessionId,
+          output: result?.output ?? "",
+          success: result?.success ?? false,
+          status:
+            result?.success === true
+              ? "completed"
+              : result?.stopReason ?? result?.completionState ?? "failed",
+        };
+      },
+      listSubAgentInfo: (parentSessionId) =>
+        this._subAgentManager
+          ?.listAll()
+          .filter((entry) => entry.parentSessionId === parentSessionId)
+          .map((entry) => ({
+            sessionId: entry.sessionId,
+            status: entry.status,
+            task: entry.task,
+            ...(entry.shellProfile ? { shellProfile: entry.shellProfile } : {}),
+          })) ?? [],
     };
   }
 
@@ -4253,6 +4306,7 @@ export class DaemonManager {
           id: session.id,
           channel: session.channel,
           shellProfile: session.shellProfile,
+          workflowStage: session.workflowStage,
           messageCount: session.messageCount,
           createdAt: session.createdAt,
           lastActiveAt: session.lastActiveAt,
@@ -4440,7 +4494,7 @@ export class DaemonManager {
       signalThinking: (sessionId: string): void => {
         webChat.pushToSession(sessionId, {
           type: "agent.status",
-          payload: { phase: "thinking" },
+          payload: { phase: "thinking", ...this.buildWorkflowStatusPayload(sessionId) },
         });
         webChat.pushToSession(sessionId, {
           type: "chat.typing",
@@ -4450,13 +4504,62 @@ export class DaemonManager {
       signalIdle: (sessionId: string): void => {
         webChat.pushToSession(sessionId, {
           type: "agent.status",
-          payload: { phase: "idle" },
+          payload: { phase: "idle", ...this.buildWorkflowStatusPayload(sessionId) },
         });
         webChat.pushToSession(sessionId, {
           type: "chat.typing",
           payload: { active: false },
         });
       },
+    };
+  }
+
+  private buildWorkflowStatusPayload(sessionId: string): {
+    workflowStage?: SessionWorkflowStage;
+    workflowOwnershipSummary?: string;
+  } {
+    const session = this._webSessionManager?.get(sessionId);
+    const metadata = session?.metadata;
+    if (!metadata || typeof metadata !== "object") {
+      return {};
+    }
+    const runtimeStatusSnapshot = buildSessionRuntimeContractStatusSnapshot(
+      metadata,
+    );
+    const openWorkers = Array.isArray(runtimeStatusSnapshot?.openWorkers)
+      ? runtimeStatusSnapshot.openWorkers.filter(
+          (entry) => typeof entry === "object" && entry !== null,
+        )
+      : [];
+    const worktreeCount = openWorkers.reduce((count, entry) => {
+      const executionLocation =
+        typeof entry === "object" && entry !== null
+          ? (entry as Record<string, unknown>).executionLocation
+          : undefined;
+      return typeof executionLocation === "object" &&
+        executionLocation !== null &&
+        (executionLocation as Record<string, unknown>).mode === "worktree" &&
+        typeof (executionLocation as Record<string, unknown>).worktreePath ===
+          "string"
+        ? count + 1
+        : count;
+    }, 0);
+    const childCount =
+      this._subAgentManager?.listAll().filter(
+        (entry) => entry.parentSessionId === sessionId,
+      ).length ?? 0;
+    const ownershipParts = [
+      childCount > 0 ? `${childCount} child${childCount === 1 ? "" : "ren"}` : null,
+      openWorkers.length > 0
+        ? `${openWorkers.length} worker${openWorkers.length === 1 ? "" : "s"}`
+        : null,
+      worktreeCount > 0
+        ? `${worktreeCount} worktree${worktreeCount === 1 ? "" : "s"}`
+        : null,
+    ].filter((value): value is string => Boolean(value));
+    return {
+      workflowStage: resolveSessionWorkflowState(metadata).stage,
+      workflowOwnershipSummary: ownershipParts.join(" · "),
     };
   }
 
@@ -5552,7 +5655,11 @@ export class DaemonManager {
         inFlightToolArgs.set(toolCallId, args);
         webChat.pushToSession(sessionId, {
           type: "agent.status",
-          payload: { phase: "tool_call", detail: `Calling ${name}` },
+          payload: {
+            phase: "tool_call",
+            detail: `Calling ${name}`,
+            ...this.buildWorkflowStatusPayload(sessionId),
+          },
         });
       },
       onToolEnd: (toolName, result, durationMs, toolCallId) => {
@@ -5565,7 +5672,10 @@ export class DaemonManager {
         });
         webChat.pushToSession(sessionId, {
           type: "agent.status",
-          payload: { phase: "generating" },
+          payload: {
+            phase: "generating",
+            ...this.buildWorkflowStatusPayload(sessionId),
+          },
         });
         onToolEnd?.(toolName, completedArgs, result, durationMs, toolCallId);
       },

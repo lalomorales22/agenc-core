@@ -25,6 +25,7 @@ interface SessionInfo {
   id: string;
   channel?: string;
   shellProfile?: string;
+  workflowStage?: string;
   messageCount?: number;
   createdAt?: number;
   lastActiveAt?: number;

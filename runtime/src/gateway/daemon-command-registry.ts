@@ -22,6 +22,7 @@ import type {
 import type { MemoryBackend } from "../memory/types.js";
 import { SlashCommandRegistry, createDefaultCommands } from "./commands.js";
 import {
+  buildSessionRuntimeContractStatusSnapshot,
   clearStatefulContinuationMetadata,
   coerceSessionShellProfile,
   DEFAULT_SESSION_SHELL_PROFILE,
@@ -33,6 +34,13 @@ import {
   type Session,
   type SessionShellProfile,
 } from "./session.js";
+import {
+  formatSessionWorkflowStage,
+  formatSessionWorktreeMode,
+  resolveSessionWorkflowState,
+  updateSessionWorkflowState,
+  type SessionWorkflowStage,
+} from "./workflow-state.js";
 import type { DiscoveredSkill } from "../skills/markdown/discovery.js";
 import { ToolRegistry } from "../tools/registry.js";
 import { HookDispatcher } from "./hooks.js";
@@ -727,6 +735,220 @@ function formatTaskDetailReply(result: Record<string, unknown>): string {
   ].join("\n");
 }
 
+interface WorkflowOwnershipEntry {
+  readonly role: string;
+  readonly state: string;
+  readonly taskId?: string;
+  readonly taskSubject?: string;
+  readonly childSessionId?: string;
+  readonly workerId?: string;
+  readonly shellProfile?: string;
+  readonly worktreePath?: string;
+  readonly worktreeRef?: string;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function collectSessionWorkflowOwnership(params: {
+  readonly runtimeStatusSnapshot?: Record<string, unknown>;
+  readonly taskResult: Record<string, unknown>;
+  readonly childInfos: readonly {
+    sessionId: string;
+    status: string;
+    task: string;
+    shellProfile?: SessionShellProfile;
+  }[];
+}): readonly WorkflowOwnershipEntry[] {
+  const tasks = Array.isArray(params.taskResult.tasks)
+    ? params.taskResult.tasks
+        .map((entry) => asRecord(entry))
+        .filter((entry): entry is Record<string, unknown> => Boolean(entry))
+    : [];
+  const taskSubjects = new Map<string, string>();
+  for (const task of tasks) {
+    if (typeof task.id === "string" && typeof task.subject === "string") {
+      taskSubjects.set(task.id, task.subject);
+    }
+  }
+
+  const workers = Array.isArray(params.runtimeStatusSnapshot?.openWorkers)
+    ? params.runtimeStatusSnapshot!.openWorkers
+        .map((entry) => asRecord(entry))
+        .filter((entry): entry is Record<string, unknown> => Boolean(entry))
+    : [];
+  const childInfos = params.childInfos;
+  const childIndex = new Map(childInfos.map((entry) => [entry.sessionId, entry]));
+  const entries: WorkflowOwnershipEntry[] = [];
+  const claimedChildSessions = new Set<string>();
+
+  for (const worker of workers) {
+    const childSessionId =
+      typeof worker.continuationSessionId === "string"
+        ? worker.continuationSessionId
+        : undefined;
+    if (childSessionId) {
+      claimedChildSessions.add(childSessionId);
+    }
+    const executionLocation = asRecord(worker.executionLocation);
+    const worktreePath =
+      executionLocation?.mode === "worktree" &&
+      typeof executionLocation.worktreePath === "string"
+        ? executionLocation.worktreePath
+        : undefined;
+    const taskId =
+      typeof worker.currentTaskId === "string"
+        ? worker.currentTaskId
+        : typeof worker.taskId === "string"
+          ? worker.taskId
+          : typeof worker.lastTaskId === "string"
+            ? worker.lastTaskId
+            : undefined;
+    entries.push({
+      role:
+        typeof worker.state === "string" && worker.state === "verifying"
+          ? "verifier-worker"
+          : "worker",
+      state: typeof worker.state === "string" ? worker.state : "unknown",
+      ...(taskId ? { taskId } : {}),
+      ...(taskId && taskSubjects.get(taskId)
+        ? { taskSubject: taskSubjects.get(taskId) }
+        : {}),
+      ...(childSessionId ? { childSessionId } : {}),
+      ...(typeof worker.workerId === "string" ? { workerId: worker.workerId } : {}),
+      ...(typeof worker.shellProfile === "string"
+        ? { shellProfile: worker.shellProfile }
+        : childSessionId && childIndex.get(childSessionId)?.shellProfile
+          ? { shellProfile: childIndex.get(childSessionId)!.shellProfile }
+          : {}),
+      ...(worktreePath ? { worktreePath } : {}),
+      ...(executionLocation &&
+      typeof executionLocation.worktreeRef === "string"
+        ? { worktreeRef: executionLocation.worktreeRef }
+        : {}),
+    });
+  }
+
+  for (const child of childInfos) {
+    if (claimedChildSessions.has(child.sessionId)) continue;
+    const normalizedTask = child.task.toLowerCase();
+    const role =
+      normalizedTask.includes("review")
+        ? "reviewer"
+        : normalizedTask.includes("verify")
+          ? "verifier"
+          : normalizedTask.includes("plan")
+            ? "planner"
+            : "child";
+    entries.push({
+      role,
+      state: child.status,
+      childSessionId: child.sessionId,
+      shellProfile: child.shellProfile,
+      taskSubject: child.task,
+    });
+  }
+
+  return entries;
+}
+
+function formatWorkflowOwnershipReply(
+  entries: readonly WorkflowOwnershipEntry[],
+): string {
+  if (entries.length === 0) {
+    return "Workflow ownership: none";
+  }
+  return [
+    `Workflow ownership (${entries.length}):`,
+    ...entries.map((entry) =>
+      [
+        `  ${entry.role}`,
+        `[${entry.state}]`,
+        entry.taskId ? `task=${entry.taskId}` : null,
+        entry.taskSubject ? `subject=${entry.taskSubject}` : null,
+        entry.childSessionId ? `child=${entry.childSessionId}` : null,
+        entry.workerId ? `worker=${entry.workerId}` : null,
+        entry.shellProfile ? `profile=${entry.shellProfile}` : null,
+        entry.worktreePath ? `worktree=${entry.worktreePath}` : null,
+        entry.worktreeRef ? `ref=${entry.worktreeRef}` : null,
+      ]
+        .filter((value): value is string => Boolean(value))
+        .join(" "),
+    ),
+  ].join("\n");
+}
+
+function suggestNextWorkflowStage(params: {
+  readonly currentStage: SessionWorkflowStage;
+  readonly plannerStatus: string;
+  readonly ownership: readonly WorkflowOwnershipEntry[];
+  readonly hasChanges: boolean;
+}): SessionWorkflowStage | undefined {
+  if (params.currentStage === "plan") {
+    return "implement";
+  }
+  if (params.currentStage === "implement") {
+    if (params.plannerStatus === "needs_verification") {
+      return "verify";
+    }
+    if (params.hasChanges) {
+      return "review";
+    }
+  }
+  if (params.currentStage === "review") {
+    return "verify";
+  }
+  if (params.currentStage === "verify") {
+    return params.plannerStatus === "completed" ? "idle" : undefined;
+  }
+  if (params.currentStage === "idle" && params.ownership.length > 0) {
+    return "review";
+  }
+  return undefined;
+}
+
+function buildReviewDelegatePrompt(params: {
+  readonly branchReply: string;
+  readonly summaryReply: string;
+  readonly diffReply: string;
+}): string {
+  return [
+    "Review the current changes and return findings-first output.",
+    "",
+    params.branchReply,
+    "",
+    params.summaryReply,
+    "",
+    params.diffReply,
+  ].join("\n");
+}
+
+function buildVerifyDelegatePrompt(params: {
+  readonly branchReply: string;
+  readonly summaryReply: string;
+  readonly taskReply: string;
+  readonly runtimeStatusSnapshot?: Record<string, unknown>;
+}): string {
+  const verifierStages =
+    typeof params.runtimeStatusSnapshot?.verifierStages === "object" &&
+    params.runtimeStatusSnapshot.verifierStages !== null
+      ? JSON.stringify(params.runtimeStatusSnapshot.verifierStages, null, 2)
+      : undefined;
+  return [
+    "Verify the current implementation state for this session.",
+    "",
+    params.branchReply,
+    "",
+    params.summaryReply,
+    "",
+    params.taskReply,
+    ...(verifierStages ? ["", "Runtime verifier snapshot:", verifierStages] : []),
+  ].join("\n");
+}
+
 function summarizeStoredResponse(response: LLMStoredResponse): string {
   const usage = response.usage
     ? `prompt=${response.usage.promptTokens}, completion=${response.usage.completionTokens}, total=${response.usage.totalTokens}`
@@ -1012,6 +1234,26 @@ export interface CommandRegistryDaemonContext {
     channel: string;
     reply: (content: string) => Promise<void>;
   }): Promise<{ filePath: string; started: boolean }>;
+  runNamedAgentTask(params: {
+    parentSessionId: string;
+    agentName: "review" | "verify";
+    task: string;
+    prompt: string;
+    shellProfile?: SessionShellProfile;
+    workingDirectory?: string;
+    timeoutMs?: number;
+  }): Promise<{
+    sessionId: string;
+    output: string;
+    success: boolean;
+    status: string;
+  }>;
+  listSubAgentInfo(parentSessionId: string): Array<{
+    sessionId: string;
+    status: string;
+    task: string;
+    shellProfile?: SessionShellProfile;
+  }>;
 }
 
 // ============================================================================
@@ -1281,11 +1523,14 @@ export function createDaemonCommandRegistry(
         ctx.gateway?.config.llm?.includeEncryptedReasoning === true;
       const responseAnchor = getSessionResumeAnchorResponseId(session);
       const shellProfile = resolveSessionShellProfile(session?.metadata ?? {});
+      const workflowState = resolveSessionWorkflowState(session?.metadata ?? {});
       await cmdCtx.reply(
         `Agent is running.\n` +
           `Session: ${cmdCtx.sessionId}\n` +
           `History: ${historyLen} messages\n` +
           `Shell Profile: ${shellProfile}\n` +
+          `Workflow Stage: ${formatSessionWorkflowStage(workflowState.stage)}\n` +
+          `Worktree Mode: ${formatSessionWorktreeMode(workflowState.worktreeMode)}\n` +
           `LLM: ${providerNames}\n` +
           `Stateful: ${
             statefulConfig?.enabled === true
@@ -1744,16 +1989,18 @@ export function createDaemonCommandRegistry(
   commandRegistry.register({
     name: "review",
     description: "Summarize the current repo state for human or agent review",
-    args: "[--staged]",
+    args: "[--staged|--delegate]",
     global: true,
     handler: async (cmdCtx) => {
       let jsonArgs: Record<string, unknown> | undefined;
       try {
         jsonArgs = parseCommandJsonArgs(cmdCtx.args);
       } catch (error) {
-        await cmdCtx.reply(`Usage: /review [--staged]\n${toErrorMessage(error)}`);
+        await cmdCtx.reply(`Usage: /review [--staged] [--delegate]\n${toErrorMessage(error)}`);
         return;
       }
+      const wantsDelegate =
+        jsonArgs?.delegate === true || hasInlineFlag(cmdCtx.argv, "delegate");
       const branchInfo = await executeStructuredTool(
         baseToolHandler,
         "system.gitBranchInfo",
@@ -1770,16 +2017,48 @@ export function createDaemonCommandRegistry(
         jsonArgs ??
           (hasInlineFlag(cmdCtx.argv, "staged") ? { staged: true } : {}),
       );
+      const reviewSurface = [
+        "Review surface:",
+        formatGitBranchReply(branchInfo),
+        "",
+        formatGitSummaryReply(summary),
+        "",
+        typeof diff.diff === "string" && diff.diff.trim().length > 0
+          ? formatGitDiffReply(diff)
+          : "No diff content to review.",
+      ].join("\n");
+      if (!wantsDelegate) {
+        await cmdCtx.reply(reviewSurface);
+        return;
+      }
+      const resolvedSessionId = resolveSessionId(cmdCtx.sessionId);
+      const session = sessionMgr.get(resolvedSessionId);
+      const delegated = await ctx.runNamedAgentTask({
+        parentSessionId: resolvedSessionId,
+        agentName: "review",
+        task: "Review the current changes and return findings-first output.",
+        prompt: buildReviewDelegatePrompt({
+          branchReply: formatGitBranchReply(branchInfo),
+          summaryReply: formatGitSummaryReply(summary),
+          diffReply:
+            typeof diff.diff === "string" && diff.diff.trim().length > 0
+              ? formatGitDiffReply(diff)
+              : "No diff content to review.",
+        }),
+        shellProfile: resolveSessionShellProfile(session?.metadata ?? {}),
+        workingDirectory:
+          (session?.metadata?.workspaceRoot as string | undefined) ??
+          ctx.getHostWorkspacePath() ??
+          process.cwd(),
+      });
       await cmdCtx.reply(
         [
-          "Review surface:",
-          formatGitBranchReply(branchInfo),
+          reviewSurface,
           "",
-          formatGitSummaryReply(summary),
-          "",
-          typeof diff.diff === "string" && diff.diff.trim().length > 0
-            ? formatGitDiffReply(diff)
-            : "No diff content to review.",
+          `Delegated reviewer session: ${delegated.sessionId} [${delegated.status}]`,
+          delegated.output.trim().length > 0
+            ? delegated.output.trim()
+            : "Delegated reviewer returned no output.",
         ].join("\n"),
       );
     },
@@ -1891,12 +2170,35 @@ export function createDaemonCommandRegistry(
   });
   commandRegistry.register({
     name: "plan",
-    description: "Show the current coding-plan surface for this session",
+    description: "Show or change the current coding workflow stage for this session",
+    args: "[status|enter|exit|implement|review|verify]",
     global: true,
     handler: async (cmdCtx) => {
       const sessionId = resolveSessionId(cmdCtx.sessionId);
       const session = sessionMgr.get(sessionId);
+      if (!session) {
+        await cmdCtx.reply("No active session.");
+        return;
+      }
+      let jsonArgs: Record<string, unknown> | undefined;
+      try {
+        jsonArgs = parseCommandJsonArgs(cmdCtx.args);
+      } catch (error) {
+        await cmdCtx.reply(
+          `Usage: /plan [status|enter|exit|implement|review|verify]\n${toErrorMessage(error)}`,
+        );
+        return;
+      }
+      const subcommand =
+        typeof jsonArgs?.subcommand === "string"
+          ? jsonArgs.subcommand.trim().toLowerCase()
+          : cmdCtx.argv[0]?.toLowerCase() ?? "status";
       const shellProfile = resolveSessionShellProfile(session?.metadata ?? {});
+      const currentWorkflowState = resolveSessionWorkflowState(session.metadata);
+      const wantsDelegate =
+        jsonArgs?.delegate === true || hasInlineFlag(cmdCtx.argv, "delegate");
+      const wantsStaged =
+        jsonArgs?.staged === true || hasInlineFlag(cmdCtx.argv, "staged");
       const branchInfo = await executeStructuredTool(
         baseToolHandler,
         "system.gitBranchInfo",
@@ -1915,13 +2217,43 @@ export function createDaemonCommandRegistry(
       const activePipelines = pipelineExecutor
         ? await pipelineExecutor.listActive()
         : [];
-      await cmdCtx.reply(
-        [
+      const runtimeStatusSnapshot = buildSessionRuntimeContractStatusSnapshot(
+        session.metadata,
+      ) as Record<string, unknown> | undefined;
+      const ownership = collectSessionWorkflowOwnership({
+        runtimeStatusSnapshot,
+        taskResult: tasks,
+        childInfos: ctx.listSubAgentInfo(sessionId),
+      });
+      const hasChanges =
+        typeof summary.summary === "object" &&
+        summary.summary !== null &&
+        Object.values(summary.summary as Record<string, unknown>).some(
+          (value) => typeof value === "number" && value > 0,
+        );
+      const formatPlanSurface = (
+        workflowState = resolveSessionWorkflowState(session.metadata),
+      ): string => {
+        const suggestedStage = suggestNextWorkflowStage({
+          currentStage: workflowState.stage,
+          plannerStatus:
+            typeof runtimeStatusSnapshot?.completionState === "string"
+              ? runtimeStatusSnapshot.completionState
+              : "idle",
+          ownership,
+          hasChanges,
+        });
+        return [
           "Plan surface:",
           `  Session: ${cmdCtx.sessionId}`,
           `  Shell profile: ${shellProfile}`,
-          `  History messages: ${session?.history.length ?? 0}`,
+          `  Workflow stage: ${formatSessionWorkflowStage(workflowState.stage)}`,
+          `  Worktree mode: ${formatSessionWorktreeMode(workflowState.worktreeMode)}`,
+          ...(workflowState.objective ? [`  Objective: ${workflowState.objective}`] : []),
+          `  History messages: ${session.history.length}`,
           `  Active pipelines: ${activePipelines.length}`,
+          `  Planner DAG: ${typeof runtimeStatusSnapshot?.completionState === "string" ? runtimeStatusSnapshot.completionState : "idle"}`,
+          `  Suggested next stage: ${suggestedStage ? formatSessionWorkflowStage(suggestedStage) : "none"}`,
           "",
           formatGitBranchReply(branchInfo),
           "",
@@ -1929,7 +2261,244 @@ export function createDaemonCommandRegistry(
           "",
           formatTaskListReply(tasks),
           "",
-          "Phase 4 will add explicit plan mode and review stages. Today, use /tasks, /review, /diff, and /worktree directly.",
+          formatWorkflowOwnershipReply(ownership),
+        ].join("\n");
+      };
+      if (subcommand === "status") {
+        await cmdCtx.reply(formatPlanSurface(currentWorkflowState));
+        return;
+      }
+      if (subcommand === "enter") {
+        const objective =
+          typeof jsonArgs?.objective === "string"
+            ? jsonArgs.objective
+            : parseInlineFlag(cmdCtx.argv, "objective");
+        const explicitWorktreeMode =
+          typeof jsonArgs?.worktreeMode === "string"
+            ? jsonArgs.worktreeMode
+            : parseInlineFlag(cmdCtx.argv, "worktrees");
+        const workflowState = updateSessionWorkflowState(
+          session.metadata,
+          {
+            stage: "plan",
+            worktreeMode:
+              explicitWorktreeMode === "child"
+                ? "child_optional"
+                : explicitWorktreeMode === "off"
+                  ? "off"
+                  : shellProfile === "coding"
+                    ? "child_optional"
+                    : "off",
+            ...(objective !== undefined ? { objective } : {}),
+          },
+        );
+        await persistWebSessionRuntimeState(memoryBackend, cmdCtx.sessionId, session);
+        await cmdCtx.reply(
+          `Workflow stage set to ${formatSessionWorkflowStage(workflowState.stage)}.\n\n${formatPlanSurface(workflowState)}`,
+        );
+        return;
+      }
+      if (subcommand === "exit") {
+        if (currentWorkflowState.stage !== "plan") {
+          await cmdCtx.reply("Workflow exit is only available while the session is in plan mode.");
+          return;
+        }
+        const workflowState = updateSessionWorkflowState(session.metadata, {
+          stage: "implement",
+        });
+        await persistWebSessionRuntimeState(memoryBackend, cmdCtx.sessionId, session);
+        await cmdCtx.reply(
+          `Workflow stage set to ${formatSessionWorkflowStage(workflowState.stage)}.\n\n${formatPlanSurface(workflowState)}`,
+        );
+        return;
+      }
+      if (subcommand === "implement") {
+        const workflowState = updateSessionWorkflowState(session.metadata, {
+          stage: "implement",
+        });
+        await persistWebSessionRuntimeState(memoryBackend, cmdCtx.sessionId, session);
+        await cmdCtx.reply(
+          `Workflow stage set to ${formatSessionWorkflowStage(workflowState.stage)}.\n\n${formatPlanSurface(workflowState)}`,
+        );
+        return;
+      }
+      if (subcommand === "review") {
+        const workflowState = updateSessionWorkflowState(session.metadata, {
+          stage: "review",
+        });
+        await persistWebSessionRuntimeState(memoryBackend, cmdCtx.sessionId, session);
+        if (!wantsDelegate) {
+          await cmdCtx.reply(
+            `Workflow stage set to ${formatSessionWorkflowStage(workflowState.stage)}.\n\n${formatPlanSurface(workflowState)}`,
+          );
+          return;
+        }
+        const diff = await executeStructuredTool(
+          baseToolHandler,
+          "system.gitDiff",
+          wantsStaged ? { staged: true } : {},
+        );
+        const delegated = await ctx.runNamedAgentTask({
+          parentSessionId: sessionId,
+          agentName: "review",
+          task: "Review the current changes and return findings-first output.",
+          prompt: buildReviewDelegatePrompt({
+            branchReply: formatGitBranchReply(branchInfo),
+            summaryReply: formatGitSummaryReply(summary),
+            diffReply:
+              typeof diff.diff === "string" && diff.diff.trim().length > 0
+                ? formatGitDiffReply(diff)
+                : "No diff content to review.",
+          }),
+          shellProfile,
+          workingDirectory:
+            (session.metadata.workspaceRoot as string | undefined) ??
+            ctx.getHostWorkspacePath() ??
+            process.cwd(),
+        });
+        await cmdCtx.reply(
+          [
+            `Workflow stage set to ${formatSessionWorkflowStage(workflowState.stage)}.`,
+            "",
+            formatPlanSurface(workflowState),
+            "",
+            `Delegated reviewer session: ${delegated.sessionId} [${delegated.status}]`,
+            delegated.output.trim().length > 0
+              ? delegated.output.trim()
+              : "Delegated reviewer returned no output.",
+          ].join("\n"),
+        );
+        return;
+      }
+      if (subcommand === "verify") {
+        const workflowState = updateSessionWorkflowState(session.metadata, {
+          stage: "verify",
+        });
+        await persistWebSessionRuntimeState(memoryBackend, cmdCtx.sessionId, session);
+        if (!wantsDelegate) {
+          await cmdCtx.reply(
+            `Workflow stage set to ${formatSessionWorkflowStage(workflowState.stage)}.\n\n${formatPlanSurface(workflowState)}`,
+          );
+          return;
+        }
+        const delegated = await ctx.runNamedAgentTask({
+          parentSessionId: sessionId,
+          agentName: "verify",
+          task: "Verify the current implementation state and return a verdict.",
+          prompt: buildVerifyDelegatePrompt({
+            branchReply: formatGitBranchReply(branchInfo),
+            summaryReply: formatGitSummaryReply(summary),
+            taskReply: formatTaskListReply(tasks),
+            runtimeStatusSnapshot,
+          }),
+          shellProfile,
+          workingDirectory:
+            (session.metadata.workspaceRoot as string | undefined) ??
+            ctx.getHostWorkspacePath() ??
+            process.cwd(),
+        });
+        await cmdCtx.reply(
+          [
+            `Workflow stage set to ${formatSessionWorkflowStage(workflowState.stage)}.`,
+            "",
+            formatPlanSurface(workflowState),
+            "",
+            `Delegated verifier session: ${delegated.sessionId} [${delegated.status}]`,
+            delegated.output.trim().length > 0
+              ? delegated.output.trim()
+              : "Delegated verifier returned no output.",
+          ].join("\n"),
+        );
+        return;
+      }
+      await cmdCtx.reply(
+        "Usage: /plan [status|enter|exit|implement|review|verify]",
+      );
+    },
+  });
+  commandRegistry.register({
+    name: "verify",
+    description: "Show verification state or run the restricted verifier child",
+    args: "[--delegate]",
+    global: true,
+    handler: async (cmdCtx) => {
+      const resolvedSessionId = resolveSessionId(cmdCtx.sessionId);
+      const session = sessionMgr.get(resolvedSessionId);
+      if (!session) {
+        await cmdCtx.reply("No active session.");
+        return;
+      }
+      let jsonArgs: Record<string, unknown> | undefined;
+      try {
+        jsonArgs = parseCommandJsonArgs(cmdCtx.args);
+      } catch (error) {
+        await cmdCtx.reply(`Usage: /verify [--delegate]\n${toErrorMessage(error)}`);
+        return;
+      }
+      const wantsDelegate =
+        jsonArgs?.delegate === true || hasInlineFlag(cmdCtx.argv, "delegate");
+      const branchInfo = await executeStructuredTool(
+        baseToolHandler,
+        "system.gitBranchInfo",
+        {},
+      );
+      const summary = await executeStructuredTool(
+        baseToolHandler,
+        "system.gitChangeSummary",
+        {},
+      );
+      const tasks = await executeStructuredTool(
+        baseToolHandler,
+        "task.list",
+        { [TASK_LIST_ARG]: cmdCtx.sessionId },
+      );
+      const runtimeStatusSnapshot = buildSessionRuntimeContractStatusSnapshot(
+        session.metadata,
+      ) as Record<string, unknown> | undefined;
+      const verifierSnapshot =
+        typeof runtimeStatusSnapshot?.verifierStages === "object" &&
+        runtimeStatusSnapshot.verifierStages !== null
+          ? JSON.stringify(runtimeStatusSnapshot.verifierStages, null, 2)
+          : "No runtime verifier snapshot available.";
+      const verificationSurface = [
+        "Verification surface:",
+        formatGitBranchReply(branchInfo),
+        "",
+        formatGitSummaryReply(summary),
+        "",
+        formatTaskListReply(tasks),
+        "",
+        "Runtime verifier snapshot:",
+        verifierSnapshot,
+      ].join("\n");
+      if (!wantsDelegate) {
+        await cmdCtx.reply(verificationSurface);
+        return;
+      }
+      const delegated = await ctx.runNamedAgentTask({
+        parentSessionId: resolvedSessionId,
+        agentName: "verify",
+        task: "Verify the current implementation state and return a verdict.",
+        prompt: buildVerifyDelegatePrompt({
+          branchReply: formatGitBranchReply(branchInfo),
+          summaryReply: formatGitSummaryReply(summary),
+          taskReply: formatTaskListReply(tasks),
+          runtimeStatusSnapshot,
+        }),
+        shellProfile: resolveSessionShellProfile(session.metadata),
+        workingDirectory:
+          (session.metadata.workspaceRoot as string | undefined) ??
+          ctx.getHostWorkspacePath() ??
+          process.cwd(),
+      });
+      await cmdCtx.reply(
+        [
+          verificationSurface,
+          "",
+          `Delegated verifier session: ${delegated.sessionId} [${delegated.status}]`,
+          delegated.output.trim().length > 0
+            ? delegated.output.trim()
+            : "Delegated verifier returned no output.",
         ].join("\n"),
       );
     },
@@ -1950,12 +2519,27 @@ export function createDaemonCommandRegistry(
         process.cwd();
       const modelInfo = ctx.getSessionModelInfo(cmdCtx.sessionId);
       const shellProfile = resolveSessionShellProfile(session?.metadata ?? {});
+      const workflowState = resolveSessionWorkflowState(session?.metadata ?? {});
+      const runtimeStatusSnapshot = buildSessionRuntimeContractStatusSnapshot(
+        session?.metadata ?? {},
+      ) as Record<string, unknown> | undefined;
+      const tasks = await executeStructuredTool(baseToolHandler, "task.list", {
+        [TASK_LIST_ARG]: cmdCtx.sessionId,
+      });
+      const ownership = collectSessionWorkflowOwnership({
+        runtimeStatusSnapshot,
+        taskResult: tasks,
+        childInfos: ctx.listSubAgentInfo(resolvedSessionId),
+      });
       await cmdCtx.reply(
         [
           "Shell session:",
           `  Session id: ${cmdCtx.sessionId}`,
           `  Runtime session id: ${resolvedSessionId}`,
           `  Profile: ${shellProfile}`,
+          `  Workflow stage: ${formatSessionWorkflowStage(workflowState.stage)}`,
+          `  Worktree mode: ${formatSessionWorktreeMode(workflowState.worktreeMode)}`,
+          ...(workflowState.objective ? [`  Objective: ${workflowState.objective}`] : []),
           `  Workspace root: ${workspaceRoot}`,
           `  History messages: ${session?.history.length ?? 0}`,
           `  Model: ${
@@ -1963,6 +2547,8 @@ export function createDaemonCommandRegistry(
               ? `${modelInfo.provider}:${modelInfo.model}${modelInfo.usedFallback ? " (fallback)" : ""}`
               : "unknown"
           }`,
+          "",
+          formatWorkflowOwnershipReply(ownership),
         ].join("\n"),
       );
     },

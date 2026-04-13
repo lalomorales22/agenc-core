@@ -2,10 +2,12 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { createHash } from "node:crypto";
 import {
   DEFAULT_SESSION_SHELL_PROFILE,
+  DEFAULT_SESSION_WORKFLOW_STATE,
   SESSION_SHELL_PROFILE_METADATA_KEY,
   SESSION_STATEFUL_ARTIFACT_CONTEXT_METADATA_KEY,
   SESSION_STATEFUL_ARTIFACT_RECORDS_METADATA_KEY,
   SessionManager,
+  SESSION_WORKFLOW_STATE_METADATA_KEY,
   SESSION_STATEFUL_HISTORY_COMPACTED_METADATA_KEY,
   SESSION_STATEFUL_RESUME_ANCHOR_METADATA_KEY,
   deriveSessionId,
@@ -80,6 +82,40 @@ describe("SessionManager", () => {
       );
       expect(codingSession.metadata[SESSION_SHELL_PROFILE_METADATA_KEY]).toBe(
         "coding",
+      );
+    });
+
+    it("assigns the default workflow state and preserves explicit overrides", () => {
+      const defaultSession = manager.getOrCreate(makeParams());
+      const workflowSession = manager.getOrCreate(
+        makeParams({ senderId: "planner", channel: "code" }),
+        {
+          workflowState: {
+            stage: "plan",
+            worktreeMode: "child_optional",
+            objective: "Ship Phase 4 workflow",
+          },
+        },
+      );
+
+      expect(defaultSession.metadata[SESSION_WORKFLOW_STATE_METADATA_KEY]).toMatchObject(
+        {
+          stage: DEFAULT_SESSION_WORKFLOW_STATE.stage,
+          worktreeMode: DEFAULT_SESSION_WORKFLOW_STATE.worktreeMode,
+        },
+      );
+      expect(
+        (defaultSession.metadata[SESSION_WORKFLOW_STATE_METADATA_KEY] as {
+          enteredAt: number;
+          updatedAt: number;
+        }).enteredAt,
+      ).toBeGreaterThan(0);
+      expect(workflowSession.metadata[SESSION_WORKFLOW_STATE_METADATA_KEY]).toMatchObject(
+        {
+          stage: "plan",
+          worktreeMode: "child_optional",
+          objective: "Ship Phase 4 workflow",
+        },
       );
     });
   });

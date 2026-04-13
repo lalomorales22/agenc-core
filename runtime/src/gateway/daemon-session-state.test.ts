@@ -19,6 +19,7 @@ import {
   SESSION_ACTIVE_TASK_CONTEXT_METADATA_KEY,
   SESSION_RUNTIME_CONTRACT_STATUS_SNAPSHOT_METADATA_KEY,
   type Session,
+  SESSION_WORKFLOW_STATE_METADATA_KEY,
 } from "./session.js";
 import type {
   ArtifactCompactionState,
@@ -289,6 +290,39 @@ describe("web session runtime state helpers", () => {
     expect(
       hydrated.metadata[SESSION_ACTIVE_TASK_CONTEXT_METADATA_KEY],
     ).toEqual(activeTaskContext);
+  });
+
+  it("persists and hydrates workflow state across web-session resume", async () => {
+    const memoryBackend = createMemoryBackendStub();
+
+    await persistWebSessionRuntimeState(
+      memoryBackend,
+      "web-session-workflow",
+      createSession({
+        [SESSION_WORKFLOW_STATE_METADATA_KEY]: {
+          stage: "review",
+          worktreeMode: "child_optional",
+          objective: "Review the coding workflow changes",
+          enteredAt: 111,
+          updatedAt: 222,
+        },
+      }),
+    );
+
+    const hydrated = createSession();
+    await hydrateWebSessionRuntimeState(
+      memoryBackend,
+      "web-session-workflow",
+      hydrated,
+    );
+
+    expect(hydrated.metadata[SESSION_WORKFLOW_STATE_METADATA_KEY]).toEqual({
+      stage: "review",
+      worktreeMode: "child_optional",
+      objective: "Review the coding workflow changes",
+      enteredAt: 111,
+      updatedAt: 222,
+    });
   });
 
   it("persists and hydrates non-default shell profiles across web-session resume", async () => {

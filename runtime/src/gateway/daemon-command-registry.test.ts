@@ -9,6 +9,7 @@ import {
   SESSION_SHELL_PROFILE_METADATA_KEY,
   SESSION_STATEFUL_HISTORY_COMPACTED_METADATA_KEY,
   SESSION_STATEFUL_RESUME_ANCHOR_METADATA_KEY,
+  SESSION_WORKFLOW_STATE_METADATA_KEY,
 } from "./session.js";
 
 function makeCommandRegistry(params?: {
@@ -104,6 +105,13 @@ function makeCommandRegistry(params?: {
     elevatedPatterns: [],
     deniedPatterns: [],
   }));
+  const runNamedAgentTask = vi.fn(async ({ agentName }) => ({
+    sessionId: `child-${agentName}-1`,
+    output: `${agentName} complete`,
+    success: true,
+    status: "completed",
+  }));
+  const listSubAgentInfo = vi.fn(() => []);
   const updateSessionPolicyState = vi.fn((params) => ({
     elevatedPatterns:
       params.operation === "allow" && params.pattern ? [params.pattern] : [],
@@ -324,6 +332,8 @@ function makeCommandRegistry(params?: {
         filePath: "/tmp/project/AGENC.md",
         started: true,
       })),
+      runNamedAgentTask,
+      listSubAgentInfo,
     },
     {
       get: () => session,
@@ -350,6 +360,8 @@ function makeCommandRegistry(params?: {
     memoryBackend,
     providers,
     getSessionPolicyState,
+    runNamedAgentTask,
+    listSubAgentInfo,
     updateSessionPolicyState,
     baseToolHandler,
   };
@@ -392,6 +404,12 @@ describe("createDaemonCommandRegistry /profile", () => {
     const { registry } = makeCommandRegistry({
       sessionOverrides: {
         [SESSION_SHELL_PROFILE_METADATA_KEY]: "coding",
+        [SESSION_WORKFLOW_STATE_METADATA_KEY]: {
+          stage: "plan",
+          worktreeMode: "child_optional",
+          enteredAt: 1,
+          updatedAt: 1,
+        },
       },
     });
 
@@ -399,6 +417,8 @@ describe("createDaemonCommandRegistry /profile", () => {
 
     expect(replies).toHaveLength(1);
     expect(replies[0]).toContain("Shell Profile: coding");
+    expect(replies[0]).toContain("Workflow Stage: plan");
+    expect(replies[0]).toContain("Worktree Mode: child optional");
   });
 
   it("lists the available shell profiles", async () => {
@@ -570,6 +590,26 @@ describe("createDaemonCommandRegistry /response", () => {
 });
 
 describe("createDaemonCommandRegistry coding shell commands", () => {
+  it("shows workflow stage in the shell session surface", async () => {
+    const { registry } = makeCommandRegistry({
+      sessionOverrides: {
+        [SESSION_WORKFLOW_STATE_METADATA_KEY]: {
+          stage: "review",
+          worktreeMode: "child_optional",
+          objective: "Review the shell workflow",
+          enteredAt: 10,
+          updatedAt: 20,
+        },
+      },
+    });
+
+    const replies = await dispatchAndCollect(registry, "/session");
+
+    expect(replies[0]).toContain("Workflow stage: review");
+    expect(replies[0]).toContain("Worktree mode: child optional");
+    expect(replies[0]).toContain("Objective: Review the shell workflow");
+  });
+
   it("shows repo inventory for /files", async () => {
     const { registry, baseToolHandler } = makeCommandRegistry();
 
@@ -637,5 +677,79 @@ describe("createDaemonCommandRegistry coding shell commands", () => {
 
     expect(statusReplies[0]).toContain("Reasoning effort:");
     expect(updateReplies[0]).toContain("Reasoning effort switched: medium → high");
+  });
+
+  it("enters plan mode with a coding-default child worktree posture", async () => {
+    const { registry, session, memoryBackend } = makeCommandRegistry({
+      sessionOverrides: {
+        [SESSION_SHELL_PROFILE_METADATA_KEY]: "coding",
+      },
+    });
+
+    const replies = await dispatchAndCollect(
+      registry,
+      '/plan {"subcommand":"enter","objective":"Ship Phase 4"}',
+    );
+
+    expect(replies[0]).toContain("Workflow stage set to plan.");
+    expect(replies[0]).toContain("Worktree mode: child optional");
+    expect(replies[0]).toContain("Objective: Ship Phase 4");
+    expect(session.metadata[SESSION_WORKFLOW_STATE_METADATA_KEY]).toMatchObject({
+      stage: "plan",
+      worktreeMode: "child_optional",
+      objective: "Ship Phase 4",
+    });
+    expect(memoryBackend.set).toHaveBeenCalled();
+  });
+
+  it("only allows /plan exit from plan mode", async () => {
+    const { registry } = makeCommandRegistry({
+      sessionOverrides: {
+        [SESSION_WORKFLOW_STATE_METADATA_KEY]: {
+          stage: "idle",
+          worktreeMode: "off",
+          enteredAt: 1,
+          updatedAt: 1,
+        },
+      },
+    });
+
+    const replies = await dispatchAndCollect(registry, "/plan exit");
+
+    expect(replies[0]).toContain(
+      "Workflow exit is only available while the session is in plan mode.",
+    );
+  });
+
+  it("delegates review through the restricted reviewer child without silently changing the stage", async () => {
+    const { registry, runNamedAgentTask } = makeCommandRegistry();
+
+    const replies = await dispatchAndCollect(registry, '/review {"delegate":true}');
+
+    expect(replies[0]).toContain("Review surface:");
+    expect(replies[0]).toContain("Delegated reviewer session: child-review-1 [completed]");
+    expect(replies[0]).toContain("review complete");
+    expect(runNamedAgentTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentName: "review",
+        parentSessionId: "session-1",
+      }),
+    );
+  });
+
+  it("delegates verification through the restricted verifier child", async () => {
+    const { registry, runNamedAgentTask } = makeCommandRegistry();
+
+    const replies = await dispatchAndCollect(registry, '/verify {"delegate":true}');
+
+    expect(replies[0]).toContain("Verification surface:");
+    expect(replies[0]).toContain("Delegated verifier session: child-verify-1 [completed]");
+    expect(replies[0]).toContain("verify complete");
+    expect(runNamedAgentTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentName: "verify",
+        parentSessionId: "session-1",
+      }),
+    );
   });
 });
