@@ -173,7 +173,27 @@ wss.on('connection', (ws) => {
         ws.send(JSON.stringify({ type: 'chat.history', payload: [], id }));
         break;
 
-      case 'chat.resume':
+      case 'chat.session.list':
+        ws.send(JSON.stringify({ type: 'chat.session.list', payload: [], id }));
+        break;
+
+      case 'chat.session.inspect':
+        ws.send(JSON.stringify({
+          type: 'error',
+          error: `Session "${payload.sessionId}" not found in test server`,
+          id,
+        }));
+        break;
+
+      case 'chat.session.fork':
+        ws.send(JSON.stringify({
+          type: 'error',
+          error: `Session "${payload.sessionId}" not found in test server`,
+          id,
+        }));
+        break;
+
+      case 'chat.session.resume':
         ws.send(JSON.stringify({
           type: 'error',
           error: `Session "${payload.sessionId}" not found in test server`,

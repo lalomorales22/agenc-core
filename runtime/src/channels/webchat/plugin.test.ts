@@ -1776,10 +1776,10 @@ describe("WebChatChannel", () => {
 
         continuityChannel.handleMessage(
           "client_2",
-          "chat.sessions",
+          "chat.session.list",
           msg(
-            "chat.sessions",
-            { ownerToken: issued.ownerToken, continuity: true },
+            "chat.session.list",
+            { ownerToken: issued.ownerToken },
             "req-continuity-list",
           ),
           send,
@@ -1787,7 +1787,7 @@ describe("WebChatChannel", () => {
         expect(
           (await waitForResponse(
             send,
-            "chat.sessions",
+            "chat.session.list",
             "req-continuity-list",
           )).payload,
         ).toEqual(
@@ -1803,9 +1803,9 @@ describe("WebChatChannel", () => {
 
         continuityChannel.handleMessage(
           "client_2",
-          "chat.inspect",
+          "chat.session.inspect",
           msg(
-            "chat.inspect",
+            "chat.session.inspect",
             { ownerToken: issued.ownerToken, sessionId: "session-continuity" },
             "req-continuity-inspect",
           ),
@@ -1814,7 +1814,7 @@ describe("WebChatChannel", () => {
         expect(
           (await waitForResponse(
             send,
-            "chat.inspect",
+            "chat.session.inspect",
             "req-continuity-inspect",
           )).payload,
         ).toEqual(
@@ -1954,9 +1954,9 @@ describe("WebChatChannel", () => {
 
         forkChannel.handleMessage(
           "client_2",
-          "chat.fork",
+          "chat.session.fork",
           msg(
-            "chat.fork",
+            "chat.session.fork",
             {
               ownerToken: issued.ownerToken,
               sessionId: "session-source",
@@ -1969,7 +1969,7 @@ describe("WebChatChannel", () => {
         );
         await new Promise((resolve) => setTimeout(resolve, 0));
 
-        const forkResponse = findResponse(send, "chat.fork", "req-fork");
+        const forkResponse = findResponse(send, "chat.session.fork", "req-fork");
         expect(forkResponse?.payload).toEqual(
           expect.objectContaining({
             sourceSessionId: "session-source",

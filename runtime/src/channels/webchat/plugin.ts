@@ -39,6 +39,7 @@ import {
   loadPersistedSessionRuntimeState,
   type PersistedSessionRuntimeState,
 } from "../../gateway/daemon-session-state.js";
+import type { ActiveTaskContext } from "../../llm/turn-execution-contract-types.js";
 import { safeStringify } from "../../tools/types.js";
 import { summarizeTracePayloadForPreview } from "../../utils/trace-payload-serialization.js";
 import type {
@@ -128,7 +129,7 @@ async function resolveGitSnapshot(
  * daemon restart cannot accidentally reuse old persisted memory by session ID.
  * Session continuity across reconnects is supported via explicit
  * 'chat.session.resume' requests. Legacy 'chat.resume' is kept as a
- * compatibility alias while first-party clients migrate.
+ * compatibility alias for non-upgraded external clients.
  */
 export class WebChatChannel
   extends BaseChannelPlugin
@@ -440,12 +441,12 @@ export class WebChatChannel
       return;
     }
 
-    if (type === "chat.inspect" || type === "chat.session.inspect") {
+    if (type === "chat.session.inspect") {
       this.handleChatInspect(clientId, payload, id, tracedSend, type);
       return;
     }
 
-    if (type === "chat.fork" || type === "chat.session.fork") {
+    if (type === "chat.session.fork") {
       this.handleChatFork(clientId, payload, id, tracedSend, type);
       return;
     }
@@ -899,7 +900,7 @@ export class WebChatChannel
     payload: Record<string, unknown> | undefined,
     id: string | undefined,
     send: SendFn,
-    responseType = "chat.sessions",
+    responseType = "chat.session.list",
   ): void {
     void this.handleChatSessionsAsync(clientId, payload, id, send, responseType).catch((error) => {
       send({
@@ -915,7 +916,7 @@ export class WebChatChannel
     payload: Record<string, unknown> | undefined,
     id: string | undefined,
     send: SendFn,
-    responseType = "chat.inspect",
+    responseType = "chat.session.inspect",
   ): void {
     void this.handleChatInspectAsync(clientId, payload, id, send, responseType).catch((error) => {
       send({
@@ -931,7 +932,7 @@ export class WebChatChannel
     payload: Record<string, unknown> | undefined,
     id: string | undefined,
     send: SendFn,
-    responseType = "chat.fork",
+    responseType = "chat.session.fork",
   ): void {
     void this.handleChatForkAsync(clientId, payload, id, send, responseType).catch((error) => {
       send({
@@ -1002,7 +1003,11 @@ export class WebChatChannel
   ): Promise<void> {
     const targetSessionId = payload?.sessionId;
     if (!targetSessionId || typeof targetSessionId !== "string") {
-      send({ type: "error", error: "Missing sessionId in chat.resume", id });
+      send({
+        type: "error",
+        error: "Missing sessionId in chat.session.resume",
+        id,
+      });
       return;
     }
     const requestedWorkspaceRoot = this.parseWorkspaceRoot(payload);
@@ -1043,7 +1048,7 @@ export class WebChatChannel
     responseType: string,
   ): Promise<void> {
     const ownerKey = await this.resolveDurableOwner(clientId, payload, send);
-    if (payload?.continuity === true) {
+    if (responseType === "chat.session.list") {
       const activeOnly = payload?.activeOnly === true;
       const limit =
         typeof payload?.limit === "number" && payload.limit > 0
@@ -1126,7 +1131,11 @@ export class WebChatChannel
         ? payload.sessionId.trim()
         : boundSessionId;
     if (!targetSessionId) {
-      send({ type: "error", error: "Missing sessionId in chat.inspect", id });
+      send({
+        type: "error",
+        error: "Missing sessionId in chat.session.inspect",
+        id,
+      });
       return;
     }
     const authorized = await this.isAuthorizedSession(
@@ -1144,6 +1153,14 @@ export class WebChatChannel
     }
 
     const record = await this.inspectContinuitySession(targetSessionId, ownerKey);
+    if (!record) {
+      send({
+        type: "error",
+        error: `Session "${targetSessionId}" not found`,
+        id,
+      });
+      return;
+    }
     send({ type: responseType, payload: record, id });
   }
 
@@ -1161,7 +1178,11 @@ export class WebChatChannel
         ? payload.sessionId.trim()
         : boundSessionId;
     if (!sourceSessionId) {
-      send({ type: "error", error: "Missing sessionId in chat.fork", id });
+      send({
+        type: "error",
+        error: "Missing sessionId in chat.session.fork",
+        id,
+      });
       return;
     }
     const authorized = await this.isAuthorizedSession(
@@ -1213,8 +1234,7 @@ export class WebChatChannel
       return;
     }
     const continuity = await this.inspectContinuitySession(targetSessionId, ownerKey);
-    const sessionRecord =
-      "error" in continuity ? undefined : (continuity as SessionContinuityRecord);
+    const sessionRecord = continuity as SessionContinuityRecord | undefined;
     if (!sessionRecord) {
       send({ type: "error", error: "Session continuity unavailable", id });
       return;
@@ -1303,8 +1323,7 @@ export class WebChatChannel
       targetSessionId && this.isDurableOwnerKey(ownerKey)
         ? await this.inspectContinuitySession(targetSessionId, ownerKey)
         : undefined;
-    const sessionRecord =
-      continuity && !("error" in continuity) ? continuity : undefined;
+    const sessionRecord = continuity;
     const autonomyConfig = this.deps.gateway.config as {
       autonomy?: GatewayAutonomyConfig;
     };
@@ -1511,8 +1530,7 @@ export class WebChatChannel
     if (!authorized) {
       return undefined;
     }
-    const detail = await this.inspectContinuitySession(requestedTarget, ownerKey);
-    return "error" in detail ? undefined : detail;
+    return this.inspectContinuitySession(requestedTarget, ownerKey);
   }
 
   async loadOwnedSessionHistory(
@@ -2207,13 +2225,10 @@ export class WebChatChannel
   private async inspectContinuitySession(
     sessionId: string,
     ownerKey: string,
-  ): Promise<SessionContinuityDetail | { sessionId: string; error: string }> {
+  ): Promise<SessionContinuityDetail | undefined> {
     const persisted = await this.sessionStore?.loadSession(sessionId);
     if (!persisted || persisted.ownerKey !== ownerKey) {
-      return {
-        sessionId,
-        error: "Session not found",
-      };
+      return undefined;
     }
     const continuity = await this.buildSessionContinuityRecord(persisted);
     const runtimeState = this.deps.memoryBackend
@@ -2356,21 +2371,19 @@ export class WebChatChannel
   private summarizeActiveTask(
     runtimeState: PersistedSessionRuntimeState | undefined,
   ): string | undefined {
-    const activeTaskContext =
-      runtimeState?.activeTaskContext &&
-      typeof runtimeState.activeTaskContext === "object"
-        ? (runtimeState.activeTaskContext as Record<string, unknown>)
-        : undefined;
-    if (typeof activeTaskContext?.taskId === "string") {
+    const activeTaskContext = runtimeState?.activeTaskContext as
+      | ActiveTaskContext
+      | undefined;
+    if (activeTaskContext?.taskLineageId) {
       const summary =
-        typeof activeTaskContext.summary === "string"
-          ? activeTaskContext.summary
-          : typeof activeTaskContext.title === "string"
-            ? activeTaskContext.title
-            : undefined;
+        typeof activeTaskContext.displayArtifact === "string" &&
+        activeTaskContext.displayArtifact.trim().length > 0
+          ? activeTaskContext.displayArtifact.trim()
+          : activeTaskContext.targetArtifacts[0] ??
+            activeTaskContext.sourceArtifacts[0];
       return summary
-        ? `${activeTaskContext.taskId}: ${summary}`
-        : activeTaskContext.taskId;
+        ? `${activeTaskContext.taskLineageId}: ${summary}`
+        : activeTaskContext.taskLineageId;
     }
     const snapshot =
       runtimeState?.runtimeContractStatusSnapshot &&
@@ -2570,14 +2583,12 @@ export class WebChatChannel
     this.sessionOwners.set(targetSessionId, ownerKey);
 
     const continuity = await this.inspectContinuitySession(targetSessionId, ownerKey);
-    const continuitySession =
-      "error" in continuity ? undefined : continuity;
     return {
       sourceSessionId,
       targetSessionId,
       forkSource,
       resumed: false,
-      ...(continuitySession ? { session: continuitySession } : {}),
+      ...(continuity ? { session: continuity } : {}),
       ...(params?.objective ? { objective: params.objective } : {}),
       ...(params?.shellProfile ? { shellProfile: params.shellProfile } : {}),
     };

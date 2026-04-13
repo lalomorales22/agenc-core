@@ -36,6 +36,7 @@ import type { WatchCockpitSnapshot } from "../../gateway/watch-cockpit.js";
 import type { SessionShellProfile } from "../../gateway/shell-profile.js";
 import type { SessionWorkflowState } from "../../gateway/workflow-state.js";
 import type { SlashCommandRegistry } from "../../gateway/commands.js";
+import type { ActiveTaskContext } from "../../llm/turn-execution-contract-types.js";
 
 // ============================================================================
 // WebChatDeps (dependency injection)
@@ -112,7 +113,7 @@ export interface SessionHistoryItem {
 export interface SessionContinuityDetail extends SessionContinuityRecord {
   readonly workflowState: SessionWorkflowState;
   readonly runtimeState?: {
-    readonly activeTaskContext?: unknown;
+    readonly activeTaskContext?: ActiveTaskContext;
     readonly reviewStatus?: string;
     readonly verificationStatus?: string;
     readonly verificationVerdict?: string;

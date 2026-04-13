@@ -78,7 +78,7 @@ export interface PersistedSessionRuntimeState {
    * resume on a new client connection without losing the workflow contract
    * fingerprint, source/target artifacts, or task lineage.
    */
-  readonly activeTaskContext?: unknown;
+  readonly activeTaskContext?: ActiveTaskContext;
 }
 
 /** @deprecated Use PersistedSessionRuntimeState. */
@@ -216,6 +216,19 @@ function webSessionRuntimeStateKey(webSessionId: string): string {
   return `${WEB_SESSION_RUNTIME_STATE_KEY_PREFIX}${webSessionId}`;
 }
 
+function coerceActiveTaskContext(value: unknown): ActiveTaskContext | undefined {
+  if (
+    value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    (value as Record<string, unknown>).version === 1 &&
+    typeof (value as Record<string, unknown>).taskLineageId === "string"
+  ) {
+    return value as ActiveTaskContext;
+  }
+  return undefined;
+}
+
 function buildPersistedSessionRuntimeState(
   session: Session,
 ): PersistedSessionRuntimeState | undefined {
@@ -234,10 +247,10 @@ function buildPersistedSessionRuntimeState(
     typeof (artifactContext as Record<string, unknown>).snapshotId === "string"
       ? String((artifactContext as Record<string, unknown>).snapshotId)
       : undefined;
-  const activeTaskContext =
-    session.metadata[SESSION_ACTIVE_TASK_CONTEXT_METADATA_KEY];
-  const hasActiveTaskContext =
-    typeof activeTaskContext === "object" && activeTaskContext !== null;
+  const activeTaskContext = coerceActiveTaskContext(
+    session.metadata[SESSION_ACTIVE_TASK_CONTEXT_METADATA_KEY],
+  );
+  const hasActiveTaskContext = activeTaskContext !== undefined;
   const runtimeContractSnapshot =
     typeof session.metadata[SESSION_RUNTIME_CONTRACT_SNAPSHOT_METADATA_KEY] === "object" &&
       session.metadata[SESSION_RUNTIME_CONTRACT_SNAPSHOT_METADATA_KEY] !== null
@@ -332,11 +345,7 @@ function coercePersistedSessionRuntimeState(
     candidate.artifactSessionId.trim().length > 0
       ? candidate.artifactSessionId.trim()
       : undefined;
-  const activeTaskContext =
-    typeof candidate.activeTaskContext === "object" &&
-    candidate.activeTaskContext !== null
-      ? candidate.activeTaskContext
-      : undefined;
+  const activeTaskContext = coerceActiveTaskContext(candidate.activeTaskContext);
   const runtimeContractSnapshot =
     typeof candidate.runtimeContractSnapshot === "object" &&
       candidate.runtimeContractSnapshot !== null
@@ -552,7 +561,7 @@ export async function forkSessionRuntimeState(
     runtimeContractStatusSnapshot?: RuntimeContractStatusSnapshot;
     reviewSurfaceState?: ReviewSurfaceState;
     verificationSurfaceState?: VerificationSurfaceState;
-    activeTaskContext?: unknown;
+    activeTaskContext?: ActiveTaskContext;
   };
   const mergedWorkflowState = (() => {
     if (persisted.workflowState) {
@@ -725,17 +734,9 @@ export function persistSessionStatefulContinuation(
 export function buildSessionActiveTaskContext(
   session: Session,
 ): ActiveTaskContext | undefined {
-  const raw = session.metadata[SESSION_ACTIVE_TASK_CONTEXT_METADATA_KEY];
-  if (
-    raw &&
-    typeof raw === "object" &&
-    !Array.isArray(raw) &&
-    (raw as Record<string, unknown>).version === 1 &&
-    typeof (raw as Record<string, unknown>).taskLineageId === "string"
-  ) {
-    return raw as ActiveTaskContext;
-  }
-  return undefined;
+  return coerceActiveTaskContext(
+    session.metadata[SESSION_ACTIVE_TASK_CONTEXT_METADATA_KEY],
+  );
 }
 
 export function persistSessionActiveTaskContext(

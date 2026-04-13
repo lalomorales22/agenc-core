@@ -316,7 +316,7 @@ export function useChat({ send, connected }: UseChatOptions): UseChatReturn {
   const refreshSessions = useCallback(() => {
     send({
       type: WS_CHAT_SESSION_LIST,
-      payload: authPayload(),
+      payload: authPayload({ continuity: true }),
     });
   }, [authPayload, send]);
 
