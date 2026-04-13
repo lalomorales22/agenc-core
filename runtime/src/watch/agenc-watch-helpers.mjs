@@ -245,7 +245,6 @@ const INSIGHTS_COMMANDS = Object.freeze([
 const THREAD_SWITCHER_COMMANDS = Object.freeze([
   Object.freeze({
     name: "/agents",
-    deprecatedAliases: ["/threads"],
     usage: "/agents [roles|list|spawn|assign|inspect|stop]",
     description: "Use the shared child-agent orchestration surface.",
   }),
@@ -335,7 +334,6 @@ const REMOTE_TOOL_COMMANDS = Object.freeze([
 const EXTENSIBILITY_COMMANDS = Object.freeze([
   Object.freeze({
     name: "/extensibility",
-    deprecatedAliases: ["/extensions"],
     usage: "/extensibility [overview|skills|plugins|mcp|hooks]",
     description: "Inspect local runtime extensibility state, config, and catalogs.",
   }),
@@ -356,7 +354,6 @@ const EXTENSIBILITY_COMMANDS = Object.freeze([
   }),
   Object.freeze({
     name: "/xai",
-    deprecatedAliases: ["/api"],
     usage: "/xai [set|status|validate|clear]",
     description: "Manage the local xAI API key stored in the runtime config.",
   }),

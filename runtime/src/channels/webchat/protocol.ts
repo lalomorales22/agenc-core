@@ -289,6 +289,34 @@ export interface ExtensionsCommandData {
   readonly status?: Record<string, unknown>;
 }
 
+export interface RuntimeCommandMetric {
+  readonly label: string;
+  readonly value: string;
+  readonly tone?: "neutral" | "success" | "warning" | "danger";
+}
+
+export interface RuntimeCommandSection {
+  readonly title: string;
+  readonly body?: string;
+  readonly items?: readonly string[];
+}
+
+export interface RuntimeCommandData {
+  readonly kind: "runtime";
+  readonly surface:
+    | "context"
+    | "status"
+    | "profile"
+    | "model"
+    | "effort"
+    | "voice"
+    | "memory";
+  readonly status?: string;
+  readonly metrics?: readonly RuntimeCommandMetric[];
+  readonly sections?: readonly RuntimeCommandSection[];
+  readonly detail?: Record<string, unknown>;
+}
+
 export interface ReviewCommandData {
   readonly kind: "review";
   readonly mode: "default" | "security" | "pr-comments";
@@ -341,6 +369,7 @@ export type SessionCommandResultData =
   | TasksCommandData
   | PolicyCommandData
   | ExtensionsCommandData
+  | RuntimeCommandData
   | ReviewCommandData
   | VerifyCommandData;
 

@@ -48,13 +48,13 @@ function createCommandHarness(overrides = {}) {
     { name: "/bundle", usage: "/bundle", description: "bundle", aliases: ["/export-bundle"] },
     { name: "/insights", usage: "/insights", description: "insights", aliases: [] },
     { name: "/maintenance", usage: "/maintenance", description: "maintenance", aliases: [] },
-    { name: "/agents", usage: "/agents [query]", description: "agents", aliases: ["/threads"] },
-    { name: "/extensibility", usage: "/extensibility [overview|skills|plugins|mcp|hooks]", description: "extensibility", aliases: ["/extensions"] },
+    { name: "/agents", usage: "/agents [query]", description: "agents", aliases: [] },
+    { name: "/extensibility", usage: "/extensibility [overview|skills|plugins|mcp|hooks]", description: "extensibility", aliases: [] },
     { name: "/skills", usage: "/skills [list|enable <name>|disable <name>]", description: "skills", aliases: [] },
-    { name: "/plugin", usage: "/plugin [list|inspect <pluginId>|enable <pluginId>|disable <pluginId>|reload <pluginId>]", description: "plugin", aliases: [], deprecatedAliases: ["/plugins"] },
+    { name: "/plugin", usage: "/plugin [list|inspect <pluginId>|enable <pluginId>|disable <pluginId>|reload <pluginId>]", description: "plugin", aliases: [] },
     { name: "/mcp", usage: "/mcp [list|enable <serverName>|disable <serverName>]", description: "mcp", aliases: [] },
     { name: "/hooks", usage: "/hooks [list|events]", description: "hooks", aliases: [] },
-    { name: "/xai", usage: "/xai [set|status|validate|clear]", description: "xai", aliases: ["/api"] },
+    { name: "/xai", usage: "/xai [set|status|validate|clear]", description: "xai", aliases: [] },
     { name: "/input-mode", usage: "/input-mode [show|default|vim]", description: "input mode", aliases: [] },
     { name: "/keybindings", usage: "/keybindings [show|default|vim]", description: "keybindings", aliases: [] },
     { name: "/theme", usage: "/theme [show|default|aurora|ember]", description: "theme", aliases: [] },
@@ -63,7 +63,7 @@ function createCommandHarness(overrides = {}) {
     { name: "/logs", usage: "/logs [lines]", description: "logs", aliases: [] },
     { name: "/status", usage: "/status", description: "status", aliases: [] },
     { name: "/new", usage: "/new", description: "new session", aliases: [] },
-    { name: "/review", usage: "/review [scope]", description: "review", aliases: [], deprecatedAliases: ["/security-review", "/pr-comments"] },
+    { name: "/review", usage: "/review [scope]", description: "review", aliases: [] },
     { name: "/diff", usage: "/diff", description: "diff", aliases: [] },
     { name: "/compact", usage: "/compact", description: "compact", aliases: [] },
     { name: "/permissions", usage: "/permissions", description: "permissions", aliases: [] },
@@ -83,7 +83,7 @@ function createCommandHarness(overrides = {}) {
     { name: "/run-fork", usage: "/run-fork <targetSessionId> [--objective <text>] [--reason <text>]", description: "run fork", aliases: [] },
     { name: "/verify-override", usage: "/verify-override <continue|complete|fail> <reason> [--user-update <text>]", description: "verify override", aliases: [] },
     { name: "/desktop", usage: "/desktop <start|stop|status|vnc|list|attach>", description: "desktop", aliases: [] },
-    { name: "/session", usage: "/session [status|list|inspect|history|resume|fork]", description: "session", aliases: [], deprecatedAliases: ["/sessions"] },
+    { name: "/session", usage: "/session [status|list|inspect|history|resume|fork]", description: "session", aliases: [] },
     { name: "/session-label", usage: "/session-label [show|clear|<label>]", description: "session label", aliases: ["/rename-session"] },
     { name: "/model", usage: "/model", description: "model", aliases: ["/models"] },
     { name: "/memory", usage: "/memory", description: "memory", aliases: [] },
@@ -95,9 +95,6 @@ function createCommandHarness(overrides = {}) {
   for (const command of watchCommands) {
     commandLookup.set(command.name, command);
     for (const alias of command.aliases ?? []) {
-      commandLookup.set(alias, command);
-    }
-    for (const alias of command.deprecatedAliases ?? []) {
       commandLookup.set(alias, command);
     }
   }
@@ -572,7 +569,7 @@ test("command controller handles local xai credential commands without daemon me
   assert.equal(controller.dispatchOperatorInput("/xai status"), true);
   assert.equal(controller.dispatchOperatorInput("/xai validate"), true);
   assert.equal(controller.dispatchOperatorInput("/xai clear"), true);
-  assert.equal(controller.dispatchOperatorInput("/api set"), true);
+  assert.equal(controller.dispatchOperatorInput("/xai set"), true);
 
   assert.equal(
     calls.filter((entry) => entry.type === "promptForXaiApiKey").length,
@@ -586,7 +583,7 @@ test("command controller handles local xai credential commands without daemon me
       (entry) =>
         entry.type === "send" &&
         entry.frameType === "chat.message" &&
-        /\/xai|\/api/.test(String(entry.payload?.content ?? "")),
+        /\/xai/.test(String(entry.payload?.content ?? "")),
     ),
     false,
   );
