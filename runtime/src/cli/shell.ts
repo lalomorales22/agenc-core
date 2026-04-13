@@ -187,6 +187,7 @@ async function openShellSession(
 
   let ownerToken = state.ownerToken;
   let activeSessionId = options.sessionId?.trim() || undefined;
+  let activeProfile = profile;
   let typingActive = false;
   let settleTimer: NodeJS.Timeout | undefined;
   let pendingTurn: ShellTurnWaiters | null = null;
@@ -282,6 +283,10 @@ async function openShellSession(
     }
     if (type === "chat.session" && typeof payload?.sessionId === "string") {
       activeSessionId = payload.sessionId;
+      const resumedProfile = coerceSessionShellProfile(payload?.shellProfile);
+      if (resumedProfile) {
+        activeProfile = resumedProfile;
+      }
       state.sessions[shellKey] = payload.sessionId;
       saveShellState(deps.homeDir(), {
         ownerToken,
@@ -295,6 +300,10 @@ async function openShellSession(
     }
     if (type === "chat.resumed" && typeof payload?.sessionId === "string") {
       activeSessionId = payload.sessionId;
+      const resumedProfile = coerceSessionShellProfile(payload?.shellProfile);
+      if (resumedProfile) {
+        activeProfile = resumedProfile;
+      }
       state.sessions[shellKey] = payload.sessionId;
       saveShellState(deps.homeDir(), {
         ownerToken,
@@ -357,7 +366,6 @@ async function openShellSession(
   return {
     daemonPid: daemon.pid,
     daemonPort: options.controlPlanePort ?? daemon.port,
-    profile,
     workspaceRoot,
     async sendTurn(content: string): Promise<void> {
       await new Promise<void>((resolvePromise, rejectPromise) => {
@@ -369,12 +377,15 @@ async function openShellSession(
           content,
           ownerToken,
           workspaceRoot,
-          shellProfile: profile,
+          shellProfile: activeProfile,
         });
       });
     },
     close(): void {
       ws.close();
+    },
+    get profile() {
+      return activeProfile;
     },
   };
 }

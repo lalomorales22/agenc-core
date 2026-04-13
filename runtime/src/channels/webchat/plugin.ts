@@ -11,7 +11,11 @@
 
 import { BaseChannelPlugin } from "../../gateway/channel.js";
 import type { ChannelContext } from "../../gateway/channel.js";
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
+import { resolve as resolvePath } from "node:path";
+import { promisify } from "node:util";
 import type {
   OutboundMessage,
   MessageAttachment,
@@ -25,6 +29,11 @@ import {
 } from "../../gateway/shell-profile.js";
 import { DEFAULT_WORKSPACE_ID } from "../../gateway/workspace.js";
 import type { ControlMessage, ControlResponse } from "../../gateway/types.js";
+import {
+  forkWebSessionRuntimeState,
+  loadPersistedWebSessionRuntimeState,
+  type PersistedWebSessionRuntimeState,
+} from "../../gateway/daemon-session-state.js";
 import { safeStringify } from "../../tools/types.js";
 import { summarizeTracePayloadForPreview } from "../../utils/trace-payload-serialization.js";
 import type {
@@ -42,6 +51,7 @@ import {
 import {
   WebChatSessionStore,
   type PersistedWebChatSession,
+  type PersistedWebChatForkSource,
   type PersistedWebChatSessionMetadata,
   type PersistedWebChatOwnerCredential,
   type PersistedWebChatPolicyContext,
@@ -50,6 +60,85 @@ import {
 const MESSAGE_ID_TTL_MS = 5 * 60_000;
 const MAX_TRACKED_MESSAGE_IDS = 5_000;
 const WS_TRACE_PAYLOAD_MAX_CHARS = 2_000;
+const execFileAsync = promisify(execFile);
+
+type SessionResumabilityState =
+  | "active"
+  | "disconnected-resumable"
+  | "missing-workspace"
+  | "non-resumable";
+
+interface SessionHistoryItem {
+  readonly content: string;
+  readonly sender: "user" | "agent" | "tool";
+  readonly timestamp: number;
+  readonly toolName?: string;
+}
+
+interface SessionContinuityRecord {
+  readonly sessionId: string;
+  readonly label: string;
+  readonly preview: string;
+  readonly messageCount: number;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  readonly lastActiveAt: number;
+  readonly connected: boolean;
+  readonly resumabilityState: SessionResumabilityState;
+  readonly shellProfile: SessionShellProfile;
+  readonly workflowStage: string;
+  readonly workspaceRoot?: string;
+  readonly repoRoot?: string;
+  readonly branch?: string;
+  readonly head?: string;
+  readonly activeTaskSummary?: string;
+  readonly childSessionCount: number;
+  readonly worktreeCount: number;
+  readonly pendingApprovalCount: number;
+  readonly lastAssistantOutputPreview?: string;
+  readonly forkLineage?: {
+    readonly parentSessionId: string;
+    readonly source: PersistedWebChatForkSource;
+    readonly forkedAt: number;
+  };
+}
+
+function compactPreview(content: string, maxChars = 140): string | undefined {
+  const compact = content.replace(/\s+/g, " ").trim();
+  if (compact.length === 0) return undefined;
+  return compact.slice(0, maxChars);
+}
+
+async function resolveGitSnapshot(
+  workspaceRoot: string | undefined,
+): Promise<{
+  repoRoot?: string;
+  branch?: string;
+  head?: string;
+}> {
+  if (!workspaceRoot || !existsSync(workspaceRoot)) {
+    return {};
+  }
+  try {
+    const cwd = resolvePath(workspaceRoot);
+    const [{ stdout: repoRootStdout }, { stdout: branchStdout }, { stdout: headStdout }] =
+      await Promise.all([
+        execFileAsync("git", ["rev-parse", "--show-toplevel"], { cwd }),
+        execFileAsync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd }),
+        execFileAsync("git", ["rev-parse", "HEAD"], { cwd }),
+      ]);
+    const repoRoot = repoRootStdout.trim();
+    const branch = branchStdout.trim();
+    const head = headStdout.trim();
+    return {
+      ...(repoRoot ? { repoRoot } : {}),
+      ...(branch && branch !== "HEAD" ? { branch } : {}),
+      ...(head ? { head } : {}),
+    };
+  } catch {
+    return {};
+  }
+}
 
 // ============================================================================
 // WebChatChannel
@@ -373,6 +462,16 @@ export class WebChatChannel
 
     if (type === "chat.sessions") {
       this.handleChatSessions(clientId, payload, id, tracedSend);
+      return;
+    }
+
+    if (type === "chat.inspect") {
+      this.handleChatInspect(clientId, payload, id, tracedSend);
+      return;
+    }
+
+    if (type === "chat.fork") {
+      this.handleChatFork(clientId, payload, id, tracedSend);
       return;
     }
 
@@ -820,13 +919,47 @@ export class WebChatChannel
     });
   }
 
+  private handleChatInspect(
+    clientId: string,
+    payload: Record<string, unknown> | undefined,
+    id: string | undefined,
+    send: SendFn,
+  ): void {
+    void this.handleChatInspectAsync(clientId, payload, id, send).catch((error) => {
+      send({
+        type: "error",
+        error: `Failed to inspect chat session: ${(error as Error).message}`,
+        id,
+      });
+    });
+  }
+
+  private handleChatFork(
+    clientId: string,
+    payload: Record<string, unknown> | undefined,
+    id: string | undefined,
+    send: SendFn,
+  ): void {
+    void this.handleChatForkAsync(clientId, payload, id, send).catch((error) => {
+      send({
+        type: "error",
+        error: `Failed to fork chat session: ${(error as Error).message}`,
+        id,
+      });
+    });
+  }
+
   private async handleChatHistoryAsync(
     clientId: string,
     payload: Record<string, unknown> | undefined,
     id: string | undefined,
     send: SendFn,
   ): Promise<void> {
-    const sessionId = this.clientSessions.get(clientId);
+    const boundSessionId = this.clientSessions.get(clientId);
+    const sessionId =
+      typeof payload?.sessionId === "string" && payload.sessionId.trim().length > 0
+        ? payload.sessionId.trim()
+        : boundSessionId;
     if (!sessionId) {
       send({ type: "chat.history", payload: [], id });
       return;
@@ -844,7 +977,10 @@ export class WebChatChannel
     }
 
     const limit = typeof payload?.limit === "number" ? payload.limit : 50;
-    const history = await this.loadSessionHistory(sessionId, limit);
+    const includeTools = payload?.includeTools === true;
+    const history = await this.loadSessionHistory(sessionId, limit, {
+      includeTools,
+    });
     send({ type: "chat.history", payload: history, id });
   }
 
@@ -876,32 +1012,15 @@ export class WebChatChannel
       return;
     }
 
-    const oldSession = this.clientSessions.get(clientId);
-    if (oldSession) {
-      this.sessionClients.delete(oldSession);
-    }
-
-    this.clientSessions.set(clientId, targetSessionId);
-    this.sessionClients.set(targetSessionId, clientId);
-    this.sessionOwners.set(targetSessionId, ownerKey);
-    const persisted = await this.sessionStore?.loadSession(targetSessionId);
-    this.rememberPersistedSessionMetadata(targetSessionId, persisted);
-    const workspaceRoot = await this.upsertSessionWorkspaceRoot(
+    const resumed = await this.resumeSessionForClient(
+      clientId,
       targetSessionId,
       ownerKey,
       requestedWorkspaceRoot,
     );
-
-    await Promise.resolve(this.deps.hydrateSessionContext?.(targetSessionId));
-    const history = await this.loadSessionHistory(targetSessionId);
-
     send({
       type: "chat.resumed",
-      payload: {
-        sessionId: targetSessionId,
-        messageCount: history.length,
-        ...(workspaceRoot ? { workspaceRoot } : {}),
-      },
+      payload: resumed,
       id,
     });
   }
@@ -913,6 +1032,21 @@ export class WebChatChannel
     send: SendFn,
   ): Promise<void> {
     const ownerKey = await this.resolveDurableOwner(clientId, payload, send);
+    if (payload?.continuity === true) {
+      const activeOnly = payload?.activeOnly === true;
+      const limit =
+        typeof payload?.limit === "number" && payload.limit > 0
+          ? payload.limit
+          : undefined;
+      const profile = this.parseShellProfile(payload);
+      const records = await this.listContinuitySessionsForOwner(ownerKey, {
+        activeOnly,
+        limit,
+        shellProfile: profile,
+      });
+      send({ type: "chat.sessions", payload: records, id });
+      return;
+    }
     if (this.sessionStore && this.isDurableOwnerKey(ownerKey)) {
       const persistedSessions = await this.sessionStore.listSessionsForOwner(ownerKey);
       const sessions = persistedSessions
@@ -965,6 +1099,189 @@ export class WebChatChannel
 
     sessions.sort((a, b) => b.lastActiveAt - a.lastActiveAt);
     send({ type: "chat.sessions", payload: sessions, id });
+  }
+
+  private async handleChatInspectAsync(
+    clientId: string,
+    payload: Record<string, unknown> | undefined,
+    id: string | undefined,
+    send: SendFn,
+  ): Promise<void> {
+    const boundSessionId = this.clientSessions.get(clientId);
+    const ownerKey = await this.resolveDurableOwner(clientId, payload, send);
+    const targetSessionId =
+      typeof payload?.sessionId === "string" && payload.sessionId.trim().length > 0
+        ? payload.sessionId.trim()
+        : boundSessionId;
+    if (!targetSessionId) {
+      send({ type: "error", error: "Missing sessionId in chat.inspect", id });
+      return;
+    }
+    const authorized = await this.isAuthorizedSession(
+      targetSessionId,
+      ownerKey,
+      clientId,
+    );
+    if (!authorized) {
+      send({
+        type: "error",
+        error: `Session "${targetSessionId}" not found`,
+        id,
+      });
+      return;
+    }
+
+    const record = await this.inspectContinuitySession(targetSessionId, ownerKey);
+    send({ type: "chat.inspect", payload: record, id });
+  }
+
+  private async handleChatForkAsync(
+    clientId: string,
+    payload: Record<string, unknown> | undefined,
+    id: string | undefined,
+    send: SendFn,
+  ): Promise<void> {
+    const boundSessionId = this.clientSessions.get(clientId);
+    const ownerKey = await this.resolveDurableOwner(clientId, payload, send);
+    const sourceSessionId =
+      typeof payload?.sessionId === "string" && payload.sessionId.trim().length > 0
+        ? payload.sessionId.trim()
+        : boundSessionId;
+    if (!sourceSessionId) {
+      send({ type: "error", error: "Missing sessionId in chat.fork", id });
+      return;
+    }
+    const authorized = await this.isAuthorizedSession(
+      sourceSessionId,
+      ownerKey,
+      clientId,
+    );
+    if (!authorized) {
+      send({
+        type: "error",
+        error: `Session "${sourceSessionId}" not found`,
+        id,
+      });
+      return;
+    }
+
+    const forked = await this.forkOwnedSession(sourceSessionId, ownerKey, clientId, {
+      shellProfile: this.parseShellProfile(payload),
+      objective:
+        typeof payload?.objective === "string" && payload.objective.trim().length > 0
+          ? payload.objective.trim()
+          : undefined,
+    });
+    send({ type: "chat.fork", payload: forked, id });
+  }
+
+  async listContinuitySessionsForSession(
+    requesterSessionId: string,
+    params?: {
+      activeOnly?: boolean;
+      limit?: number;
+      shellProfile?: SessionShellProfile;
+    },
+  ): Promise<readonly SessionContinuityRecord[]> {
+    const ownerKey = await this.resolveOwnerKeyForSession(requesterSessionId);
+    if (!ownerKey) {
+      return [];
+    }
+    return this.listContinuitySessionsForOwner(ownerKey, params);
+  }
+
+  async inspectOwnedSession(
+    requesterSessionId: string,
+    targetSessionId?: string,
+  ): Promise<Record<string, unknown> | undefined> {
+    const ownerKey = await this.resolveOwnerKeyForSession(requesterSessionId);
+    if (!ownerKey) {
+      return undefined;
+    }
+    const requestedTarget = targetSessionId?.trim() || requesterSessionId;
+    const authorized = await this.isAuthorizedSession(
+      requestedTarget,
+      ownerKey,
+      this.sessionClients.get(requesterSessionId) ?? "",
+    );
+    if (!authorized) {
+      return undefined;
+    }
+    return this.inspectContinuitySession(requestedTarget, ownerKey);
+  }
+
+  async loadOwnedSessionHistory(
+    requesterSessionId: string,
+    params?: {
+      sessionId?: string;
+      limit?: number;
+      includeTools?: boolean;
+    },
+  ): Promise<readonly SessionHistoryItem[]> {
+    const ownerKey = await this.resolveOwnerKeyForSession(requesterSessionId);
+    if (!ownerKey) {
+      return [];
+    }
+    const targetSessionId = params?.sessionId?.trim() || requesterSessionId;
+    const authorized = await this.isAuthorizedSession(
+      targetSessionId,
+      ownerKey,
+      this.sessionClients.get(requesterSessionId) ?? "",
+    );
+    if (!authorized) {
+      return [];
+    }
+    return this.loadSessionHistory(targetSessionId, params?.limit, {
+      includeTools: params?.includeTools === true,
+    });
+  }
+
+  async resumeOwnedSession(
+    requesterSessionId: string,
+    targetSessionId: string,
+  ): Promise<{ sessionId: string; messageCount: number; workspaceRoot?: string } | undefined> {
+    const clientId = this.sessionClients.get(requesterSessionId);
+    if (!clientId) {
+      return undefined;
+    }
+    const ownerKey = await this.resolveOwnerKeyForSession(requesterSessionId);
+    if (!ownerKey) {
+      return undefined;
+    }
+    const authorized = await this.isAuthorizedSession(
+      targetSessionId,
+      ownerKey,
+      clientId,
+    );
+    if (!authorized) {
+      return undefined;
+    }
+    return this.resumeSessionForClient(clientId, targetSessionId, ownerKey, undefined);
+  }
+
+  async forkOwnedSessionForRequester(
+    requesterSessionId: string,
+    params?: {
+      sessionId?: string;
+      shellProfile?: SessionShellProfile;
+      objective?: string;
+    },
+  ): Promise<Record<string, unknown> | undefined> {
+    const clientId = this.sessionClients.get(requesterSessionId);
+    const ownerKey = await this.resolveOwnerKeyForSession(requesterSessionId);
+    if (!clientId || !ownerKey) {
+      return undefined;
+    }
+    const sourceSessionId = params?.sessionId?.trim() || requesterSessionId;
+    const authorized = await this.isAuthorizedSession(
+      sourceSessionId,
+      ownerKey,
+      clientId,
+    );
+    if (!authorized) {
+      return undefined;
+    }
+    return this.forkOwnedSession(sourceSessionId, ownerKey, clientId, params);
   }
 
   // --------------------------------------------------------------------------
@@ -1454,26 +1771,535 @@ export class WebChatChannel
     return persisted.ownerKey === ownerKey;
   }
 
+  private async resolveOwnerKeyForSession(
+    sessionId: string,
+  ): Promise<string | undefined> {
+    const cached = this.sessionOwners.get(sessionId);
+    if (cached) {
+      return cached;
+    }
+    const persisted = await this.sessionStore?.loadSession(sessionId);
+    if (!persisted) {
+      return undefined;
+    }
+    this.sessionOwners.set(sessionId, persisted.ownerKey);
+    this.rememberPersistedSessionMetadata(sessionId, persisted);
+    return persisted.ownerKey;
+  }
+
+  private async resumeSessionForClient(
+    clientId: string,
+    targetSessionId: string,
+    ownerKey: string,
+    requestedWorkspaceRoot: string | undefined,
+  ): Promise<{
+    sessionId: string;
+    messageCount: number;
+    workspaceRoot?: string;
+    shellProfile?: SessionShellProfile;
+  }> {
+    const oldSession = this.clientSessions.get(clientId);
+    if (oldSession) {
+      this.sessionClients.delete(oldSession);
+    }
+
+    this.clientSessions.set(clientId, targetSessionId);
+    this.sessionClients.set(targetSessionId, clientId);
+    this.sessionOwners.set(targetSessionId, ownerKey);
+    const persisted = await this.sessionStore?.loadSession(targetSessionId);
+    this.rememberPersistedSessionMetadata(targetSessionId, persisted);
+    const workspaceRoot = await this.upsertSessionWorkspaceRoot(
+      targetSessionId,
+      ownerKey,
+      requestedWorkspaceRoot,
+    );
+
+    await Promise.resolve(this.deps.hydrateSessionContext?.(targetSessionId));
+    const history = await this.loadSessionHistory(targetSessionId);
+    const runtimeState = this.deps.memoryBackend
+      ? await loadPersistedWebSessionRuntimeState(
+          this.deps.memoryBackend,
+          targetSessionId,
+        )
+      : undefined;
+    return {
+      sessionId: targetSessionId,
+      messageCount: history.length,
+      ...(workspaceRoot ? { workspaceRoot } : {}),
+      ...(runtimeState?.shellProfile
+        ? { shellProfile: runtimeState.shellProfile }
+        : {}),
+    };
+  }
+
+  private async listContinuitySessionsForOwner(
+    ownerKey: string,
+    params?: {
+      activeOnly?: boolean;
+      limit?: number;
+      shellProfile?: SessionShellProfile;
+    },
+  ): Promise<readonly SessionContinuityRecord[]> {
+    if (this.sessionStore && this.isDurableOwnerKey(ownerKey)) {
+      const persistedSessions = await this.sessionStore.listSessionsForOwner(ownerKey);
+      const records = await Promise.all(
+        persistedSessions.map((session) => this.buildSessionContinuityRecord(session)),
+      );
+      return records
+        .filter((record) => {
+          if (params?.activeOnly && !record.connected) {
+            return false;
+          }
+          if (params?.shellProfile && record.shellProfile !== params.shellProfile) {
+            return false;
+          }
+          if (!params?.activeOnly && record.resumabilityState === "non-resumable") {
+            return false;
+          }
+          return true;
+        })
+        .sort((a, b) => b.lastActiveAt - a.lastActiveAt)
+        .slice(0, params?.limit && params.limit > 0 ? params.limit : undefined);
+    }
+
+    const records = await Promise.all(
+      [...this.sessionHistory.entries()].map(async ([sessionId, history]) => {
+        const lastEntry = history[history.length - 1];
+        const preview =
+          history.find((entry) => entry.sender === "user")?.content ??
+          history.find((entry) => entry.sender === "agent")?.content ??
+          "New conversation";
+        return {
+          sessionId,
+          label: compactPreview(preview, 80) ?? "New conversation",
+          preview: compactPreview(preview) ?? "New conversation",
+          messageCount: history.length,
+          createdAt: history[0]?.timestamp ?? Date.now(),
+          updatedAt: lastEntry?.timestamp ?? Date.now(),
+          lastActiveAt: lastEntry?.timestamp ?? Date.now(),
+          connected: this.sessionClients.has(sessionId),
+          resumabilityState: this.sessionClients.has(sessionId)
+            ? "active"
+            : history.length > 0
+              ? "disconnected-resumable"
+              : "non-resumable",
+          shellProfile: "general" as SessionShellProfile,
+          workflowStage: "idle",
+          childSessionCount: 0,
+          worktreeCount: 0,
+          pendingApprovalCount: 0,
+        } satisfies SessionContinuityRecord;
+      }),
+    );
+    return records
+      .filter((record) =>
+        params?.activeOnly ? record.connected : record.resumabilityState !== "non-resumable",
+      )
+      .sort((a, b) => b.lastActiveAt - a.lastActiveAt)
+      .slice(0, params?.limit && params.limit > 0 ? params.limit : undefined);
+  }
+
+  private async inspectContinuitySession(
+    sessionId: string,
+    ownerKey: string,
+  ): Promise<Record<string, unknown>> {
+    const persisted = await this.sessionStore?.loadSession(sessionId);
+    if (!persisted || persisted.ownerKey !== ownerKey) {
+      return {
+        sessionId,
+        error: "Session not found",
+      };
+    }
+    const continuity = await this.buildSessionContinuityRecord(persisted);
+    const runtimeState = this.deps.memoryBackend
+      ? await loadPersistedWebSessionRuntimeState(
+          this.deps.memoryBackend,
+          sessionId,
+        )
+      : undefined;
+    const history = await this.loadSessionHistory(sessionId, 10, {
+      includeTools: false,
+    });
+    const backgroundRun = await this.deps.inspectBackgroundRun?.(sessionId);
+    return {
+      session: continuity,
+      ...(runtimeState?.workflowState?.objective
+        ? { objective: runtimeState.workflowState.objective }
+        : {}),
+      recentHistory: history,
+      ...(backgroundRun
+        ? {
+            backgroundRun: {
+              runId: backgroundRun.runId,
+              state: backgroundRun.state,
+              currentPhase: backgroundRun.currentPhase,
+              objective: backgroundRun.objective,
+              checkpointAvailable: backgroundRun.checkpointAvailable,
+            },
+          }
+        : {}),
+    };
+  }
+
+  private async buildSessionContinuityRecord(
+    session: PersistedWebChatSession,
+  ): Promise<SessionContinuityRecord> {
+    const runtimeState = this.deps.memoryBackend
+      ? await loadPersistedWebSessionRuntimeState(
+          this.deps.memoryBackend,
+          session.sessionId,
+        )
+      : undefined;
+    const workspaceRoot = session.metadata?.workspaceRoot;
+    const { repoRoot, branch, head } = await resolveGitSnapshot(workspaceRoot);
+    const runtimeStatus = runtimeState?.runtimeContractStatusSnapshot as
+      | unknown
+      | undefined;
+    const pendingApprovalCount = this.countPendingApprovals(session.sessionId);
+    const preview =
+      runtimeState?.workflowState?.objective ??
+      session.label ??
+      session.metadata?.lastAssistantOutputPreview ??
+      "New conversation";
+    const connected = this.sessionClients.has(session.sessionId);
+    return {
+      sessionId: session.sessionId,
+      label: session.label,
+      preview: compactPreview(preview) ?? session.label,
+      messageCount: session.messageCount,
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt,
+      lastActiveAt: session.lastActiveAt,
+      connected,
+      resumabilityState: this.resolveResumabilityState({
+        connected,
+        workspaceRoot,
+        messageCount: session.messageCount,
+        runtimeState,
+      }),
+      shellProfile: runtimeState?.shellProfile ?? "general",
+      workflowStage: runtimeState?.workflowState?.stage ?? "idle",
+      ...(workspaceRoot ? { workspaceRoot } : {}),
+      ...(repoRoot ? { repoRoot } : {}),
+      ...(branch ? { branch } : {}),
+      ...(head ? { head } : {}),
+      ...(this.summarizeActiveTask(runtimeState) ? {
+        activeTaskSummary: this.summarizeActiveTask(runtimeState),
+      } : {}),
+      childSessionCount: this.countChildSessions(
+        runtimeStatus as Record<string, unknown> | undefined,
+      ),
+      worktreeCount: this.countWorktreeOwnership(
+        runtimeStatus as Record<string, unknown> | undefined,
+      ),
+      pendingApprovalCount,
+      ...(session.metadata?.lastAssistantOutputPreview
+        ? { lastAssistantOutputPreview: session.metadata.lastAssistantOutputPreview }
+        : {}),
+      ...(session.metadata?.forkLineage
+        ? { forkLineage: session.metadata.forkLineage }
+        : {}),
+    };
+  }
+
+  private resolveResumabilityState(params: {
+    connected: boolean;
+    workspaceRoot?: string;
+    messageCount: number;
+    runtimeState?: PersistedWebSessionRuntimeState;
+  }): SessionResumabilityState {
+    if (params.connected) {
+      return "active";
+    }
+    if (params.workspaceRoot && !existsSync(params.workspaceRoot)) {
+      return "missing-workspace";
+    }
+    if (params.messageCount > 0 || params.runtimeState) {
+      return "disconnected-resumable";
+    }
+    return "non-resumable";
+  }
+
+  private countPendingApprovals(sessionId: string): number {
+    const requests = this.deps.approvalEngine?.getPending() ?? [];
+    return requests.filter(
+      (request) =>
+        request.sessionId === sessionId || request.parentSessionId === sessionId,
+    ).length;
+  }
+
+  private summarizeActiveTask(
+    runtimeState: PersistedWebSessionRuntimeState | undefined,
+  ): string | undefined {
+    const activeTaskContext =
+      runtimeState?.activeTaskContext &&
+      typeof runtimeState.activeTaskContext === "object"
+        ? (runtimeState.activeTaskContext as Record<string, unknown>)
+        : undefined;
+    if (typeof activeTaskContext?.taskId === "string") {
+      const summary =
+        typeof activeTaskContext.summary === "string"
+          ? activeTaskContext.summary
+          : typeof activeTaskContext.title === "string"
+            ? activeTaskContext.title
+            : undefined;
+      return summary
+        ? `${activeTaskContext.taskId}: ${summary}`
+        : activeTaskContext.taskId;
+    }
+    const snapshot =
+      runtimeState?.runtimeContractStatusSnapshot &&
+      typeof runtimeState.runtimeContractStatusSnapshot === "object"
+        ? (runtimeState.runtimeContractStatusSnapshot as unknown as Record<
+            string,
+            unknown
+          >)
+        : undefined;
+    const openTasks = Array.isArray(snapshot?.openTasks) ? snapshot.openTasks : [];
+    const firstTask =
+      openTasks.length > 0 && typeof openTasks[0] === "object" && openTasks[0] !== null
+        ? (openTasks[0] as Record<string, unknown>)
+        : undefined;
+    if (!firstTask) return undefined;
+    const taskId = typeof firstTask.id === "string" ? firstTask.id : undefined;
+    const summary =
+      typeof firstTask.summary === "string" ? firstTask.summary : undefined;
+    if (!taskId) {
+      return summary;
+    }
+    return summary ? `${taskId}: ${summary}` : taskId;
+  }
+
+  private countChildSessions(
+    runtimeStatusSnapshot: Record<string, unknown> | undefined,
+  ): number {
+    const openWorkers = Array.isArray(runtimeStatusSnapshot?.openWorkers)
+      ? runtimeStatusSnapshot.openWorkers
+      : [];
+    return openWorkers.filter((entry) => {
+      const record =
+        typeof entry === "object" && entry !== null
+          ? (entry as Record<string, unknown>)
+          : undefined;
+      return typeof record?.continuationSessionId === "string";
+    }).length;
+  }
+
+  private countWorktreeOwnership(
+    runtimeStatusSnapshot: Record<string, unknown> | undefined,
+  ): number {
+    const openWorkers = Array.isArray(runtimeStatusSnapshot?.openWorkers)
+      ? runtimeStatusSnapshot.openWorkers
+      : [];
+    return openWorkers.filter((entry) => {
+      const record =
+        typeof entry === "object" && entry !== null
+          ? (entry as Record<string, unknown>)
+          : undefined;
+      const executionLocation =
+        record && typeof record.executionLocation === "object"
+          ? (record.executionLocation as Record<string, unknown>)
+          : undefined;
+      return (
+        executionLocation?.mode === "worktree" &&
+        typeof executionLocation.worktreePath === "string"
+      );
+    }).length;
+  }
+
+  private buildForkedSessionId(clientId: string): string {
+    return deriveSessionId(
+      {
+        channel: "webchat",
+        senderId: `${clientId}:fork:${Date.now().toString(36)}:${randomUUID()}`,
+        scope: "dm",
+        workspaceId: DEFAULT_WORKSPACE_ID,
+      },
+      "per-channel-peer",
+    );
+  }
+
+  private async forkOwnedSession(
+    sourceSessionId: string,
+    ownerKey: string,
+    clientId: string,
+    params?: {
+      shellProfile?: SessionShellProfile;
+      objective?: string;
+    },
+  ): Promise<Record<string, unknown>> {
+    const sourceSession = await this.sessionStore?.loadSession(sourceSessionId);
+    if (!sourceSession || sourceSession.ownerKey !== ownerKey) {
+      throw new Error(`Session "${sourceSessionId}" not found`);
+    }
+
+    const targetSessionId = this.buildForkedSessionId(clientId);
+    const workspaceRoot =
+      sourceSession.metadata?.workspaceRoot ??
+      (await this.loadSessionWorkspaceRoot(sourceSessionId));
+    const forkedAt = Date.now();
+    let forkSource: PersistedWebChatForkSource | undefined;
+
+    if (
+      this.deps.inspectBackgroundRun &&
+      this.deps.forkBackgroundRunFromCheckpoint &&
+      (await this.deps.inspectBackgroundRun(sourceSessionId))?.checkpointAvailable
+    ) {
+      const forkedFromCheckpoint = await this.deps.forkBackgroundRunFromCheckpoint({
+        sourceSessionId,
+        targetSessionId,
+        objective: params?.objective,
+      });
+      if (forkedFromCheckpoint) {
+        forkSource = "checkpoint";
+      }
+    }
+
+    if (!forkSource && this.deps.memoryBackend) {
+      const forkedRuntimeState = await forkWebSessionRuntimeState(
+        this.deps.memoryBackend,
+        {
+          sourceWebSessionId: sourceSessionId,
+          targetWebSessionId: targetSessionId,
+          ...(params?.shellProfile ? { shellProfile: params.shellProfile } : {}),
+          ...(params?.objective
+            ? { workflowState: { objective: params.objective } }
+            : {}),
+        },
+      );
+      if (forkedRuntimeState) {
+        forkSource = "runtime_state";
+      }
+    }
+
+    if (!forkSource && this.deps.memoryBackend) {
+      const sourceThread = await this.deps.memoryBackend.getThread(sourceSessionId);
+      for (const entry of sourceThread) {
+        await this.deps.memoryBackend.addEntry({
+          sessionId: targetSessionId,
+          role: entry.role,
+          content: entry.content,
+          ...(entry.toolCallId ? { toolCallId: entry.toolCallId } : {}),
+          ...(entry.toolName ? { toolName: entry.toolName } : {}),
+          ...(entry.taskPda ? { taskPda: entry.taskPda } : {}),
+          ...(entry.metadata ? { metadata: entry.metadata } : {}),
+          ...(entry.workspaceId ? { workspaceId: entry.workspaceId } : {}),
+          ...(entry.agentId ? { agentId: entry.agentId } : {}),
+          ...(entry.userId ? { userId: entry.userId } : {}),
+          ...(entry.worldId ? { worldId: entry.worldId } : {}),
+          ...(entry.channel ? { channel: entry.channel } : {}),
+        });
+      }
+      if (sourceThread.length > 0) {
+        forkSource = "history";
+      }
+    }
+
+    if (!forkSource) {
+      throw new Error("No continuity source was available to fork this session");
+    }
+
+    await this.sessionStore?.ensureSession({
+      sessionId: targetSessionId,
+      ownerKey,
+      createdAt: forkedAt,
+      label: sourceSession.label,
+      metadata: {
+        ...(workspaceRoot ? { workspaceRoot } : {}),
+        ...(sourceSession.metadata?.lastAssistantOutputPreview
+          ? {
+              lastAssistantOutputPreview:
+                sourceSession.metadata.lastAssistantOutputPreview,
+            }
+          : {}),
+        forkLineage: {
+          parentSessionId: sourceSessionId,
+          source: forkSource,
+          forkedAt,
+        },
+      },
+    });
+    await this.sessionStore?.updateSessionMetadata({
+      sessionId: targetSessionId,
+      ownerKey,
+      updatedAt: forkedAt,
+      metadata: {
+        ...(workspaceRoot ? { workspaceRoot } : {}),
+        ...(sourceSession.metadata?.lastAssistantOutputPreview
+          ? {
+              lastAssistantOutputPreview:
+                sourceSession.metadata.lastAssistantOutputPreview,
+            }
+          : {}),
+        forkLineage: {
+          parentSessionId: sourceSessionId,
+          source: forkSource,
+          forkedAt,
+        },
+      },
+      label: sourceSession.label,
+    });
+    if (workspaceRoot) {
+      this.sessionWorkspaceRoots.set(targetSessionId, workspaceRoot);
+    }
+    this.sessionOwners.set(targetSessionId, ownerKey);
+
+    const continuity = await this.inspectContinuitySession(targetSessionId, ownerKey);
+    return {
+      sourceSessionId,
+      targetSessionId,
+      forkSource,
+      resumed: false,
+      session: continuity.session,
+      ...(params?.objective ? { objective: params.objective } : {}),
+      ...(params?.shellProfile ? { shellProfile: params.shellProfile } : {}),
+    };
+  }
+
   private async loadSessionHistory(
     sessionId: string,
     limit?: number,
-  ): Promise<Array<{ content: string; sender: "user" | "agent"; timestamp: number }>> {
+    options?: {
+      includeTools?: boolean;
+    },
+  ): Promise<SessionHistoryItem[]> {
     if (this.deps.memoryBackend) {
       const entries = await this.deps.memoryBackend.getThread(sessionId, limit);
       const history = entries
-        .filter((entry) => entry.role === "user" || entry.role === "assistant")
-        .map((entry): { content: string; sender: "user" | "agent"; timestamp: number } => ({
+        .filter((entry) =>
+          options?.includeTools === true
+            ? entry.role === "user" ||
+              entry.role === "assistant" ||
+              entry.role === "tool"
+            : entry.role === "user" || entry.role === "assistant",
+        )
+        .map((entry): SessionHistoryItem => ({
           content: entry.content,
-          sender: entry.role === "assistant" ? "agent" : "user",
+          sender:
+            entry.role === "assistant"
+              ? "agent"
+              : entry.role === "tool"
+                ? "tool"
+                : "user",
           timestamp: entry.timestamp,
+          ...(entry.toolName ? { toolName: entry.toolName } : {}),
         }));
       if (history.length > 0) {
-        this.sessionHistory.set(sessionId, history);
+        const nonToolHistory = history
+          .filter((entry) => entry.sender !== "tool")
+          .map((entry) => ({
+            content: entry.content,
+            sender: entry.sender === "agent" ? ("agent" as const) : ("user" as const),
+            timestamp: entry.timestamp,
+          }));
+        this.sessionHistory.set(sessionId, nonToolHistory);
       }
       return history;
     }
     const history = this.sessionHistory.get(sessionId) ?? [];
-    return typeof limit === "number" && limit > 0 ? history.slice(-limit) : history;
+    const bounded =
+      typeof limit === "number" && limit > 0 ? history.slice(-limit) : history;
+    return bounded;
   }
 
   private parsePolicyContext(

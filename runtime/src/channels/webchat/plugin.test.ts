@@ -17,6 +17,15 @@ import { HookDispatcher, createBuiltinHooks } from "../../gateway/hooks.js";
 import { silentLogger } from "../../utils/logger.js";
 import { InMemoryBackend } from "../../memory/in-memory/backend.js";
 import { WebChatSessionStore } from "./session-store.js";
+import {
+  loadPersistedWebSessionRuntimeState,
+  persistWebSessionRuntimeState,
+} from "../../gateway/daemon-session-state.js";
+import {
+  SESSION_ACTIVE_TASK_CONTEXT_METADATA_KEY,
+  SESSION_SHELL_PROFILE_METADATA_KEY,
+} from "../../gateway/session.js";
+import { SESSION_WORKFLOW_STATE_METADATA_KEY } from "../../gateway/workflow-state.js";
 
 // ============================================================================
 // Test helpers
@@ -1435,6 +1444,226 @@ describe("WebChatChannel", () => {
       } finally {
         rmSync(workspaceRootA, { recursive: true, force: true });
         rmSync(workspaceRootB, { recursive: true, force: true });
+      }
+    });
+
+    it("returns continuity records and inspect detail for owned sessions", async () => {
+      const workspaceRoot = createWorkspaceRoot("agenc-webchat-continuity-");
+      const memoryBackend = new InMemoryBackend();
+      const store = new WebChatSessionStore({ memoryBackend });
+
+      try {
+        const issued = await store.issueOwnerCredential();
+        await store.ensureSession({
+          sessionId: "session-continuity",
+          ownerKey: issued.credential.ownerKey,
+          metadata: { workspaceRoot },
+        });
+        await store.recordActivity({
+          sessionId: "session-continuity",
+          ownerKey: issued.credential.ownerKey,
+          sender: "user",
+          content: "Investigate the regression",
+          timestamp: 100,
+        });
+        await store.recordActivity({
+          sessionId: "session-continuity",
+          ownerKey: issued.credential.ownerKey,
+          sender: "agent",
+          content: "Checking the runtime state now.",
+          timestamp: 110,
+        });
+        await persistWebSessionRuntimeState(
+          memoryBackend,
+          "session-continuity",
+          {
+            id: "session-continuity",
+            metadata: {
+              [SESSION_SHELL_PROFILE_METADATA_KEY]: "coding",
+              [SESSION_WORKFLOW_STATE_METADATA_KEY]: {
+                stage: "review",
+                worktreeMode: "child_optional",
+                objective: "Investigate the regression",
+                enteredAt: 100,
+                updatedAt: 110,
+              },
+            },
+          } as any,
+        );
+
+        const continuityChannel = new WebChatChannel(createDeps({ memoryBackend }));
+        const continuityContext = createContext();
+        await continuityChannel.initialize(continuityContext);
+        await continuityChannel.start();
+        const send = vi.fn<(response: ControlResponse) => void>();
+
+        continuityChannel.handleMessage(
+          "client_2",
+          "chat.sessions",
+          msg(
+            "chat.sessions",
+            { ownerToken: issued.ownerToken, continuity: true },
+            "req-continuity-list",
+          ),
+          send,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(findResponse(send, "chat.sessions", "req-continuity-list")?.payload).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              sessionId: "session-continuity",
+              shellProfile: "coding",
+              workflowStage: "review",
+              resumabilityState: "disconnected-resumable",
+            }),
+          ]),
+        );
+
+        continuityChannel.handleMessage(
+          "client_2",
+          "chat.inspect",
+          msg(
+            "chat.inspect",
+            { ownerToken: issued.ownerToken, sessionId: "session-continuity" },
+            "req-continuity-inspect",
+          ),
+          send,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(findResponse(send, "chat.inspect", "req-continuity-inspect")?.payload).toEqual(
+          expect.objectContaining({
+            session: expect.objectContaining({
+              sessionId: "session-continuity",
+              shellProfile: "coding",
+              workflowStage: "review",
+              pendingApprovalCount: 0,
+            }),
+            objective: "Investigate the regression",
+          }),
+        );
+      } finally {
+        rmSync(workspaceRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("forks an owned session from persisted runtime state when no checkpoint exists", async () => {
+      const workspaceRoot = createWorkspaceRoot("agenc-webchat-fork-");
+      const memoryBackend = new InMemoryBackend();
+      const store = new WebChatSessionStore({ memoryBackend });
+
+      try {
+        const issued = await store.issueOwnerCredential();
+        await store.ensureSession({
+          sessionId: "session-source",
+          ownerKey: issued.credential.ownerKey,
+          metadata: { workspaceRoot },
+        });
+        await store.recordActivity({
+          sessionId: "session-source",
+          ownerKey: issued.credential.ownerKey,
+          sender: "user",
+          content: "Ship the continuity layer",
+          timestamp: 200,
+        });
+        await memoryBackend.addEntry({
+          sessionId: "session-source",
+          role: "user",
+          content: "Ship the continuity layer",
+        });
+        await persistWebSessionRuntimeState(
+          memoryBackend,
+          "session-source",
+          {
+            id: "session-source",
+            metadata: {
+              [SESSION_SHELL_PROFILE_METADATA_KEY]: "coding",
+              [SESSION_WORKFLOW_STATE_METADATA_KEY]: {
+                stage: "implement",
+                worktreeMode: "child_optional",
+                objective: "Ship the continuity layer",
+                enteredAt: 200,
+                updatedAt: 220,
+              },
+              [SESSION_ACTIVE_TASK_CONTEXT_METADATA_KEY]: {
+                taskId: "task-live",
+                summary: "should not carry",
+              },
+            },
+          } as any,
+        );
+
+        const forkChannel = new WebChatChannel(createDeps({ memoryBackend }));
+        const forkContext = createContext();
+        await forkChannel.initialize(forkContext);
+        await forkChannel.start();
+        const send = vi.fn<(response: ControlResponse) => void>();
+
+        forkChannel.handleMessage(
+          "client_2",
+          "chat.resume",
+          msg(
+            "chat.resume",
+            { ownerToken: issued.ownerToken, sessionId: "session-source" },
+            "req-resume-source",
+          ),
+          send,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        forkChannel.handleMessage(
+          "client_2",
+          "chat.fork",
+          msg(
+            "chat.fork",
+            {
+              ownerToken: issued.ownerToken,
+              sessionId: "session-source",
+              objective: "Investigate a variant",
+              shellProfile: "research",
+            },
+            "req-fork",
+          ),
+          send,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        const forkResponse = findResponse(send, "chat.fork", "req-fork");
+        expect(forkResponse?.payload).toEqual(
+          expect.objectContaining({
+            sourceSessionId: "session-source",
+            forkSource: "runtime_state",
+            targetSessionId: expect.any(String),
+          }),
+        );
+
+        const targetSessionId = (forkResponse?.payload as Record<string, unknown>)
+          .targetSessionId as string;
+        expect(await store.loadSession(targetSessionId)).toMatchObject({
+          metadata: {
+            workspaceRoot,
+            forkLineage: {
+              parentSessionId: "session-source",
+              source: "runtime_state",
+            },
+          },
+        });
+        expect(
+          await loadPersistedWebSessionRuntimeState(memoryBackend, targetSessionId),
+        ).toMatchObject({
+          shellProfile: "research",
+          workflowState: expect.objectContaining({
+            objective: "Investigate a variant",
+          }),
+        });
+        const targetState = await loadPersistedWebSessionRuntimeState(
+          memoryBackend,
+          targetSessionId,
+        );
+        expect(targetState?.activeTaskContext).toBeUndefined();
+      } finally {
+        rmSync(workspaceRoot, { recursive: true, force: true });
       }
     });
 

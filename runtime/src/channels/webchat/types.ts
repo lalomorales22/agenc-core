@@ -124,6 +124,12 @@ export interface WebChatDeps {
   inspectBackgroundRun?: (
     sessionId: string,
   ) => Promise<BackgroundRunOperatorDetail | undefined>;
+  /** Optional continuity helper to fork a durable run into a new session. */
+  forkBackgroundRunFromCheckpoint?: (params: {
+    sourceSessionId: string;
+    targetSessionId: string;
+    objective?: string;
+  }) => Promise<boolean>;
   /** Optional mutation helper for operator-driven run controls. */
   controlBackgroundRun?: (
     params: {
@@ -205,4 +211,3 @@ export interface WebChatChannelConfig {
 // Voice WebSocket Protocol — Client → Server
 // Keep in sync with web/src/types.ts voice types
 // ============================================================================
-

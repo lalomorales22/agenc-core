@@ -377,6 +377,17 @@ function parseCommandJsonArgs(
   return parsed as Record<string, unknown>;
 }
 
+function parseCommandJsonArgv(
+  argv: readonly string[],
+  startIndex = 1,
+): Record<string, unknown> | undefined {
+  const candidate = argv.slice(startIndex).join(" ").trim();
+  if (!candidate.startsWith("{")) {
+    return undefined;
+  }
+  return parseCommandJsonArgs(candidate);
+}
+
 function parseInlineFlag(
   argv: readonly string[],
   flag: string,
@@ -878,6 +889,138 @@ function formatWorkflowOwnershipReply(
         .filter((value): value is string => Boolean(value))
         .join(" "),
     ),
+  ].join("\n");
+}
+
+function formatContinuitySessionList(
+  sessions: readonly Record<string, unknown>[],
+): string {
+  if (sessions.length === 0) {
+    return "No resumable sessions found.";
+  }
+  return [
+    `Resumable sessions (${sessions.length}):`,
+    ...sessions.map((session) => {
+      const sessionId =
+        typeof session.sessionId === "string" ? session.sessionId : "unknown";
+      const profile =
+        typeof session.shellProfile === "string"
+          ? ` profile=${session.shellProfile}`
+          : "";
+      const stage =
+        typeof session.workflowStage === "string"
+          ? ` stage=${session.workflowStage}`
+          : "";
+      const state =
+        typeof session.resumabilityState === "string"
+          ? ` state=${session.resumabilityState}`
+          : "";
+      const branch =
+        typeof session.branch === "string" ? ` branch=${session.branch}` : "";
+      const messages =
+        typeof session.messageCount === "number"
+          ? ` messages=${session.messageCount}`
+          : "";
+      const preview =
+        typeof session.preview === "string" ? session.preview : "New conversation";
+      return `  ${sessionId}${profile}${stage}${state}${branch}${messages} :: ${preview}`;
+    }),
+  ].join("\n");
+}
+
+function formatContinuitySessionInspect(
+  detail: Record<string, unknown>,
+): string {
+  const session = asRecord(detail.session);
+  if (!session) {
+    return typeof detail.error === "string"
+      ? `Session inspect failed: ${detail.error}`
+      : "Session detail unavailable.";
+  }
+  const lines = [
+    "Session detail:",
+    `  Session id: ${typeof session.sessionId === "string" ? session.sessionId : "unknown"}`,
+    `  Profile: ${typeof session.shellProfile === "string" ? session.shellProfile : "general"}`,
+    `  Workflow stage: ${typeof session.workflowStage === "string" ? session.workflowStage : "idle"}`,
+    `  Resumability: ${typeof session.resumabilityState === "string" ? session.resumabilityState : "unknown"}`,
+    ...(typeof session.workspaceRoot === "string"
+      ? [`  Workspace root: ${session.workspaceRoot}`]
+      : []),
+    ...(typeof session.repoRoot === "string"
+      ? [`  Repo root: ${session.repoRoot}`]
+      : []),
+    ...(typeof session.branch === "string" ? [`  Branch: ${session.branch}`] : []),
+    ...(typeof session.head === "string" ? [`  Head: ${session.head}`] : []),
+    ...(typeof detail.objective === "string" ? [`  Objective: ${detail.objective}`] : []),
+    `  Messages: ${typeof session.messageCount === "number" ? session.messageCount : 0}`,
+    `  Pending approvals: ${typeof session.pendingApprovalCount === "number" ? session.pendingApprovalCount : 0}`,
+    `  Child sessions: ${typeof session.childSessionCount === "number" ? session.childSessionCount : 0}`,
+    `  Worktrees: ${typeof session.worktreeCount === "number" ? session.worktreeCount : 0}`,
+    ...(typeof session.activeTaskSummary === "string"
+      ? [`  Active task: ${session.activeTaskSummary}`]
+      : []),
+    ...(typeof session.lastAssistantOutputPreview === "string"
+      ? [`  Last assistant output: ${session.lastAssistantOutputPreview}`]
+      : []),
+  ];
+  const forkLineage = asRecord(session.forkLineage);
+  if (forkLineage) {
+    lines.push(
+      `  Forked from: ${typeof forkLineage.parentSessionId === "string" ? forkLineage.parentSessionId : "unknown"} (${typeof forkLineage.source === "string" ? forkLineage.source : "unknown"})`,
+    );
+  }
+  const backgroundRun = asRecord(detail.backgroundRun);
+  if (backgroundRun) {
+    lines.push("");
+    lines.push("Background run:");
+    lines.push(
+      `  ${typeof backgroundRun.runId === "string" ? backgroundRun.runId : "unknown"} ${typeof backgroundRun.state === "string" ? `[${backgroundRun.state}]` : ""} ${typeof backgroundRun.currentPhase === "string" ? backgroundRun.currentPhase : ""}`.trim(),
+    );
+    if (typeof backgroundRun.objective === "string") {
+      lines.push(`  Objective: ${backgroundRun.objective}`);
+    }
+    if (backgroundRun.checkpointAvailable === true) {
+      lines.push("  Checkpoint available: yes");
+    }
+  }
+  const history = Array.isArray(detail.recentHistory)
+    ? detail.recentHistory
+        .map((entry) => asRecord(entry))
+        .filter((entry): entry is Record<string, unknown> => Boolean(entry))
+    : [];
+  if (history.length > 0) {
+    lines.push("");
+    lines.push("Recent history:");
+    for (const entry of history) {
+      const sender =
+        typeof entry.sender === "string" ? entry.sender : "unknown";
+      const content =
+        typeof entry.content === "string" ? entry.content.trim() : "";
+      lines.push(`  ${sender}: ${content || "(empty)"}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+function formatSessionHistoryReply(
+  history: readonly Record<string, unknown>[],
+): string {
+  if (history.length === 0) {
+    return "No session history found.";
+  }
+  return [
+    `Session history (${history.length}):`,
+    ...history.map((entry) => {
+      const sender =
+        typeof entry.sender === "string" ? entry.sender : "unknown";
+      const toolName =
+        typeof entry.toolName === "string" ? ` ${entry.toolName}` : "";
+      const content =
+        typeof entry.content === "string" && entry.content.trim().length > 0
+          ? entry.content.trim()
+          : "(empty)";
+      return `  ${sender}${toolName}: ${content}`;
+    }),
   ].join("\n");
 }
 
@@ -2505,51 +2648,206 @@ export function createDaemonCommandRegistry(
   });
   commandRegistry.register({
     name: "session",
-    description: "Show the current shell session identity and workspace context",
+    description: "Inspect the current shell session or continuity catalog",
     global: true,
     handler: async (cmdCtx) => {
-      const resolvedSessionId = resolveSessionId(cmdCtx.sessionId);
-      const session = sessionMgr.get(resolvedSessionId);
-      const workspaceRoot =
-        (session?.metadata?.workspaceRoot as string | undefined) ??
-        (typeof ctx.getWebChatChannel()?.loadSessionWorkspaceRoot === "function"
-          ? await ctx.getWebChatChannel()!.loadSessionWorkspaceRoot(cmdCtx.sessionId)
-          : undefined) ??
-        ctx.getHostWorkspacePath() ??
-        process.cwd();
-      const modelInfo = ctx.getSessionModelInfo(cmdCtx.sessionId);
-      const shellProfile = resolveSessionShellProfile(session?.metadata ?? {});
-      const workflowState = resolveSessionWorkflowState(session?.metadata ?? {});
-      const runtimeStatusSnapshot = buildSessionRuntimeContractStatusSnapshot(
-        session?.metadata ?? {},
-      ) as Record<string, unknown> | undefined;
-      const tasks = await executeStructuredTool(baseToolHandler, "task.list", {
-        [TASK_LIST_ARG]: cmdCtx.sessionId,
-      });
-      const ownership = collectSessionWorkflowOwnership({
-        runtimeStatusSnapshot,
-        taskResult: tasks,
-        childInfos: ctx.listSubAgentInfo(resolvedSessionId),
-      });
+      const subcommand = cmdCtx.argv[0]?.toLowerCase() ?? "status";
+      const webChat = ctx.getWebChatChannel();
+      const replyCurrentSession = async (): Promise<void> => {
+        const resolvedSessionId = resolveSessionId(cmdCtx.sessionId);
+        const session = sessionMgr.get(resolvedSessionId);
+        const workspaceRoot =
+          (session?.metadata?.workspaceRoot as string | undefined) ??
+          (typeof webChat?.loadSessionWorkspaceRoot === "function"
+            ? await webChat.loadSessionWorkspaceRoot(cmdCtx.sessionId)
+            : undefined) ??
+          ctx.getHostWorkspacePath() ??
+          process.cwd();
+        const modelInfo = ctx.getSessionModelInfo(cmdCtx.sessionId);
+        const shellProfile = resolveSessionShellProfile(session?.metadata ?? {});
+        const workflowState = resolveSessionWorkflowState(session?.metadata ?? {});
+        const runtimeStatusSnapshot = buildSessionRuntimeContractStatusSnapshot(
+          session?.metadata ?? {},
+        ) as Record<string, unknown> | undefined;
+        const tasks = await executeStructuredTool(baseToolHandler, "task.list", {
+          [TASK_LIST_ARG]: cmdCtx.sessionId,
+        });
+        const ownership = collectSessionWorkflowOwnership({
+          runtimeStatusSnapshot,
+          taskResult: tasks,
+          childInfos: ctx.listSubAgentInfo(resolvedSessionId),
+        });
+        await cmdCtx.reply(
+          [
+            "Shell session:",
+            `  Session id: ${cmdCtx.sessionId}`,
+            `  Runtime session id: ${resolvedSessionId}`,
+            `  Profile: ${shellProfile}`,
+            `  Workflow stage: ${formatSessionWorkflowStage(workflowState.stage)}`,
+            `  Worktree mode: ${formatSessionWorktreeMode(workflowState.worktreeMode)}`,
+            ...(workflowState.objective
+              ? [`  Objective: ${workflowState.objective}`]
+              : []),
+            `  Workspace root: ${workspaceRoot}`,
+            `  History messages: ${session?.history.length ?? 0}`,
+            `  Model: ${
+              modelInfo
+                ? `${modelInfo.provider}:${modelInfo.model}${modelInfo.usedFallback ? " (fallback)" : ""}`
+                : "unknown"
+            }`,
+            "",
+            formatWorkflowOwnershipReply(ownership),
+          ].join("\n"),
+        );
+      };
+
+      if (!subcommand || subcommand === "status" || subcommand === "current") {
+        await replyCurrentSession();
+        return;
+      }
+
+      if (!webChat) {
+        await cmdCtx.reply("Session continuity is unavailable.");
+        return;
+      }
+
+      if (subcommand === "list") {
+        const jsonArgs = parseCommandJsonArgv(cmdCtx.argv);
+        const profile =
+          coerceSessionShellProfile(
+            jsonArgs?.profile ?? parseInlineFlag(cmdCtx.argv.slice(1), "profile"),
+          ) ?? undefined;
+        const sessions = await webChat.listContinuitySessionsForSession(
+          cmdCtx.sessionId,
+          {
+            activeOnly:
+              jsonArgs?.activeOnly === true ||
+              hasInlineFlag(cmdCtx.argv.slice(1), "active-only"),
+            limit:
+              typeof jsonArgs?.limit === "number"
+                ? jsonArgs.limit
+                : parseIntegerFlag(cmdCtx.argv.slice(1), "limit"),
+            ...(profile ? { shellProfile: profile } : {}),
+          },
+        );
+        await cmdCtx.reply(
+          formatContinuitySessionList(
+            sessions as unknown as readonly Record<string, unknown>[],
+          ),
+        );
+        return;
+      }
+
+      if (subcommand === "inspect") {
+        const jsonArgs = parseCommandJsonArgv(cmdCtx.argv);
+        const targetSessionId =
+          (typeof jsonArgs?.sessionId === "string" ? jsonArgs.sessionId : undefined) ??
+          cmdCtx.argv[1];
+        const detail = await webChat.inspectOwnedSession(
+          cmdCtx.sessionId,
+          targetSessionId,
+        );
+        await cmdCtx.reply(
+          detail
+            ? formatContinuitySessionInspect(detail)
+            : `Session "${targetSessionId ?? cmdCtx.sessionId}" not found.`,
+        );
+        return;
+      }
+
+      if (subcommand === "history") {
+        const jsonArgs = parseCommandJsonArgv(cmdCtx.argv);
+        const argvTarget = cmdCtx.argv[1]?.startsWith("--") ? undefined : cmdCtx.argv[1];
+        const history = await webChat.loadOwnedSessionHistory(cmdCtx.sessionId, {
+          sessionId:
+            (typeof jsonArgs?.sessionId === "string" ? jsonArgs.sessionId : undefined) ??
+            argvTarget,
+          limit:
+            typeof jsonArgs?.limit === "number"
+              ? jsonArgs.limit
+              : parseIntegerFlag(cmdCtx.argv.slice(1), "limit"),
+          includeTools:
+            jsonArgs?.includeTools === true ||
+            hasInlineFlag(cmdCtx.argv.slice(1), "include-tools"),
+        });
+        await cmdCtx.reply(
+          formatSessionHistoryReply(
+            history as unknown as readonly Record<string, unknown>[],
+          ),
+        );
+        return;
+      }
+
+      if (subcommand === "resume") {
+        const jsonArgs = parseCommandJsonArgv(cmdCtx.argv);
+        const targetSessionId =
+          (typeof jsonArgs?.sessionId === "string" ? jsonArgs.sessionId : undefined) ??
+          cmdCtx.argv[1];
+        if (!targetSessionId) {
+          await cmdCtx.reply("Usage: /session resume <sessionId>");
+          return;
+        }
+        const resumed = await webChat.resumeOwnedSession(
+          cmdCtx.sessionId,
+          targetSessionId,
+        );
+        await cmdCtx.reply(
+          resumed
+            ? [
+                `Resumed session ${resumed.sessionId}.`,
+                `  Messages: ${resumed.messageCount}`,
+                ...(resumed.workspaceRoot
+                  ? [`  Workspace root: ${resumed.workspaceRoot}`]
+                  : []),
+              ].join("\n")
+            : `Session "${targetSessionId}" not found.`,
+        );
+        return;
+      }
+
+      if (subcommand === "fork") {
+        const jsonArgs = parseCommandJsonArgv(cmdCtx.argv);
+        const argvTarget = cmdCtx.argv[1]?.startsWith("--") ? undefined : cmdCtx.argv[1];
+        const profile =
+          coerceSessionShellProfile(
+            jsonArgs?.profile ?? parseInlineFlag(cmdCtx.argv.slice(1), "profile"),
+          ) ?? undefined;
+        const objective =
+          typeof jsonArgs?.objective === "string"
+            ? jsonArgs.objective
+            : parseInlineFlag(cmdCtx.argv.slice(1), "objective");
+        const forked = await webChat.forkOwnedSessionForRequester(
+          cmdCtx.sessionId,
+          {
+            ...(argvTarget ? { sessionId: argvTarget } : {}),
+            ...(profile ? { shellProfile: profile } : {}),
+            ...(objective ? { objective } : {}),
+          },
+        );
+        if (!forked) {
+          await cmdCtx.reply(
+            `Session "${argvTarget ?? cmdCtx.sessionId}" could not be forked.`,
+          );
+          return;
+        }
+        const sessionDetail = asRecord(forked.session);
+        await cmdCtx.reply(
+          [
+            `Forked session ${typeof forked.targetSessionId === "string" ? forked.targetSessionId : "unknown"} from ${
+              typeof forked.sourceSessionId === "string" ? forked.sourceSessionId : cmdCtx.sessionId
+            }.`,
+            `  Source: ${typeof forked.forkSource === "string" ? forked.forkSource : "unknown"}`,
+            ...(typeof sessionDetail?.preview === "string"
+              ? [`  Preview: ${sessionDetail.preview}`]
+              : []),
+            "  Use /session resume <sessionId> to switch into the fork.",
+          ].join("\n"),
+        );
+        return;
+      }
+
       await cmdCtx.reply(
-        [
-          "Shell session:",
-          `  Session id: ${cmdCtx.sessionId}`,
-          `  Runtime session id: ${resolvedSessionId}`,
-          `  Profile: ${shellProfile}`,
-          `  Workflow stage: ${formatSessionWorkflowStage(workflowState.stage)}`,
-          `  Worktree mode: ${formatSessionWorktreeMode(workflowState.worktreeMode)}`,
-          ...(workflowState.objective ? [`  Objective: ${workflowState.objective}`] : []),
-          `  Workspace root: ${workspaceRoot}`,
-          `  History messages: ${session?.history.length ?? 0}`,
-          `  Model: ${
-            modelInfo
-              ? `${modelInfo.provider}:${modelInfo.model}${modelInfo.usedFallback ? " (fallback)" : ""}`
-              : "unknown"
-          }`,
-          "",
-          formatWorkflowOwnershipReply(ownership),
-        ].join("\n"),
+        "Usage: /session [status|list|inspect [sessionId]|history [sessionId] [--limit N] [--include-tools]|resume <sessionId>|fork [sessionId] [--objective TEXT] [--profile PROFILE]]",
       );
     },
   });

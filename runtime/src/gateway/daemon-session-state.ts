@@ -48,7 +48,7 @@ import {
 
 const WEB_SESSION_RUNTIME_STATE_KEY_PREFIX = "webchat:runtime-state:";
 
-interface PersistedWebSessionRuntimeState {
+export interface PersistedWebSessionRuntimeState {
   readonly version: 5;
   readonly shellProfile?: SessionShellProfile;
   readonly workflowState?: SessionWorkflowState;
@@ -338,6 +338,23 @@ function coercePersistedWebSessionRuntimeState(
   };
 }
 
+function clonePersistedWebSessionRuntimeState(
+  state: PersistedWebSessionRuntimeState,
+): PersistedWebSessionRuntimeState {
+  return JSON.parse(
+    JSON.stringify(state),
+  ) as PersistedWebSessionRuntimeState;
+}
+
+export async function loadPersistedWebSessionRuntimeState(
+  memoryBackend: MemoryBackend,
+  webSessionId: string,
+): Promise<PersistedWebSessionRuntimeState | undefined> {
+  return coercePersistedWebSessionRuntimeState(
+    await memoryBackend.get(webSessionRuntimeStateKey(webSessionId)),
+  );
+}
+
 export function buildSessionStatefulOptions(
   session: Session,
 ): ChatExecuteParams["stateful"] | undefined {
@@ -451,6 +468,110 @@ export async function hydrateWebSessionRuntimeState(
     session.metadata[SESSION_RUNTIME_CONTRACT_STATUS_SNAPSHOT_METADATA_KEY] =
       persisted.runtimeContractStatusSnapshot;
   }
+}
+
+export async function forkWebSessionRuntimeState(
+  memoryBackend: MemoryBackend,
+  params: {
+    sourceWebSessionId: string;
+    targetWebSessionId: string;
+    shellProfile?: SessionShellProfile;
+    workflowState?: Partial<SessionWorkflowState>;
+  },
+): Promise<boolean> {
+  const persisted = await loadPersistedWebSessionRuntimeState(
+    memoryBackend,
+    params.sourceWebSessionId,
+  );
+  if (!persisted) {
+    return false;
+  }
+
+  const artifactStore = new MemoryArtifactStore(memoryBackend);
+  const next = {
+    ...clonePersistedWebSessionRuntimeState(persisted),
+  } as {
+    version: 5;
+    shellProfile?: SessionShellProfile;
+    workflowState?: SessionWorkflowState;
+    statefulResumeAnchor?: LLMStatefulResumeAnchor;
+    statefulHistoryCompacted?: boolean;
+    artifactSnapshotId?: string;
+    artifactSessionId?: string;
+    runtimeContractSnapshot?: RuntimeContractSnapshot;
+    runtimeContractStatusSnapshot?: RuntimeContractStatusSnapshot;
+    activeTaskContext?: unknown;
+  };
+  const mergedWorkflowState = (() => {
+    if (persisted.workflowState) {
+      const objective =
+        params.workflowState?.objective !== undefined
+          ? params.workflowState.objective
+          : persisted.workflowState.objective;
+      return {
+        ...persisted.workflowState,
+        ...(params.workflowState?.stage
+          ? { stage: params.workflowState.stage }
+          : {}),
+        ...(params.workflowState?.worktreeMode
+          ? { worktreeMode: params.workflowState.worktreeMode }
+          : {}),
+        ...(objective ? { objective } : {}),
+      } satisfies SessionWorkflowState;
+    }
+    if (!params.workflowState) {
+      return undefined;
+    }
+    return {
+      stage: params.workflowState.stage ?? "idle",
+      worktreeMode: params.workflowState.worktreeMode ?? "off",
+      enteredAt: 0,
+      updatedAt: 0,
+      ...(params.workflowState.objective
+        ? { objective: params.workflowState.objective }
+        : {}),
+    } satisfies SessionWorkflowState;
+  })();
+
+  delete next.activeTaskContext;
+  delete next.runtimeContractSnapshot;
+  delete next.runtimeContractStatusSnapshot;
+
+  if (params.shellProfile) {
+    next.shellProfile = params.shellProfile;
+  }
+  if (mergedWorkflowState) {
+    next.workflowState = mergedWorkflowState;
+  }
+
+  if (persisted.artifactSnapshotId) {
+    const snapshot = await artifactStore.loadSnapshot(
+      persisted.artifactSessionId ?? params.sourceWebSessionId,
+    );
+    if (snapshot) {
+      await artifactStore.persistSnapshot({
+        state: {
+          ...snapshot.state,
+          sessionId: params.targetWebSessionId,
+        },
+        records: snapshot.records.map((record) => ({
+          ...record,
+          sessionId: params.targetWebSessionId,
+        })),
+      });
+      next.artifactSessionId = params.targetWebSessionId;
+      next.artifactSnapshotId = snapshot.state.snapshotId;
+    } else {
+      delete next.artifactSessionId;
+      delete next.artifactSnapshotId;
+    }
+  }
+
+  await memoryBackend.set(
+    webSessionRuntimeStateKey(params.targetWebSessionId),
+    next,
+  );
+  return true;
 }
 
 export function resolveSessionStatefulContinuation(

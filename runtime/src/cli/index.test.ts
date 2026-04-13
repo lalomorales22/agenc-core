@@ -62,6 +62,17 @@ const { runShellCommand, runShellExecCommand } = vi.hoisted(() => ({
   runShellCommand: vi.fn(async () => 0),
   runShellExecCommand: vi.fn(async () => 0),
 }));
+const {
+  runSessionContinuityListCommand,
+  runSessionContinuityInspectCommand,
+  runSessionContinuityHistoryCommand,
+  runSessionContinuityForkCommand,
+} = vi.hoisted(() => ({
+  runSessionContinuityListCommand: vi.fn(async () => 0),
+  runSessionContinuityInspectCommand: vi.fn(async () => 0),
+  runSessionContinuityHistoryCommand: vi.fn(async () => 0),
+  runSessionContinuityForkCommand: vi.fn(async () => 0),
+}));
 
 vi.mock("./init.js", () => ({
   runInitCommand,
@@ -121,6 +132,13 @@ vi.mock("./agent-cli.js", async () => {
 vi.mock("./shell.js", () => ({
   runShellCommand,
   runShellExecCommand,
+}));
+
+vi.mock("./session-continuity.js", () => ({
+  runSessionContinuityListCommand,
+  runSessionContinuityInspectCommand,
+  runSessionContinuityHistoryCommand,
+  runSessionContinuityForkCommand,
 }));
 
 import { runCli } from "./index.js";
@@ -391,6 +409,96 @@ describe("runtime root CLI", () => {
     );
   });
 
+  it("routes session list through the continuity control-plane surface", async () => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+
+    const code = await runCli({
+      argv: ["session", "list", "--active-only", "--limit", "5", "--profile", "coding"],
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(code).toBe(0);
+    expect(runSessionContinuityListCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        activeOnly: true,
+        limit: 5,
+        profile: "coding",
+      }),
+    );
+  });
+
+  it("routes session inspect through the continuity control-plane surface", async () => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+
+    const code = await runCli({
+      argv: ["session", "inspect", "session-123"],
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(code).toBe(0);
+    expect(runSessionContinuityInspectCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        sessionId: "session-123",
+      }),
+    );
+  });
+
+  it("routes session history through the continuity control-plane surface", async () => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+
+    const code = await runCli({
+      argv: ["session", "history", "session-123", "--limit", "20", "--include-tools"],
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(code).toBe(0);
+    expect(runSessionContinuityHistoryCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        sessionId: "session-123",
+        limit: 20,
+        includeTools: true,
+      }),
+    );
+  });
+
+  it("routes session fork through the continuity control-plane surface", async () => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+
+    const code = await runCli({
+      argv: [
+        "session",
+        "fork",
+        "session-123",
+        "--objective",
+        "Investigate regression",
+        "--profile",
+        "research",
+      ],
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(code).toBe(0);
+    expect(runSessionContinuityForkCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        sessionId: "session-123",
+        objective: "Investigate regression",
+        profile: "research",
+      }),
+    );
+  });
+
   it("routes resume to the interactive shell path with coding default profile", async () => {
     const stdout = captureStream();
     const stderr = captureStream();
@@ -407,6 +515,26 @@ describe("runtime root CLI", () => {
       expect.objectContaining({
         profile: "coding",
         sessionId: "session-456",
+      }),
+    );
+  });
+
+  it("routes session resume to the interactive shell path", async () => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+
+    const code = await runCli({
+      argv: ["session", "resume", "session-789"],
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(code).toBe(0);
+    expect(runShellCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        profile: "general",
+        sessionId: "session-789",
       }),
     );
   });

@@ -54,6 +54,7 @@ binary remains `agenc`.
 - bare `agenc` opens the `general` shell by default
 - `agenc shell [profile]` opens a line-oriented terminal shell over the daemon's WebChat/control-plane path
 - `agenc resume [--profile <name>]` reopens the shell session for the current workspace/profile
+- `agenc session list|inspect|history|resume|fork` is the continuity surface for active and resumable daemon-backed sessions
 - `agenc console` opens the explicit operator console compatibility surface
 - `agenc ui` opens or prints the local dashboard URL on `/ui/`
 
@@ -70,6 +71,11 @@ Current coding-shell command surface on the same daemon:
 - `agenc review`
 - `/verify` inside the shell for verification-stage checks or delegated verifier runs
 - `agenc session`
+- `agenc session list --active-only`
+- `agenc session inspect <sessionId>`
+- `agenc session history <sessionId> --include-tools`
+- `agenc session resume <sessionId>`
+- `agenc session fork <sessionId> --objective "Investigate variant"`
 - `agenc permissions`
 - `agenc mcp`
 - `agenc skills`

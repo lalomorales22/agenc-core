@@ -59,6 +59,7 @@ Current shell entrypoint:
 - `agenc` opens the `general` shell on the public wrapper path
 - `agenc shell [profile]`
 - `agenc resume [--profile <name>]`
+- `agenc session list|inspect|history|resume|fork`
 - `agenc-runtime shell [profile]` as the compatibility alias
 - `agenc console` for the explicit operator-console compatibility path
 
@@ -75,6 +76,11 @@ Current coding shell command surface:
 - `agenc review`
 - `/verify` inside the shell for verification-stage checks or delegated verifier runs
 - `agenc session`
+- `agenc session list --active-only`
+- `agenc session inspect <sessionId>`
+- `agenc session history <sessionId> --include-tools`
+- `agenc session resume <sessionId>`
+- `agenc session fork <sessionId> --objective "Investigate variant"`
 - `agenc permissions`
 - `agenc mcp`
 - `agenc skills`

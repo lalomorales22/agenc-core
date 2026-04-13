@@ -6,7 +6,9 @@ import {
   buildSessionStatefulOptions,
   clearWebSessionRuntimeState,
   enrichRuntimeContractSnapshotForSession,
+  forkWebSessionRuntimeState,
   hydrateWebSessionRuntimeState,
+  loadPersistedWebSessionRuntimeState,
   persistSessionRuntimeContractStatusSnapshot,
   persistWebSessionRuntimeState,
 } from "./daemon-session-state.js";
@@ -346,6 +348,80 @@ describe("web session runtime state helpers", () => {
     expect(hydrated.metadata[SESSION_SHELL_PROFILE_METADATA_KEY]).toBe(
       "coding",
     );
+  });
+
+  it("forks persisted runtime state while stripping live task ownership", async () => {
+    const memoryBackend = createMemoryBackendStub();
+    const artifactContext: ArtifactCompactionState = {
+      version: 1,
+      snapshotId: "snapshot:fork",
+      sessionId: "session:test",
+      createdAt: 123,
+      source: "session_compaction",
+      historyDigest: "digest-fork",
+      sourceMessageCount: 6,
+      retainedTailCount: 3,
+      openLoops: [],
+      artifactRefs: [],
+    };
+
+    await persistWebSessionRuntimeState(
+      memoryBackend,
+      "web-session-source",
+      createSession({
+        [SESSION_SHELL_PROFILE_METADATA_KEY]: "coding",
+        [SESSION_WORKFLOW_STATE_METADATA_KEY]: {
+          stage: "implement",
+          worktreeMode: "child_optional",
+          objective: "Ship the continuity layer",
+          enteredAt: 10,
+          updatedAt: 20,
+        },
+        [SESSION_STATEFUL_RESUME_ANCHOR_METADATA_KEY]: {
+          previousResponseId: "resp-123",
+        },
+        [SESSION_STATEFUL_HISTORY_COMPACTED_METADATA_KEY]: true,
+        [SESSION_STATEFUL_ARTIFACT_CONTEXT_METADATA_KEY]: artifactContext,
+        [SESSION_ACTIVE_TASK_CONTEXT_METADATA_KEY]: {
+          taskId: "task-live",
+        },
+      }),
+    );
+
+    await expect(
+      forkWebSessionRuntimeState(memoryBackend, {
+        sourceWebSessionId: "web-session-source",
+        targetWebSessionId: "web-session-target",
+        shellProfile: "research",
+        workflowState: {
+          objective: "Investigate a branch",
+        },
+      }),
+    ).resolves.toBe(true);
+
+    expect(
+      await loadPersistedWebSessionRuntimeState(
+        memoryBackend,
+        "web-session-target",
+      ),
+    ).toMatchObject({
+      shellProfile: "research",
+      workflowState: expect.objectContaining({
+        objective: "Investigate a branch",
+      }),
+      statefulResumeAnchor: {
+        previousResponseId: "resp-123",
+      },
+      statefulHistoryCompacted: true,
+    });
+    expect(
+      (
+        await loadPersistedWebSessionRuntimeState(
+          memoryBackend,
+          "web-session-target",
+        )
+      )?.activeTaskContext,
+    ).toBeUndefined();
   });
 
   it("persists and hydrates runtime contract status snapshots across web-session resume", async () => {

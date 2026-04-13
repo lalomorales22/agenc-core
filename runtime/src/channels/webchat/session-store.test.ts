@@ -45,6 +45,45 @@ describe("WebChatSessionStore", () => {
       label: "Check the deployment logs for errors",
       messageCount: 2,
       lastActiveAt: 250,
+      metadata: {
+        lastAssistantOutputPreview: "Still checking in the background.",
+      },
+    });
+  });
+
+  it("persists fork lineage and label updates without incrementing message count", async () => {
+    const backend = new InMemoryBackend();
+    const store = new WebChatSessionStore({ memoryBackend: backend });
+
+    await store.ensureSession({
+      sessionId: "session-4",
+      ownerKey: "web:browser-4",
+      createdAt: 400,
+    });
+    await store.updateSessionMetadata({
+      sessionId: "session-4",
+      ownerKey: "web:browser-4",
+      label: "Forked continuity session",
+      updatedAt: 450,
+      metadata: {
+        forkLineage: {
+          parentSessionId: "session-1",
+          source: "runtime_state",
+          forkedAt: 450,
+        },
+      },
+    });
+
+    expect(await store.loadSession("session-4")).toMatchObject({
+      label: "Forked continuity session",
+      messageCount: 0,
+      metadata: {
+        forkLineage: {
+          parentSessionId: "session-1",
+          source: "runtime_state",
+          forkedAt: 450,
+        },
+      },
     });
   });
 

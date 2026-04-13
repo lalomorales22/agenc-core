@@ -112,6 +112,59 @@ function makeCommandRegistry(params?: {
     status: "completed",
   }));
   const listSubAgentInfo = vi.fn(() => []);
+  const webChatChannel = {
+    loadSessionWorkspaceRoot: vi.fn(async () => "/tmp/project"),
+    listContinuitySessionsForSession: vi.fn(async () => [
+      {
+        sessionId: "session-1",
+        preview: "Ship shell",
+        shellProfile: "coding",
+        workflowStage: "implement",
+        resumabilityState: "active",
+        messageCount: 6,
+        branch: "feature/coding-first-shell",
+      },
+    ]),
+    inspectOwnedSession: vi.fn(async () => ({
+      session: {
+        sessionId: "session-1",
+        shellProfile: "coding",
+        workflowStage: "implement",
+        resumabilityState: "active",
+        messageCount: 6,
+        pendingApprovalCount: 0,
+        childSessionCount: 1,
+        worktreeCount: 1,
+        workspaceRoot: "/tmp/project",
+        repoRoot: "/tmp/project",
+        branch: "feature/coding-first-shell",
+        head: "abc123",
+        preview: "Ship shell",
+      },
+      recentHistory: [
+        { sender: "user", content: "ship it" },
+        { sender: "agent", content: "working on it" },
+      ],
+    })),
+    loadOwnedSessionHistory: vi.fn(async () => [
+      { sender: "user", content: "ship it" },
+      { sender: "tool", toolName: "system.grep", content: "match" },
+    ]),
+    resumeOwnedSession: vi.fn(async () => ({
+      sessionId: "session-2",
+      messageCount: 4,
+      workspaceRoot: "/tmp/project",
+    })),
+    forkOwnedSessionForRequester: vi.fn(async () => ({
+      sourceSessionId: "session-1",
+      targetSessionId: "session-fork-1",
+      forkSource: "runtime_state",
+      session: {
+        sessionId: "session-fork-1",
+        preview: "Ship shell",
+      },
+    })),
+  };
   const updateSessionPolicyState = vi.fn((params) => ({
     elevatedPatterns:
       params.operation === "allow" && params.pattern ? [params.pattern] : [],
@@ -281,7 +334,7 @@ function makeCommandRegistry(params?: {
       },
       yolo: false,
       resetWebSessionContext: vi.fn(async () => {}),
-      getWebChatChannel: () => null,
+      getWebChatChannel: () => webChatChannel as any,
       getHostWorkspacePath: () => "/tmp/project",
       getChatExecutor: () =>
         ({
@@ -362,6 +415,7 @@ function makeCommandRegistry(params?: {
     getSessionPolicyState,
     runNamedAgentTask,
     listSubAgentInfo,
+    webChatChannel,
     updateSessionPolicyState,
     baseToolHandler,
   };
@@ -608,6 +662,90 @@ describe("createDaemonCommandRegistry coding shell commands", () => {
     expect(replies[0]).toContain("Workflow stage: review");
     expect(replies[0]).toContain("Worktree mode: child optional");
     expect(replies[0]).toContain("Objective: Review the shell workflow");
+  });
+
+  it("lists resumable sessions via /session list", async () => {
+    const { registry, webChatChannel } = makeCommandRegistry();
+
+    const replies = await dispatchAndCollect(
+      registry,
+      '/session list {"activeOnly":true,"limit":5,"profile":"coding"}',
+    );
+
+    expect(replies[0]).toContain("Resumable sessions (1):");
+    expect(replies[0]).toContain("session-1");
+    expect(webChatChannel.listContinuitySessionsForSession).toHaveBeenCalledWith(
+      "session-1",
+      expect.objectContaining({
+        activeOnly: true,
+        limit: 5,
+        shellProfile: "coding",
+      }),
+    );
+  });
+
+  it("shows continuity detail via /session inspect", async () => {
+    const { registry, webChatChannel } = makeCommandRegistry();
+
+    const replies = await dispatchAndCollect(registry, "/session inspect session-1");
+
+    expect(replies[0]).toContain("Session detail:");
+    expect(replies[0]).toContain("Branch: feature/coding-first-shell");
+    expect(webChatChannel.inspectOwnedSession).toHaveBeenCalledWith(
+      "session-1",
+      "session-1",
+    );
+  });
+
+  it("shows continuity history via /session history", async () => {
+    const { registry, webChatChannel } = makeCommandRegistry();
+
+    const replies = await dispatchAndCollect(
+      registry,
+      "/session history session-1 --include-tools",
+    );
+
+    expect(replies[0]).toContain("Session history (2):");
+    expect(replies[0]).toContain("tool system.grep: match");
+    expect(webChatChannel.loadOwnedSessionHistory).toHaveBeenCalledWith(
+      "session-1",
+      expect.objectContaining({
+        sessionId: "session-1",
+        includeTools: true,
+      }),
+    );
+  });
+
+  it("resumes another owned session via /session resume", async () => {
+    const { registry, webChatChannel } = makeCommandRegistry();
+
+    const replies = await dispatchAndCollect(registry, "/session resume session-2");
+
+    expect(replies[0]).toContain("Resumed session session-2.");
+    expect(webChatChannel.resumeOwnedSession).toHaveBeenCalledWith(
+      "session-1",
+      "session-2",
+    );
+  });
+
+  it("forks a session via /session fork", async () => {
+    const { registry, webChatChannel } = makeCommandRegistry();
+
+    const replies = await dispatchAndCollect(
+      registry,
+      "/session fork session-1 --objective Investigate --profile research",
+    );
+
+    expect(replies[0]).toContain("Forked session session-fork-1 from session-1.");
+    expect(replies[0]).toContain("Use /session resume <sessionId> to switch into the fork.");
+    expect(webChatChannel.forkOwnedSessionForRequester).toHaveBeenCalledWith(
+      "session-1",
+      expect.objectContaining({
+        sessionId: "session-1",
+        objective: "Investigate",
+        shellProfile: "research",
+      }),
+    );
   });
 
   it("shows repo inventory for /files", async () => {

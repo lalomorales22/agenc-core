@@ -25,9 +25,22 @@ export interface PersistedWebChatPolicyContext {
   readonly projectId?: string;
 }
 
+export type PersistedWebChatForkSource =
+  | "checkpoint"
+  | "runtime_state"
+  | "history";
+
+export interface PersistedWebChatForkLineage {
+  readonly parentSessionId: string;
+  readonly source: PersistedWebChatForkSource;
+  readonly forkedAt: number;
+}
+
 export interface PersistedWebChatSessionMetadata {
   readonly policyContext?: PersistedWebChatPolicyContext;
   readonly workspaceRoot?: string;
+  readonly lastAssistantOutputPreview?: string;
+  readonly forkLineage?: PersistedWebChatForkLineage;
 }
 
 export interface PersistedWebChatOwnerCredential {
@@ -127,12 +140,49 @@ function coerceSessionMetadata(
     typeof raw.workspaceRoot === "string" && raw.workspaceRoot.trim().length > 0
       ? raw.workspaceRoot.trim()
       : undefined;
-  if (!policyContext && !workspaceRoot) {
+  const lastAssistantOutputPreview =
+    typeof raw.lastAssistantOutputPreview === "string" &&
+    raw.lastAssistantOutputPreview.trim().length > 0
+      ? raw.lastAssistantOutputPreview.trim()
+      : undefined;
+  const forkLineage = coerceForkLineage(raw.forkLineage);
+  if (!policyContext && !workspaceRoot && !lastAssistantOutputPreview && !forkLineage) {
     return undefined;
   }
   return {
     ...(policyContext ? { policyContext } : {}),
     ...(workspaceRoot ? { workspaceRoot } : {}),
+    ...(lastAssistantOutputPreview ? { lastAssistantOutputPreview } : {}),
+    ...(forkLineage ? { forkLineage } : {}),
+  };
+}
+
+function coerceForkLineage(
+  value: unknown,
+): PersistedWebChatForkLineage | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const raw = value as Record<string, unknown>;
+  const parentSessionId =
+    typeof raw.parentSessionId === "string" && raw.parentSessionId.trim().length > 0
+      ? raw.parentSessionId.trim()
+      : undefined;
+  const source =
+    raw.source === "checkpoint" ||
+    raw.source === "runtime_state" ||
+    raw.source === "history"
+      ? raw.source
+      : undefined;
+  const forkedAt =
+    typeof raw.forkedAt === "number" && Number.isFinite(raw.forkedAt)
+      ? raw.forkedAt
+      : undefined;
+  if (!parentSessionId || !source || forkedAt === undefined) {
+    return undefined;
+  }
+  return {
+    parentSessionId,
+    source,
+    forkedAt,
   };
 }
 
@@ -173,12 +223,24 @@ function mergeSessionMetadata(
       }
     : current?.policyContext;
   const nextWorkspaceRoot = update?.workspaceRoot ?? current?.workspaceRoot;
-  if (!nextPolicyContext && !nextWorkspaceRoot) {
+  const nextLastAssistantOutputPreview =
+    update?.lastAssistantOutputPreview ?? current?.lastAssistantOutputPreview;
+  const nextForkLineage = update?.forkLineage ?? current?.forkLineage;
+  if (
+    !nextPolicyContext &&
+    !nextWorkspaceRoot &&
+    !nextLastAssistantOutputPreview &&
+    !nextForkLineage
+  ) {
     return undefined;
   }
   return {
     ...(nextPolicyContext ? { policyContext: nextPolicyContext } : {}),
     ...(nextWorkspaceRoot ? { workspaceRoot: nextWorkspaceRoot } : {}),
+    ...(nextLastAssistantOutputPreview
+      ? { lastAssistantOutputPreview: nextLastAssistantOutputPreview }
+      : {}),
+    ...(nextForkLineage ? { forkLineage: nextForkLineage } : {}),
   };
 }
 
@@ -200,6 +262,14 @@ function buildLabel(
   }
   const compact = content.replace(/\s+/g, " ").trim();
   return compact.length > 0 ? compact.slice(0, 80) : "New conversation";
+}
+
+function compactPreview(content: string, maxChars = 160): string | undefined {
+  const compact = content.replace(/\s+/g, " ").trim();
+  if (compact.length === 0) {
+    return undefined;
+  }
+  return compact.slice(0, maxChars);
 }
 
 export class WebChatSessionStore {
@@ -297,6 +367,7 @@ export class WebChatSessionStore {
     sessionId: string;
     ownerKey: string;
     createdAt?: number;
+    label?: string;
     metadata?: PersistedWebChatSessionMetadata;
   }): Promise<PersistedWebChatSession> {
     const createdAt = params.createdAt ?? Date.now();
@@ -322,7 +393,10 @@ export class WebChatSessionStore {
         version: 1,
         sessionId: params.sessionId,
         ownerKey: params.ownerKey,
-        label: "New conversation",
+        label:
+          typeof params.label === "string" && params.label.trim().length > 0
+            ? params.label.trim()
+            : "New conversation",
         createdAt,
         updatedAt: createdAt,
         lastActiveAt: createdAt,
@@ -351,6 +425,19 @@ export class WebChatSessionStore {
       if (current && current.ownerKey !== params.ownerKey) {
         throw new Error("Session owner mismatch");
       }
+      const nextMetadata = mergeSessionMetadata(
+        current?.metadata,
+        params.sender === "agent"
+          ? {
+              ...(params.metadata ?? {}),
+              ...(compactPreview(params.content)
+                ? {
+                    lastAssistantOutputPreview: compactPreview(params.content),
+                  }
+                : {}),
+            }
+          : params.metadata,
+      );
 
       const next: PersistedWebChatSession = {
         version: 1,
@@ -361,14 +448,7 @@ export class WebChatSessionStore {
         updatedAt: timestamp,
         lastActiveAt: timestamp,
         messageCount: (current?.messageCount ?? 0) + 1,
-        ...(mergeSessionMetadata(current?.metadata, params.metadata)
-          ? {
-              metadata: mergeSessionMetadata(
-                current?.metadata,
-                params.metadata,
-              ),
-            }
-          : {}),
+        ...(nextMetadata ? { metadata: nextMetadata } : {}),
       };
 
       await this.writeSession(next);
@@ -388,6 +468,41 @@ export class WebChatSessionStore {
       (session): session is PersistedWebChatSession =>
         session !== undefined && session.ownerKey === ownerKey,
     );
+  }
+
+  async updateSessionMetadata(params: {
+    sessionId: string;
+    ownerKey: string;
+    metadata: PersistedWebChatSessionMetadata;
+    label?: string;
+    updatedAt?: number;
+  }): Promise<PersistedWebChatSession> {
+    const updatedAt = params.updatedAt ?? Date.now();
+    return this.queue.run(params.sessionId, async () => {
+      const current = await this.loadSession(params.sessionId);
+      if (!current) {
+        return this.ensureSession({
+          sessionId: params.sessionId,
+          ownerKey: params.ownerKey,
+          createdAt: updatedAt,
+          metadata: params.metadata,
+        });
+      }
+      if (current.ownerKey !== params.ownerKey) {
+        throw new Error("Session owner mismatch");
+      }
+      const next: PersistedWebChatSession = {
+        ...current,
+        updatedAt,
+        ...(typeof params.label === "string" && params.label.trim().length > 0
+          ? { label: params.label.trim() }
+          : {}),
+        metadata: mergeSessionMetadata(current.metadata, params.metadata),
+      };
+      await this.writeSession(next);
+      await this.addOwnerIndex(params.ownerKey, params.sessionId);
+      return next;
+    });
   }
 
   private async writeSession(session: PersistedWebChatSession): Promise<void> {

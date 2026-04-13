@@ -137,6 +137,12 @@ import { runInitCommand } from "./init.js";
 import { runSessionsListCommand, runSessionsKillCommand } from "./sessions.js";
 import { runLogsCommand } from "./logs.js";
 import { runShellCommand, runShellExecCommand } from "./shell.js";
+import {
+  runSessionContinuityForkCommand,
+  runSessionContinuityHistoryCommand,
+  runSessionContinuityInspectCommand,
+  runSessionContinuityListCommand,
+} from "./session-continuity.js";
 import { coerceSessionShellProfile } from "../gateway/shell-profile.js";
 import {
   runConnectorAddTelegramCommand,
@@ -163,6 +169,10 @@ import type {
   ConfigShowOptions,
   SessionsListOptions,
   SessionsKillOptions,
+  SessionContinuityListOptions,
+  SessionContinuityInspectOptions,
+  SessionContinuityHistoryOptions,
+  SessionContinuityForkOptions,
   LogsOptions,
 } from "./types.js";
 import {
@@ -367,6 +377,9 @@ const SHELL_EXEC_COMMAND_OPTIONS = new Set([
   "objective",
   "worktrees",
   "delegate",
+  "limit",
+  "active-only",
+  "include-tools",
 ]);
 const JOBS_COMMAND_OPTIONS = new Set<string>([]);
 const CONNECTOR_LIST_OPTIONS = new Set(["pid-path", "port"]);
@@ -905,7 +918,7 @@ function buildHelp(): string {
     "status [--help] [options]",
     "shell [profile] [--help] [options]",
     "resume [--help] [options]",
-    "session [status|list|kill] [--help] [options]",
+    "session [status|list|inspect|history|resume|fork] [--help] [options]",
     "plan [--help] [options]",
     "tasks [list|get|wait|output] [--help] [options]",
     "files [query] [--help] [options]",
@@ -966,14 +979,14 @@ function buildHelp(): string {
     "  review                  Summarize repo state for review",
     "",
     "Shell control commands:",
-    "  session [status|list|kill]     Inspect the current shell session or control-plane sessions",
+    "  session [status|list|inspect|history|resume|fork]  Inspect the current shell session or continuity catalog",
     "  permissions                    Show policy/approval state",
     "  mcp                            Show configured MCP servers and discovered MCP tools",
     "  skills                         List available skills from the shell surface",
     "  model                          Show or switch the configured model",
     "  effort                         Show or switch configured reasoning effort",
     "",
-    "Session commands:",
+    "Low-level session commands:",
     "  sessions list              List active control plane sessions",
     "  sessions kill <sessionId>  Disconnect a control plane session",
     "",
@@ -3752,28 +3765,84 @@ async function dispatchPhase3ShellCommands(
         );
       }
       if (subcommand === "list") {
-        const sessionsOpts: SessionsListOptions = {
+        const sessionsOpts: SessionContinuityListOptions = {
           pidPath:
             parseOptionalString(parsed.flags["pid-path"]) ?? getDefaultPidPath(),
           controlPlanePort: parseIntValue(parsed.flags.port),
+          activeOnly: normalizeBool(parsed.flags["active-only"], false),
+          limit: parseOptionalNumberFlag(parsed.flags.limit),
+          profile: parseOptionalStringFlag(parsed.flags.profile),
         };
-        return await runSessionsListCommand(context, sessionsOpts);
+        return await runSessionContinuityListCommand(context, sessionsOpts);
       }
-      if (subcommand === "kill") {
+      if (subcommand === "inspect") {
         const sessionId = parsed.positional[2] as string | undefined;
         if (!sessionId) {
           throw createCliError(
-            "session kill requires a session ID argument",
+            "session inspect requires a session ID argument",
             ERROR_CODES.MISSING_SESSION_ID,
           );
         }
-        const killOpts: SessionsKillOptions = {
+        const inspectOpts: SessionContinuityInspectOptions = {
           pidPath:
             parseOptionalString(parsed.flags["pid-path"]) ?? getDefaultPidPath(),
           sessionId,
           controlPlanePort: parseIntValue(parsed.flags.port),
         };
-        return await runSessionsKillCommand(context, killOpts);
+        return await runSessionContinuityInspectCommand(context, inspectOpts);
+      }
+      if (subcommand === "history") {
+        const sessionId = parsed.positional[2] as string | undefined;
+        if (!sessionId) {
+          throw createCliError(
+            "session history requires a session ID argument",
+            ERROR_CODES.MISSING_SESSION_ID,
+          );
+        }
+        const historyOpts: SessionContinuityHistoryOptions = {
+          pidPath:
+            parseOptionalString(parsed.flags["pid-path"]) ?? getDefaultPidPath(),
+          sessionId,
+          controlPlanePort: parseIntValue(parsed.flags.port),
+          limit: parseOptionalNumberFlag(parsed.flags.limit),
+          includeTools: normalizeBool(parsed.flags["include-tools"], false),
+        };
+        return await runSessionContinuityHistoryCommand(context, historyOpts);
+      }
+      if (subcommand === "resume") {
+        const sessionId = parsed.positional[2] as string | undefined;
+        if (!sessionId) {
+          throw createCliError(
+            "session resume requires a session ID argument",
+            ERROR_CODES.MISSING_SESSION_ID,
+          );
+        }
+        return await runShellCommand(context, {
+          ...normalizeGlobalFlags(parsed.flags, {}, readEnvironmentConfig()),
+          ...buildShellExecBaseOptions(
+            parsed,
+            resolveShellAliasProfile(parsed, "general"),
+          ),
+          sessionId,
+        });
+      }
+      if (subcommand === "fork") {
+        const sessionId = parsed.positional[2] as string | undefined;
+        if (!sessionId) {
+          throw createCliError(
+            "session fork requires a session ID argument",
+            ERROR_CODES.MISSING_SESSION_ID,
+          );
+        }
+        const forkOpts: SessionContinuityForkOptions = {
+          pidPath:
+            parseOptionalString(parsed.flags["pid-path"]) ?? getDefaultPidPath(),
+          sessionId,
+          controlPlanePort: parseIntValue(parsed.flags.port),
+          objective: parseOptionalStringFlag(parsed.flags.objective),
+          profile: parseOptionalStringFlag(parsed.flags.profile),
+        };
+        return await runSessionContinuityForkCommand(context, forkOpts);
       }
       throw createCliError(
         `unknown session subcommand: ${subcommand}`,

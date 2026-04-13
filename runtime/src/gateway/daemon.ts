@@ -2227,6 +2227,19 @@ export class DaemonManager {
       getBackgroundRunAvailability: () => this.getBackgroundRunAvailability(),
       inspectBackgroundRun: (sessionId) =>
         this.inspectOwnedBackgroundRun(sessionId),
+      forkBackgroundRunFromCheckpoint: async ({
+        sourceSessionId,
+        targetSessionId,
+        objective,
+      }) =>
+        (await this._backgroundRunSupervisor?.forkRunFromCheckpoint(
+          sourceSessionId,
+          {
+            targetSessionId,
+            ...(objective ? { objective } : {}),
+            reason: "Forked from session continuity workflow.",
+          },
+        )) ?? false,
       controlBackgroundRun: (params) => this.controlOwnedBackgroundRun(params),
       policyPreview: (params) =>
         this.buildPolicySimulationPreview({
