@@ -54,6 +54,59 @@ Useful internal entrypoints:
 - `runtime/dist/bin/agenc-watch.js`
 - `@tetsuo-ai/runtime/operator-events`
 
+Current shell entrypoint:
+
+- `agenc` opens the `general` shell on the public wrapper path
+- `agenc shell [profile]`
+- `agenc resume [--profile <name>]`
+- `agenc session list|inspect|history|resume|fork`
+- `agenc-runtime shell [profile]` as the compatibility alias
+- `agenc console` for the explicit operator-console compatibility path
+
+Current coding shell command surface:
+
+- `agenc plan status|enter|exit|implement|review|verify`
+- `agenc agents roles|list|spawn|assign|inspect|stop`
+- `agenc tasks`
+- `agenc files`
+- `agenc grep`
+- `agenc git status|diff|show|branch|summary|worktree`
+- `agenc branch`
+- `agenc worktree`
+- `agenc diff`
+- `agenc review`
+- `agenc agents spawn coding --objective "Implement the task" --worktree auto`
+- `agenc agents assign <taskId> verification --wait`
+- `/verify` inside the shell for verification-stage checks or delegated verifier runs
+- `agenc session`
+- `agenc session list --active-only`
+- `agenc session inspect <sessionId>`
+- `agenc session history <sessionId> --include-tools`
+- `agenc session resume <sessionId>`
+- `agenc session fork <sessionId> --objective "Investigate variant"`
+- `agenc permissions`
+- `agenc mcp status|list|inspect|tools|validate|reconnect|enable|disable`
+- `agenc skills list|inspect|enable|disable|sources`
+- `/plugin list|inspect|enable|disable|reload` inside the shell for the local plugin catalog
+- `agenc model`
+- `agenc effort`
+
+Extension surfaces stay distinct:
+
+- `agenc mcp ...` controls already-configured MCP servers only; server creation and transport/auth/secrets edits remain config-admin work
+- `agenc skills ...` covers local discovered skills only across agent/user/project/builtin tiers
+- `agenc market skills ...` remains the marketplace listing and purchase surface
+- `agenc plugin ...` remains the lower-level direct plugin catalog/admin CLI, while `/plugin ...` is the shell-native day-to-day catalog surface
+
+Current coding runtime surface:
+
+- native coding tools under `system.*` for grep/glob/file search/repo inventory
+- structured git and worktree tools under `system.git*`
+- bounded file reads via `system.readFileRange`
+- native patch application via `system.applyPatch`
+- native code-intel via `system.symbolSearch`, `system.symbolDefinition`, and `system.symbolReferences`
+- tool discovery via `system.searchTools`
+
 Current operator marketplace entrypoint:
 
 - `agenc-runtime market ...` for non-interactive terminal marketplace flows

@@ -640,6 +640,10 @@ interface GatewayAutonomyFeatureFlags {
   readonly notifications?: boolean;
   readonly replayGates?: boolean;
   readonly canaryRollout?: boolean;
+  readonly shellProfiles?: boolean;
+  readonly codingCommands?: boolean;
+  readonly shellExtensions?: boolean;
+  readonly watchCockpit?: boolean;
 }
 
 interface GatewayAutonomyKillSwitches {
@@ -648,6 +652,10 @@ interface GatewayAutonomyKillSwitches {
   readonly notifications?: boolean;
   readonly replayGates?: boolean;
   readonly canaryRollout?: boolean;
+  readonly shellProfiles?: boolean;
+  readonly codingCommands?: boolean;
+  readonly shellExtensions?: boolean;
+  readonly watchCockpit?: boolean;
 }
 
 interface GatewayAutonomySloTargets {

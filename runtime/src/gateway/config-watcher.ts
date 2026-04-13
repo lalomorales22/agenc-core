@@ -1565,12 +1565,32 @@ function validateAutonomySection(autonomy: unknown, errors: string[]): void {
   validateBoolRecord(
     autonomy.featureFlags,
     "autonomy.featureFlags",
-    ["backgroundRuns", "multiAgent", "notifications", "replayGates", "canaryRollout"],
+    [
+      "backgroundRuns",
+      "multiAgent",
+      "notifications",
+      "replayGates",
+      "canaryRollout",
+      "shellProfiles",
+      "codingCommands",
+      "shellExtensions",
+      "watchCockpit",
+    ],
   );
   validateBoolRecord(
     autonomy.killSwitches,
     "autonomy.killSwitches",
-    ["backgroundRuns", "multiAgent", "notifications", "replayGates", "canaryRollout"],
+    [
+      "backgroundRuns",
+      "multiAgent",
+      "notifications",
+      "replayGates",
+      "canaryRollout",
+      "shellProfiles",
+      "codingCommands",
+      "shellExtensions",
+      "watchCockpit",
+    ],
   );
 
   if (autonomy.slo !== undefined) {

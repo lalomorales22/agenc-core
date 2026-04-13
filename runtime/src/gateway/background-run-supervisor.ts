@@ -10,7 +10,8 @@
  * @module
  */
 
-import type { ChatExecutor, ChatExecutorResult } from "../llm/chat-executor.js";
+import type { ChatExecutor } from "../llm/chat-executor.js";
+import type { ChatExecutorResult } from "../llm/chat-executor-types.js";
 import { executeChatToLegacyResult } from "../llm/execute-chat.js";
 import type { LLMProvider, ToolHandler } from "../llm/types.js";
 import type { Logger } from "../utils/logger.js";
@@ -48,6 +49,10 @@ import {
   assertValidBackgroundRunLineage,
   type BackgroundRunLineage,
 } from "./subrun-contract.js";
+import {
+  appendShellProfilePromptSection,
+  DEFAULT_SESSION_SHELL_PROFILE,
+} from "./shell-profile.js";
 import {
   BackgroundRunStore,
   DEFAULT_BACKGROUND_RUN_MAX_IDLE_MS,
@@ -1726,6 +1731,10 @@ export class BackgroundRunSupervisor {
       id: `bg-${now.toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
       sessionId: params.sessionId,
       objective: params.objective.trim(),
+      shellProfile:
+        params.options?.shellProfile ??
+        params.options?.lineage?.shellProfile ??
+        DEFAULT_SESSION_SHELL_PROFILE,
       policyScope: undefined,
       contract,
       state: "pending",
@@ -2259,6 +2268,7 @@ export class BackgroundRunSupervisor {
       sessionId: run.sessionId,
       runId: run.id,
       cycleIndex: run.cycleCount + 1,
+      shellProfile: run.shellProfile ?? DEFAULT_SESSION_SHELL_PROFILE,
     });
     const stopCalls: ChatExecutorResult["toolCalls"][number][] = [];
     for (const target of runningTargets) {
@@ -3341,6 +3351,7 @@ export class BackgroundRunSupervisor {
       sessionId,
       runId: run.id,
       cycleIndex: run.cycleCount,
+      shellProfile: run.shellProfile ?? DEFAULT_SESSION_SHELL_PROFILE,
     });
   }
 
@@ -3612,6 +3623,7 @@ export class BackgroundRunSupervisor {
           sessionId,
           actorPrompt,
           run.internalHistory,
+          run.shellProfile ?? DEFAULT_SESSION_SHELL_PROFILE,
         );
         const toolRoutingDecision = applyRunToolScopeDecision({
           allowedTools: getScopedAllowedTools(run),
@@ -3832,7 +3844,10 @@ export class BackgroundRunSupervisor {
       sessionId,
       cycleToolHandler,
       actorPrompt: buildActorPrompt(run),
-      actorSystemPrompt: `${this.getSystemPrompt()}\n\n${BACKGROUND_ACTOR_SECTION}`,
+      actorSystemPrompt: `${appendShellProfilePromptSection({
+        systemPrompt: this.getSystemPrompt(),
+        profile: run.shellProfile ?? DEFAULT_SESSION_SHELL_PROFILE,
+      })}\n\n${BACKGROUND_ACTOR_SECTION}`,
     };
   }
 

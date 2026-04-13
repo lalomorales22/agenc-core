@@ -200,4 +200,51 @@ describe("MCPManager", () => {
 
     expect(manager.getConnectedServers()).toEqual(["alpha", "beta"]);
   });
+
+  it("reconnects a configured enabled server in place", async () => {
+    const initialBridge = makeMockBridge("srv1", ["toolA"]);
+    const nextBridge = makeMockBridge("srv1", ["toolB", "toolC"]);
+
+    mockCreateMCPConnection
+      .mockResolvedValueOnce("client1")
+      .mockResolvedValueOnce("client2");
+    mockCreateToolBridge
+      .mockResolvedValueOnce(initialBridge)
+      .mockResolvedValueOnce(nextBridge);
+
+    const manager = new MCPManager([makeConfig("srv1")]);
+    await manager.start();
+
+    const result = await manager.reconnectServer("srv1");
+
+    expect(result).toEqual({
+      serverName: "srv1",
+      success: true,
+      toolCount: 2,
+    });
+    expect(initialBridge.dispose).toHaveBeenCalledOnce();
+    expect(manager.getToolsByServer("srv1").map((tool) => tool.name)).toEqual([
+      "mcp.srv1.toolB",
+      "mcp.srv1.toolC",
+    ]);
+  });
+
+  it("rejects reconnect for unknown or disabled servers", async () => {
+    const manager = new MCPManager([
+      makeConfig("srv1", { enabled: false }),
+    ]);
+
+    await expect(manager.reconnectServer("missing")).resolves.toEqual({
+      serverName: "missing",
+      success: false,
+      toolCount: 0,
+      error: 'MCP server "missing" is not configured.',
+    });
+    await expect(manager.reconnectServer("srv1")).resolves.toEqual({
+      serverName: "srv1",
+      success: false,
+      toolCount: 0,
+      error: 'MCP server "srv1" is disabled in config.',
+    });
+  });
 });

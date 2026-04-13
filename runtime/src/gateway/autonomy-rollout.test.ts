@@ -17,6 +17,10 @@ function makeHealthyAutonomyConfig(): GatewayAutonomyConfig {
       notifications: true,
       replayGates: true,
       canaryRollout: true,
+      shellProfiles: true,
+      codingCommands: true,
+      shellExtensions: true,
+      watchCockpit: true,
     },
     killSwitches: {
       backgroundRuns: false,
@@ -24,6 +28,10 @@ function makeHealthyAutonomyConfig(): GatewayAutonomyConfig {
       notifications: false,
       replayGates: false,
       canaryRollout: false,
+      shellProfiles: false,
+      codingCommands: false,
+      shellExtensions: false,
+      watchCockpit: false,
     },
     slo: {
       runStartLatencyMs: 1_000,
@@ -36,8 +44,15 @@ function makeHealthyAutonomyConfig(): GatewayAutonomyConfig {
     canary: {
       enabled: true,
       tenantAllowList: ["tenant-a"],
-      featureAllowList: ["backgroundRuns", "multiAgent"],
-      domainAllowList: ["generic", "research"],
+      featureAllowList: [
+        "backgroundRuns",
+        "multiAgent",
+        "shellProfiles",
+        "codingCommands",
+        "shellExtensions",
+        "watchCockpit",
+      ],
+      domainAllowList: ["generic", "research", "shell", "extensions", "watch"],
       percentage: 1,
     },
   };
@@ -110,7 +125,7 @@ function makeHealthyDelegationBenchmark(): DelegationBenchmarkSummary {
 
 function makeManifest(overrides: Record<string, unknown> = {}) {
   return parseAutonomyRolloutManifest({
-    schemaVersion: 1,
+    schemaVersion: 2,
     migration: {
       playbook: {
         path: "docs/AUTONOMY_RUNTIME_ROLLOUT.md",
@@ -130,6 +145,21 @@ function makeManifest(overrides: Record<string, unknown> = {}) {
         "No autonomy SLO regression during the canary window.",
       ],
       automatedGate: "npm --prefix runtime run autonomy:rollout:gates",
+    },
+    shell: {
+      strategy: {
+        path: "docs/AUTONOMY_RUNTIME_ROLLOUT.md",
+        section: "Shell Rollout Strategy",
+      },
+      successCriteria: [
+        "Advanced shell surfaces degrade cleanly under rollout holdback.",
+        "Shell validation artifact stays green for the current release train.",
+      ],
+      automatedGate: "npm --prefix runtime run autonomy:rollout:gates",
+      testRefs: [
+        "runtime/src/gateway/autonomy-rollout.test.ts",
+        "runtime/scripts/run-shell-rollout-readiness.ts",
+      ],
     },
     runbooks: {
       stuck_run: {
@@ -196,6 +226,22 @@ function makeManifest(overrides: Record<string, unknown> = {}) {
   });
 }
 
+function makeHealthyShellArtifact() {
+  return {
+    schemaVersion: 1 as const,
+    generatedAtMs: 1,
+    allPassed: true,
+    checks: [
+      {
+        name: "shell command registry",
+        passed: true,
+        command: "npx vitest run src/gateway/daemon-command-registry.test.ts",
+        testRefs: ["runtime/src/gateway/daemon-command-registry.test.ts"],
+      },
+    ],
+  };
+}
+
 describe("autonomy-rollout", () => {
   it("treats pending external review as a broad-rollout blocker but not a limited-rollout blocker", () => {
     const evaluation = evaluateAutonomyRolloutReadiness({
@@ -203,6 +249,7 @@ describe("autonomy-rollout", () => {
       backgroundRunQualityArtifact: makeHealthyBackgroundRunArtifact(),
       delegationBenchmark: makeHealthyDelegationBenchmark(),
       manifest: makeManifest(),
+      shellArtifact: makeHealthyShellArtifact(),
     });
 
     expect(evaluation.violations).toHaveLength(0);
@@ -268,6 +315,7 @@ describe("autonomy-rollout", () => {
       backgroundRunQualityArtifact: degradedArtifact,
       delegationBenchmark: harmfulDelegation,
       manifest: makeManifest(),
+      shellArtifact: makeHealthyShellArtifact(),
     });
 
     expect(evaluation.limitedRolloutReady).toBe(false);
@@ -325,6 +373,7 @@ describe("autonomy-rollout", () => {
       backgroundRunQualityArtifact: makeHealthyBackgroundRunArtifact(),
       delegationBenchmark: makeHealthyDelegationBenchmark(),
       manifest,
+      shellArtifact: makeHealthyShellArtifact(),
     });
 
     expect(evaluation.limitedRolloutReady).toBe(false);
@@ -384,6 +433,86 @@ describe("autonomy-rollout", () => {
     ).toMatchObject({
       allowed: false,
       cohort: "holdback",
+    });
+  });
+
+  it("requires a passing shell rollout artifact for limited rollout", () => {
+    const missingArtifact = evaluateAutonomyRolloutReadiness({
+      autonomy: makeHealthyAutonomyConfig(),
+      backgroundRunQualityArtifact: makeHealthyBackgroundRunArtifact(),
+      delegationBenchmark: makeHealthyDelegationBenchmark(),
+      manifest: makeManifest(),
+    });
+    expect(missingArtifact.limitedRolloutReady).toBe(false);
+    expect(missingArtifact.violations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "autonomy.shell.artifact_missing" }),
+      ]),
+    );
+
+    const failedArtifact = evaluateAutonomyRolloutReadiness({
+      autonomy: makeHealthyAutonomyConfig(),
+      backgroundRunQualityArtifact: makeHealthyBackgroundRunArtifact(),
+      delegationBenchmark: makeHealthyDelegationBenchmark(),
+      manifest: makeManifest(),
+      shellArtifact: {
+        ...makeHealthyShellArtifact(),
+        allPassed: false,
+        checks: [
+          {
+            name: "shell command registry",
+            passed: false,
+            command: "npx vitest run src/gateway/daemon-command-registry.test.ts",
+            testRefs: ["runtime/src/gateway/daemon-command-registry.test.ts"],
+          },
+        ],
+      },
+    });
+    expect(failedArtifact.limitedRolloutReady).toBe(false);
+    expect(failedArtifact.violations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "autonomy.shell.artifact_failed" }),
+      ]),
+    );
+  });
+
+  it("admits shell feature cohorts when canary policy allows them", () => {
+    const autonomy = makeHealthyAutonomyConfig();
+    expect(
+      evaluateAutonomyCanaryAdmission({
+        autonomy,
+        tenantId: "tenant-a",
+        feature: "codingCommands",
+        domain: "shell",
+        stableKey: "session-shell-1",
+      }),
+    ).toMatchObject({
+      allowed: true,
+      cohort: "canary",
+    });
+    expect(
+      evaluateAutonomyCanaryAdmission({
+        autonomy,
+        tenantId: "tenant-a",
+        feature: "shellExtensions",
+        domain: "extensions",
+        stableKey: "session-shell-2",
+      }),
+    ).toMatchObject({
+      allowed: true,
+      cohort: "canary",
+    });
+    expect(
+      evaluateAutonomyCanaryAdmission({
+        autonomy,
+        tenantId: "tenant-a",
+        feature: "watchCockpit",
+        domain: "watch",
+        stableKey: "session-shell-3",
+      }),
+    ).toMatchObject({
+      allowed: true,
+      cohort: "canary",
     });
   });
 });

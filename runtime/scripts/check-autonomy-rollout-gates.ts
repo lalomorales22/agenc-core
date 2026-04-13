@@ -9,6 +9,7 @@ import { parseBackgroundRunQualityArtifact } from "../src/eval/background-run-qu
 import {
   evaluateAutonomyRolloutReadiness,
   parseAutonomyRolloutManifest,
+  parseShellRolloutReadinessArtifact,
 } from "../src/gateway/autonomy-rollout.js";
 import type { GatewayAutonomyConfig } from "../src/gateway/types.js";
 
@@ -16,6 +17,7 @@ interface CliOptions {
   readonly configPath: string;
   readonly artifactPath: string;
   readonly delegationArtifactPath?: string;
+  readonly shellArtifactPath?: string;
   readonly manifestPath: string;
   readonly mode: "limited" | "broad";
   readonly dryRun: boolean;
@@ -85,6 +87,10 @@ export function parseCliArgs(
       baseDir,
       "runtime/benchmarks/artifacts/delegation-benchmark.latest.json",
     ),
+    shellArtifactPath: resolveProjectPath(
+      baseDir,
+      "runtime/benchmarks/artifacts/shell-rollout-readiness.ci.json",
+    ),
     manifestPath: resolveProjectPath(baseDir, "docs/autonomy-runtime-rollout.manifest.json"),
     mode: "limited",
     dryRun: false,
@@ -108,6 +114,10 @@ export function parseCliArgs(
       options.manifestPath = resolveProjectPath(baseDir, argv[++index]!);
       continue;
     }
+    if (arg === "--shell-artifact" && argv[index + 1]) {
+      options.shellArtifactPath = resolveProjectPath(baseDir, argv[++index]!);
+      continue;
+    }
     if (arg === "--mode" && argv[index + 1]) {
       const mode = argv[++index]!;
       if (mode !== "limited" && mode !== "broad") {
@@ -129,6 +139,7 @@ export function parseCliArgs(
           "  --config <path>               Gateway autonomy config JSON or full gateway config",
           "  --artifact <path>             Background-run quality artifact",
           "  --delegation-artifact <path>  Delegation benchmark artifact",
+          "  --shell-artifact <path>       Shell rollout readiness artifact",
           "  --manifest <path>             Autonomy rollout manifest JSON",
           "  --mode <limited|broad>        Rollout gate mode (default: limited)",
           "  --dry-run                     Print failures but always exit 0",
@@ -177,6 +188,7 @@ export async function validateManifestReferences(
   const docRefs = [
     manifest.migration.playbook,
     manifest.canary.strategy,
+    manifest.shell.strategy,
     manifest.rollback.strategy,
     ...Object.values(manifest.runbooks),
   ];
@@ -239,12 +251,15 @@ function formatEvaluation(params: {
 
 async function main(): Promise<void> {
   const options = parseCliArgs(process.argv.slice(2));
-  const [configRaw, artifactRaw, manifestRaw, delegationRaw] = await Promise.all([
+  const [configRaw, artifactRaw, manifestRaw, delegationRaw, shellRaw] = await Promise.all([
     readJson(options.configPath),
     readJson(options.artifactPath),
     readJson(options.manifestPath),
     options.delegationArtifactPath && existsSync(options.delegationArtifactPath)
       ? readJson(options.delegationArtifactPath)
+      : Promise.resolve(undefined),
+    options.shellArtifactPath && existsSync(options.shellArtifactPath)
+      ? readJson(options.shellArtifactPath)
       : Promise.resolve(undefined),
   ]);
 
@@ -256,6 +271,8 @@ async function main(): Promise<void> {
     delegationBenchmark:
       delegationRaw === undefined ? undefined : extractDelegationSummary(delegationRaw),
     manifest,
+    shellArtifact:
+      shellRaw === undefined ? undefined : parseShellRolloutReadinessArtifact(shellRaw),
   });
 
   const passed =

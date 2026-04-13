@@ -12,6 +12,9 @@ import { existsSync } from 'node:fs';
 import { isAbsolute, relative, resolve as resolvePath } from 'node:path';
 import type { ToolHandler } from '../llm/types.js';
 import {
+  SESSION_ADVERTISED_TOOL_NAMES_ARG,
+} from "../tools/system/coding.js";
+import {
   SESSION_ALLOWED_ROOTS_ARG,
   SESSION_ID_ARG,
 } from "../tools/system/filesystem.js";
@@ -20,6 +23,10 @@ import {
   TASK_TRACKER_TOOL_NAMES,
 } from "../tools/system/task-tracker.js";
 import type { TaskStore } from "../tools/system/task-tracker.js";
+import {
+  buildShellProfileApprovalContext,
+  type SessionShellProfile,
+} from "./shell-profile.js";
 import {
   didToolCallFail,
   enrichToolResultMetadata,
@@ -90,12 +97,45 @@ const TOOL_DEFAULT_CWD_NAMES = new Set([
   "system.serverStart",
   "verification.listProbes",
   "verification.runProbe",
+  "system.grep",
+  "system.glob",
+  "system.searchFiles",
+  "system.repoInventory",
+  "system.gitStatus",
+  "system.gitDiff",
+  "system.gitShow",
+  "system.gitBranchInfo",
+  "system.gitChangeSummary",
+  "system.gitWorktreeList",
+  "system.gitWorktreeCreate",
+  "system.gitWorktreeRemove",
+  "system.symbolSearch",
+  "system.symbolDefinition",
+  "system.symbolReferences",
 ]);
 const SESSION_ALLOWED_ROOT_TOOL_NAMES = new Set([
   "system.readFile",
+  "system.readFileRange",
   "system.writeFile",
   "system.appendFile",
   "system.editFile",
+  "system.grep",
+  "system.glob",
+  "system.searchFiles",
+  "system.repoInventory",
+  "system.gitStatus",
+  "system.gitDiff",
+  "system.gitShow",
+  "system.gitBranchInfo",
+  "system.gitChangeSummary",
+  "system.gitWorktreeList",
+  "system.gitWorktreeCreate",
+  "system.gitWorktreeRemove",
+  "system.gitWorktreeStatus",
+  "system.applyPatch",
+  "system.symbolSearch",
+  "system.symbolDefinition",
+  "system.symbolReferences",
   "system.listDir",
   "system.stat",
   "system.mkdir",
@@ -125,16 +165,36 @@ const SESSION_ALLOWED_ROOT_TOOL_NAMES = new Set([
  */
 const SESSION_ID_TOOL_NAMES = new Set([
   "system.readFile",
+  "system.readFileRange",
   "system.writeFile",
   "system.appendFile",
   "system.editFile",
+  "system.applyPatch",
 ]);
 const TOOL_PATH_ARG_KEYS: Readonly<Record<string, readonly string[]>> = {
   "desktop.text_editor": ["path"],
   "system.readFile": ["path"],
+  "system.readFileRange": ["path"],
   "system.writeFile": ["path"],
   "system.appendFile": ["path"],
   "system.editFile": ["path"],
+  "system.grep": ["path"],
+  "system.glob": ["path"],
+  "system.searchFiles": ["path"],
+  "system.repoInventory": ["path"],
+  "system.gitStatus": ["path"],
+  "system.gitDiff": ["path"],
+  "system.gitShow": ["path"],
+  "system.gitBranchInfo": ["path"],
+  "system.gitChangeSummary": ["path"],
+  "system.gitWorktreeList": ["path"],
+  "system.gitWorktreeCreate": ["path", "worktreePath"],
+  "system.gitWorktreeRemove": ["path", "worktreePath"],
+  "system.gitWorktreeStatus": ["worktreePath"],
+  "system.applyPatch": ["path"],
+  "system.symbolSearch": ["path"],
+  "system.symbolDefinition": ["path", "filePath"],
+  "system.symbolReferences": ["path", "filePath"],
   "system.listDir": ["path"],
   "system.stat": ["path"],
   "system.mkdir": ["path"],
@@ -234,7 +294,8 @@ function stripInternalToolArgs(
   const hasAllowedRoots = SESSION_ALLOWED_ROOTS_ARG in args;
   const hasTaskListId = TASK_LIST_ARG in args;
   const hasSessionId = SESSION_ID_ARG in args;
-  if (!hasAllowedRoots && !hasTaskListId && !hasSessionId) {
+  const hasAdvertisedToolNames = SESSION_ADVERTISED_TOOL_NAMES_ARG in args;
+  if (!hasAllowedRoots && !hasTaskListId && !hasSessionId && !hasAdvertisedToolNames) {
     return args;
   }
   const nextArgs = { ...args };
@@ -246,6 +307,9 @@ function stripInternalToolArgs(
   }
   if (hasSessionId) {
     delete nextArgs[SESSION_ID_ARG];
+  }
+  if (hasAdvertisedToolNames) {
+    delete nextArgs[SESSION_ADVERTISED_TOOL_NAMES_ARG];
   }
   return nextArgs;
 }
@@ -306,6 +370,20 @@ function applySessionId(
   return {
     ...args,
     [SESSION_ID_ARG]: sessionId,
+  };
+}
+
+function applyAdvertisedToolNames(
+  toolName: string,
+  args: Record<string, unknown>,
+  availableToolNames: readonly string[] | undefined,
+): Record<string, unknown> {
+  if (toolName !== "system.searchTools" || !availableToolNames) {
+    return args;
+  }
+  return {
+    ...args,
+    [SESSION_ADVERTISED_TOOL_NAMES_ARG]: [...availableToolNames],
   };
 }
 
@@ -1829,6 +1907,7 @@ function buildApprovalMessage(params: {
   sessionId: string;
   isSubAgentSession: boolean;
   subAgentInfo: DelegationSubAgentInfo | null;
+  shellProfile?: SessionShellProfile;
 }): string {
   const {
     ruleDescription,
@@ -1836,19 +1915,28 @@ function buildApprovalMessage(params: {
     sessionId,
     isSubAgentSession,
     subAgentInfo,
+    shellProfile,
   } = params;
   const baseMessage = ruleDescription ?? `Approval required for ${toolName}`;
-  if (!isSubAgentSession || !subAgentInfo) return baseMessage;
+  const shellProfileContext = shellProfile
+    ? buildShellProfileApprovalContext(shellProfile)
+    : undefined;
+  if (!isSubAgentSession || !subAgentInfo) {
+    return shellProfileContext
+      ? `${baseMessage}\n${shellProfileContext}`
+      : baseMessage;
+  }
   const taskPreview = truncateText(
     subAgentInfo.task.trim(),
     APPROVAL_TASK_PREVIEW_MAX_CHARS,
   );
-  return (
+  const message = (
     `${baseMessage}\n` +
     `Parent session: ${subAgentInfo.parentSessionId}\n` +
     `Sub-agent session: ${sessionId}\n` +
     `Delegated task: ${taskPreview}`
   );
+  return shellProfileContext ? `${message}\n${shellProfileContext}` : message;
 }
 
 function extractDelegationObjective(
@@ -1922,6 +2010,7 @@ async function runApprovalGate(params: {
   parentSessionId: string | undefined;
   isSubAgentSession: boolean;
   subAgentInfo: DelegationSubAgentInfo | null;
+  shellProfile?: SessionShellProfile;
   lifecycleEmitter: DelegationLifecycleEmitter;
   send: (msg: ControlResponse) => void;
   onToolEnd: SessionToolHandlerConfig["onToolEnd"];
@@ -1941,6 +2030,7 @@ async function runApprovalGate(params: {
     parentSessionId,
     isSubAgentSession,
     subAgentInfo,
+    shellProfile,
     lifecycleEmitter,
     send,
     onToolEnd,
@@ -1961,6 +2051,7 @@ async function runApprovalGate(params: {
       ? approvalEngine.simulate(name, args, sessionId, {
           ...(parentSessionId ? { parentSessionId } : {}),
           ...(isSubAgentSession ? { subagentSessionId: sessionId } : {}),
+          ...(shellProfile ? { shellProfile } : {}),
           ...(effectRef ? { effect: effectRef } : {}),
         })
       : undefined;
@@ -2099,6 +2190,7 @@ async function runApprovalGate(params: {
       sessionId,
       isSubAgentSession,
       subAgentInfo,
+      shellProfile,
     });
   let request;
   try {
@@ -2117,6 +2209,7 @@ async function runApprovalGate(params: {
       {
         ...(parentSessionId ? { parentSessionId } : {}),
         ...(isSubAgentSession ? { subagentSessionId: sessionId } : {}),
+        ...(shellProfile ? { shellProfile } : {}),
         ...(effectRef ? { effect: effectRef } : {}),
         ...(decision?.approvalScopeKey
           ? { approvalScopeKey: decision.approvalScopeKey }
@@ -2294,6 +2387,8 @@ async function runApprovalGate(params: {
 interface SessionToolHandlerConfig {
   /** Session ID for hook context and approval scoping. */
   sessionId: string;
+  /** Optional shell profile inherited into delegated child sessions. */
+  shellProfile?: SessionShellProfile;
   /** Base tool handler (from ToolRegistry). */
   baseHandler: ToolHandler;
   /** Optional factory that returns a desktop-aware handler per router ID. */
@@ -2389,6 +2484,7 @@ interface SessionToolHandlerConfig {
 export function createSessionToolHandler(config: SessionToolHandlerConfig): ToolHandler {
   const {
     sessionId,
+    shellProfile,
     baseHandler,
     desktopRouterFactory,
     routerId,
@@ -2689,6 +2785,7 @@ export function createSessionToolHandler(config: SessionToolHandlerConfig): Tool
         ? approvalEngine.simulate(toolName, normalizedArgs, sessionId, {
             ...(parentSessionId ? { parentSessionId } : {}),
             ...(isSubAgentSession ? { subagentSessionId: sessionId } : {}),
+            ...(shellProfile ? { shellProfile } : {}),
             ...(preApprovalEffectRef ? { effect: preApprovalEffectRef } : {}),
           })
         : undefined;
@@ -2834,6 +2931,7 @@ export function createSessionToolHandler(config: SessionToolHandlerConfig): Tool
       parentSessionId,
       isSubAgentSession,
       subAgentInfo,
+      shellProfile,
       lifecycleEmitter,
       send,
       onToolEnd,
@@ -2912,6 +3010,11 @@ export function createSessionToolHandler(config: SessionToolHandlerConfig): Tool
     );
     executionArgs = applySessionTaskListId(toolName, executionArgs, sessionId);
     executionArgs = applySessionId(toolName, executionArgs, sessionId);
+    executionArgs = applyAdvertisedToolNames(
+      toolName,
+      executionArgs,
+      availableToolNames,
+    );
 
     const subAgentEnvelopeError = isSubAgentSession
       ? enforceSubAgentExecutionEnvelope({
@@ -2939,6 +3042,7 @@ export function createSessionToolHandler(config: SessionToolHandlerConfig): Tool
             toolArgs,
             name: toolName,
             sessionId,
+            shellProfile,
             toolCallId,
             subAgentManager,
             lifecycleEmitter,

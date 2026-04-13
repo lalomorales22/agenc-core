@@ -135,6 +135,12 @@ function buildFooterStatuslineSegments(
   if (isPresentStatuslineValue(overview.sessionLabel)) {
     segments.push(`LABEL ${overview.sessionLabel}`);
   }
+  if (isPresentStatuslineValue(overview.workflowStage)) {
+    segments.push(`FLOW ${overview.workflowStage}`);
+  }
+  if (isPresentStatuslineValue(overview.workflowOwnership)) {
+    segments.push(`OWN ${overview.workflowOwnership}`);
+  }
   if (isPresentStatuslineValue(overview.usage)) {
     segments.push(`USAGE ${overview.usage}`);
   }
@@ -701,6 +707,8 @@ export function buildWatchSurfaceSummary({
   activeAgentActivity = null,
   plannerStatus = null,
   plannerNote = null,
+  workflowStage = "idle",
+  workflowOwnershipSummary = "",
   sessionLabel = null,
   maintenanceStatus = null,
   workspaceIndex = null,
@@ -790,6 +798,8 @@ export function buildWatchSurfaceSummary({
   const runtimeState = runtimeStateFromInputs(connectionState, backgroundRunStatus, errorAlertCount);
   const runtimeLabel = runtimeLabelFromInputs(connectionState, backgroundRunStatus);
   const plannerLabel = sanitizeText(plannerNote, "");
+  const workflowStageLabel = sanitizeText(workflowStage, "idle");
+  const workflowOwnershipLabel = sanitizeText(workflowOwnershipSummary, "");
   const localSessionLabel = sanitizeText(sessionLabel, "");
   const activeAgentFocus = sanitizeText(activeAgentLabel, "");
   const activeAgentLive = sanitizeText(activeAgentActivity, "");
@@ -922,6 +932,8 @@ export function buildWatchSurfaceSummary({
     overview: {
       connectionState: sanitizeText(connectionState, "unknown"),
       phaseLabel: sanitizeText(phaseLabel, "idle"),
+      workflowStage: workflowStageLabel,
+      workflowOwnership: workflowOwnershipLabel,
       sessionToken: compactSessionToken(sessionId),
       sessionLabel: localSessionLabel,
       lastActivityAt: sanitizeText(lastActivityAt, "idle"),
@@ -976,6 +988,7 @@ export function buildWatchSurfaceSummary({
     },
     chips: [
       { label: "RUN", value: sanitizeText(phaseLabel, "idle"), tone: stateTone(phaseLabel) },
+      { label: "FLOW", value: workflowStageLabel, tone: stateTone(workflowStageLabel) },
       { label: "ROUTE", value: routeState, tone: stateTone(routeState) },
       { label: "PROVIDER", value: providerLabel, tone: route ? "teal" : "slate" },
       { label: "MODEL", value: modelLabel, tone: route ? "teal" : "slate" },

@@ -136,6 +136,14 @@ import {
 import { runInitCommand } from "./init.js";
 import { runSessionsListCommand, runSessionsKillCommand } from "./sessions.js";
 import { runLogsCommand } from "./logs.js";
+import { runShellCommand, runShellExecCommand } from "./shell.js";
+import {
+  runSessionContinuityForkCommand,
+  runSessionContinuityHistoryCommand,
+  runSessionContinuityInspectCommand,
+  runSessionContinuityListCommand,
+} from "./session-continuity.js";
+import { coerceSessionShellProfile } from "../gateway/shell-profile.js";
 import {
   runConnectorAddTelegramCommand,
   runConnectorListCommand,
@@ -161,6 +169,10 @@ import type {
   ConfigShowOptions,
   SessionsListOptions,
   SessionsKillOptions,
+  SessionContinuityListOptions,
+  SessionContinuityInspectOptions,
+  SessionContinuityHistoryOptions,
+  SessionContinuityForkOptions,
   LogsOptions,
 } from "./types.js";
 import {
@@ -338,6 +350,43 @@ const RESTART_COMMAND_OPTIONS = new Set([
 ]);
 const STATUS_COMMAND_OPTIONS = new Set(["pid-path", "port"]);
 const SERVICE_COMMAND_OPTIONS = new Set(["macos", "yolo"]);
+const SHELL_COMMAND_OPTIONS = new Set(["pid-path", "port", "profile", "new", "session"]);
+const SHELL_EXEC_COMMAND_OPTIONS = new Set([
+  "pid-path",
+  "port",
+  "profile",
+  "new",
+  "session",
+  "path",
+  "regex",
+  "glob",
+  "max",
+  "context",
+  "staged",
+  "from",
+  "to",
+  "files",
+  "stat",
+  "branch",
+  "ref",
+  "detached",
+  "force",
+  "timeout",
+  "status",
+  "block",
+  "objective",
+  "worktrees",
+  "delegate",
+  "limit",
+  "active-only",
+  "include-tools",
+  "bundle",
+  "workspace",
+  "worktree",
+  "cwd",
+  "wait",
+  "all",
+]);
 const JOBS_COMMAND_OPTIONS = new Set<string>([]);
 const CONNECTOR_LIST_OPTIONS = new Set(["pid-path", "port"]);
 const CONNECTOR_STATUS_OPTIONS = new Set(["pid-path", "port"]);
@@ -873,6 +922,24 @@ function buildHelp(): string {
     "stop [--help] [options]",
     "restart [--help] [options]",
     "status [--help] [options]",
+    "shell [profile] [--help] [options]",
+    "resume [--help] [options]",
+    "session [status|list|inspect|history|resume|fork] [--help] [options]",
+    "plan [--help] [options]",
+    "agents [roles|list|spawn|assign|inspect|stop] [--help] [options]",
+    "tasks [list|get|wait|output] [--help] [options]",
+    "files [query] [--help] [options]",
+    "grep <pattern> [--help] [options]",
+    "git <status|diff|show|branch|summary|worktree> [--help] [options]",
+    "branch [--help]",
+    "worktree <list|create|remove|status> [--help] [options]",
+    "diff [--help] [options]",
+    "review [--help] [options]",
+    "permissions [--help] [options]",
+    "mcp [--help] [options]",
+    "skills [--help]",
+    "model [--help] [options]",
+    "effort [--help] [options]",
     "service install [--help] [options]",
     "connector <list|status|add|remove> [--help] [options]",
     "sessions <list|kill> [--help] [options]",
@@ -903,9 +970,31 @@ function buildHelp(): string {
     "  stop      Stop the gateway daemon",
     "  restart   Restart the gateway daemon",
     "  status    Show daemon status",
+    "  shell     Open the line-oriented daemon shell over the existing webchat/control-plane path",
+    "  resume    Reopen the shell session for this workspace/profile",
     "  service install  Generate systemd/launchd service template",
     "",
-    "Session commands:",
+    "Coding shell commands:",
+    "  plan [status|enter|exit|implement|review|verify]  Control the coding workflow stage",
+    "  agents [roles|list|spawn|assign|inspect|stop]  Manage child agents and explicit delegation",
+    "  tasks [list|get|wait|output]   Inspect session tasks",
+    "  files [query]           Show repo inventory or search files",
+    "  grep <pattern>          Search repo-local files",
+    "  git <...>               Structured git status/diff/branch/show/worktree",
+    "  branch                  Alias for git branch",
+    "  worktree <...>          Alias for git worktree",
+    "  diff                    Show change summary plus diff",
+    "  review                  Summarize repo state for review",
+    "",
+    "Shell control commands:",
+    "  session [status|list|inspect|history|resume|fork]  Inspect the current shell session or continuity catalog",
+    "  permissions                    Show policy/approval state",
+    "  mcp                            Show configured MCP servers and discovered MCP tools",
+    "  skills                         List available skills from the shell surface",
+    "  model                          Show or switch the configured model",
+    "  effort                         Show or switch configured reasoning effort",
+    "",
+    "Low-level session commands:",
     "  sessions list              List active control plane sessions",
     "  sessions kill <sessionId>  Disconnect a control plane session",
     "",
@@ -1026,6 +1115,40 @@ function buildHelp(): string {
     "      --pid-path <path>                         Custom PID file path",
     "      --port <port>                             Override control plane port",
     "",
+    "shell options:",
+    "      --pid-path <path>                         Custom PID file path",
+    "      --port <port>                             Override control plane port",
+    "      --profile <name>                          Shell profile: general|coding|research|validation|documentation|operator",
+    "      --new                                     Force a fresh shell session for this workspace/profile",
+    "      --session <id>                            Resume a specific session id instead of the stored workspace/profile session",
+    "",
+    "coding shell command options:",
+    "      --profile <name>                          Override the default alias profile",
+    "      --pid-path <path>                         Custom PID file path",
+    "      --port <port>                             Override control-plane port",
+    "      --session <id>                            Reuse a specific daemon session id",
+    "      --new                                     Force a fresh session before running a one-shot shell command",
+    "      --path <dir>                              Repo/workspace path override where supported",
+    "      --regex                                   Regex mode for files/grep",
+    "      --glob <g1,g2>                            File glob filters for files/grep",
+    "      --max <n>                                 Result cap for files/grep",
+    "      --context <n>                             Context lines for grep",
+    "      --staged                                  Use staged diff/review surfaces",
+    "      --from <ref> --to <ref>                   Diff revision range",
+    "      --files <a,b>                             Limit diff to specific files",
+    "      --branch <name> --ref <ref>               Worktree creation inputs",
+    "      --detached                                Detached worktree creation",
+    "      --force                                   Force worktree removal",
+    "      --timeout <ms>                            Task wait/output timeout",
+    "      --status <value>                          Task status filter",
+    "      --block                                   Block waiting for task output",
+    "      --bundle <name>                           Child-agent tool bundle override",
+    "      --workspace <path>                        Child-agent workspace root override",
+    "      --worktree auto|<path>                    Child-agent worktree policy or existing worktree path",
+    "      --cwd <path>                              Child-agent working directory under the resolved root",
+    "      --wait                                    Wait for child-agent completion",
+    "      --all                                     Include completed child agents where supported",
+    "",
     "service install options:",
     "      --macos                                   Generate launchd plist instead of systemd unit",
     "      --yolo                                    Include unsafe benchmark mode (--yolo) in the generated service command",
@@ -1133,6 +1256,24 @@ function buildHelp(): string {
     "  agenc-runtime stop",
     "  agenc-runtime restart --config ~/.agenc/config.json",
     "  agenc-runtime status",
+    "  agenc-runtime shell coding",
+    "  agenc-runtime resume --profile coding",
+    "  agenc-runtime plan",
+    "  agenc-runtime agents roles",
+    '  agenc-runtime agents spawn coding --objective "Implement the task" --worktree auto',
+    "  agenc-runtime agents assign task-123 verification --wait",
+    "  agenc-runtime files package",
+    "  agenc-runtime grep shellProfile --glob src/**/*.ts",
+    "  agenc-runtime git status",
+    "  agenc-runtime git diff --staged",
+    "  agenc-runtime worktree create ../agenc-alt --branch alt-impl",
+    "  agenc-runtime review --staged",
+    "  agenc-runtime session",
+    "  agenc-runtime permissions",
+    "  agenc-runtime mcp list",
+    "  agenc-runtime model list",
+    "  agenc-runtime effort high",
+    "  agenc-runtime shell --profile research --new",
     "  agenc-runtime service install",
     "  agenc-runtime service install --macos",
     "  agenc-runtime config init",
@@ -3265,10 +3406,590 @@ async function dispatchBootstrapCommands(
   return null;
 }
 
+function resolveShellAliasProfile(
+  parsed: ParsedArgv,
+  fallback: string,
+): string {
+  return parseOptionalStringFlag(parsed.flags.profile) ?? fallback;
+}
+
+function buildShellExecBaseOptions(
+  parsed: ParsedArgv,
+  profile: string,
+): {
+  configPath: string;
+  pidPath: string;
+  controlPlanePort?: number;
+  profile: string;
+  newSession: boolean;
+  sessionId?: string;
+} {
+  return {
+    configPath: resolveGatewayConfigPath(parsed.flags),
+    pidPath:
+      parseOptionalString(parsed.flags["pid-path"]) ?? getDefaultPidPath(),
+    controlPlanePort: parseIntValue(parsed.flags.port),
+    profile,
+    newSession: normalizeBool(parsed.flags.new, false),
+    sessionId: parseOptionalString(parsed.flags.session),
+  };
+}
+
+async function dispatchPhase3ShellCommands(
+  parsed: ParsedArgv,
+  context: CliRuntimeContext,
+): Promise<RoutedStatus> {
+  const root = parsed.positional[0];
+  if (!root) return null;
+
+  const serializeArgs = (payload: Record<string, unknown>): string =>
+    JSON.stringify(payload);
+  const runShellExec = async (
+    commandText: string,
+    profile: string,
+  ): Promise<CliStatusCode> =>
+    runShellExecCommand(context, {
+      ...normalizeGlobalFlags(parsed.flags, {}, readEnvironmentConfig()),
+      ...buildShellExecBaseOptions(parsed, profile),
+      commandText,
+      quietConnection: true,
+    });
+
+  if (root === "resume") {
+    try {
+      validateUnknownStandaloneOptions(parsed.flags, SHELL_COMMAND_OPTIONS);
+      return await runShellCommand(context, {
+        ...normalizeGlobalFlags(parsed.flags, {}, readEnvironmentConfig()),
+        ...buildShellExecBaseOptions(
+          parsed,
+          resolveShellAliasProfile(parsed, "coding"),
+        ),
+      });
+    } catch (error) {
+      return reportCliError(context, error);
+    }
+  }
+
+  if (root === "plan") {
+    try {
+      validateUnknownStandaloneOptions(parsed.flags, SHELL_EXEC_COMMAND_OPTIONS);
+      const subcommand = parsed.positional[1] ?? "status";
+      const payload: Record<string, unknown> = {
+        subcommand,
+        ...(parseOptionalStringFlag(parsed.flags.objective)
+          ? { objective: parseOptionalStringFlag(parsed.flags.objective) }
+          : {}),
+        ...(parseOptionalStringFlag(parsed.flags.worktrees)
+          ? { worktreeMode: parseOptionalStringFlag(parsed.flags.worktrees) }
+          : {}),
+        ...(normalizeBool(parsed.flags.delegate, false) ? { delegate: true } : {}),
+        ...(normalizeBool(parsed.flags.staged, false) ? { staged: true } : {}),
+      };
+      return await runShellExec(
+        `/plan ${serializeArgs(payload)}`,
+        resolveShellAliasProfile(parsed, "coding"),
+      );
+    } catch (error) {
+      return reportCliError(context, error);
+    }
+  }
+
+  if (root === "agents") {
+    try {
+      validateUnknownStandaloneOptions(parsed.flags, SHELL_EXEC_COMMAND_OPTIONS);
+      const subcommand = parsed.positional[1] ?? "list";
+      if (subcommand === "roles") {
+        return await runShellExec(
+          "/agents roles",
+          resolveShellAliasProfile(parsed, "coding"),
+        );
+      }
+      if (subcommand === "list") {
+        const payload: Record<string, unknown> = {
+          ...(normalizeBool(parsed.flags.all, false) ? { all: true } : {}),
+        };
+        return await runShellExec(
+          Object.keys(payload).length > 0
+            ? `/agents ${serializeArgs({ subcommand, ...payload })}`
+            : "/agents list",
+          resolveShellAliasProfile(parsed, "coding"),
+        );
+      }
+      if (subcommand === "inspect" || subcommand === "stop") {
+        const target = parsed.positional[2];
+        if (!target) {
+          throw createCliError(
+            `agents ${subcommand} requires a child session or task identifier`,
+            ERROR_CODES.MISSING_TARGET,
+          );
+        }
+        return await runShellExec(
+          `/agents ${serializeArgs({ subcommand, target })}`,
+          resolveShellAliasProfile(parsed, "coding"),
+        );
+      }
+      if (subcommand === "spawn" || subcommand === "assign") {
+        const taskId = subcommand === "assign" ? parsed.positional[2] : undefined;
+        const roleId = subcommand === "assign" ? parsed.positional[3] : parsed.positional[2];
+        if (!roleId || (subcommand === "assign" && !taskId)) {
+          throw createCliError(
+            subcommand === "assign"
+              ? "agents assign requires <taskId> <role>"
+              : "agents spawn requires a role argument",
+            ERROR_CODES.MISSING_TARGET,
+          );
+        }
+        const payload: Record<string, unknown> = {
+          subcommand,
+          roleId,
+          ...(taskId ? { taskId } : {}),
+          ...(parseOptionalStringFlag(parsed.flags.objective)
+            ? { objective: parseOptionalStringFlag(parsed.flags.objective) }
+            : {}),
+          ...(parseOptionalStringFlag(parsed.flags.profile)
+            ? { profile: parseOptionalStringFlag(parsed.flags.profile) }
+            : {}),
+          ...(parseOptionalStringFlag(parsed.flags.bundle)
+            ? { toolBundle: parseOptionalStringFlag(parsed.flags.bundle) }
+            : {}),
+          ...(parseOptionalStringFlag(parsed.flags.workspace)
+            ? { workspaceRoot: parseOptionalStringFlag(parsed.flags.workspace) }
+            : {}),
+          ...(parseOptionalStringFlag(parsed.flags.worktree)
+            ? { worktree: parseOptionalStringFlag(parsed.flags.worktree) }
+            : {}),
+          ...(parseOptionalStringFlag(parsed.flags.cwd)
+            ? { workingDirectory: parseOptionalStringFlag(parsed.flags.cwd) }
+            : {}),
+          ...(normalizeBool(parsed.flags.wait, false) ? { wait: true } : {}),
+        };
+        return await runShellExec(
+          `/agents ${serializeArgs(payload)}`,
+          resolveShellAliasProfile(parsed, "coding"),
+        );
+      }
+      throw createCliError(
+        `unknown agents subcommand: ${subcommand}`,
+        ERROR_CODES.UNKNOWN_COMMAND,
+      );
+    } catch (error) {
+      return reportCliError(context, error, [ERROR_CODES.MISSING_TARGET]);
+    }
+  }
+
+  if (root === "tasks") {
+    try {
+      validateUnknownStandaloneOptions(parsed.flags, SHELL_EXEC_COMMAND_OPTIONS);
+      const subcommand = parsed.positional[1] ?? "list";
+      const taskId = parsed.positional[2];
+      const payload: Record<string, unknown> = {
+        ...(subcommand ? { subcommand } : {}),
+        ...(taskId ? { taskId } : {}),
+        ...(parseOptionalStringFlag(parsed.flags.status)
+          ? { status: parseOptionalStringFlag(parsed.flags.status) }
+          : {}),
+        ...(parseOptionalNumberFlag(parsed.flags.timeout)
+          ? { timeoutMs: parseOptionalNumberFlag(parsed.flags.timeout) }
+          : {}),
+        ...(normalizeBool(parsed.flags.block, false) ? { block: true } : {}),
+      };
+      return await runShellExec(
+        `/tasks ${serializeArgs(payload)}`,
+        resolveShellAliasProfile(parsed, "coding"),
+      );
+    } catch (error) {
+      return reportCliError(context, error);
+    }
+  }
+
+  if (root === "files") {
+    try {
+      validateUnknownStandaloneOptions(parsed.flags, SHELL_EXEC_COMMAND_OPTIONS);
+      const query = parsed.positional.slice(1).join(" ").trim();
+      const payload: Record<string, unknown> = {
+        ...(query ? { query } : {}),
+        ...(normalizeBool(parsed.flags.regex, false) ? { regex: true } : {}),
+        ...(parseOptionalStringFlag(parsed.flags.path)
+          ? { path: parseOptionalStringFlag(parsed.flags.path) }
+          : {}),
+        ...(parseStringListFlag(parsed.flags.glob)
+          ? { filePatterns: parseStringListFlag(parsed.flags.glob) }
+          : {}),
+        ...(parseOptionalNumberFlag(parsed.flags.max)
+          ? { maxResults: parseOptionalNumberFlag(parsed.flags.max) }
+          : {}),
+      };
+      return await runShellExec(
+        Object.keys(payload).length > 0 ? `/files ${serializeArgs(payload)}` : "/files",
+        resolveShellAliasProfile(parsed, "coding"),
+      );
+    } catch (error) {
+      return reportCliError(context, error);
+    }
+  }
+
+  if (root === "grep") {
+    try {
+      validateUnknownStandaloneOptions(parsed.flags, SHELL_EXEC_COMMAND_OPTIONS);
+      const pattern = parsed.positional.slice(1).join(" ").trim();
+      if (!pattern) {
+        throw createCliError(
+          "grep requires a pattern argument",
+          ERROR_CODES.MISSING_TARGET,
+        );
+      }
+      return await runShellExec(
+        `/grep ${serializeArgs({
+          pattern,
+          ...(normalizeBool(parsed.flags.regex, false) ? { regex: true } : {}),
+          ...(parseOptionalStringFlag(parsed.flags.path)
+            ? { path: parseOptionalStringFlag(parsed.flags.path) }
+            : {}),
+          ...(parseStringListFlag(parsed.flags.glob)
+            ? { filePatterns: parseStringListFlag(parsed.flags.glob) }
+            : {}),
+          ...(parseOptionalNumberFlag(parsed.flags.context)
+            ? { contextLines: parseOptionalNumberFlag(parsed.flags.context) }
+            : {}),
+          ...(parseOptionalNumberFlag(parsed.flags.max)
+            ? { maxResults: parseOptionalNumberFlag(parsed.flags.max) }
+            : {}),
+        })}`,
+        resolveShellAliasProfile(parsed, "coding"),
+      );
+    } catch (error) {
+      return reportCliError(context, error, [ERROR_CODES.MISSING_TARGET]);
+    }
+  }
+
+  if (root === "git") {
+    try {
+      validateUnknownStandaloneOptions(parsed.flags, SHELL_EXEC_COMMAND_OPTIONS);
+      const subcommand = parsed.positional[1];
+      if (!subcommand) {
+        throw createCliError(
+          "git requires a subcommand (status|diff|show|branch|summary|worktree)",
+          ERROR_CODES.UNKNOWN_COMMAND,
+        );
+      }
+      const payload: Record<string, unknown> = { subcommand };
+      if (subcommand === "show" && parsed.positional[2]) {
+        payload.ref = parsed.positional[2];
+      }
+      if (subcommand === "worktree" && parsed.positional[2]) {
+        payload.action = parsed.positional[2];
+      }
+      if (subcommand === "worktree" && parsed.positional[3]) {
+        payload.worktreePath = parsed.positional[3];
+      }
+      if (normalizeBool(parsed.flags.staged, false)) payload.staged = true;
+      if (parseOptionalStringFlag(parsed.flags.from)) {
+        payload.fromRef = parseOptionalStringFlag(parsed.flags.from);
+      }
+      if (parseOptionalStringFlag(parsed.flags.to)) {
+        payload.toRef = parseOptionalStringFlag(parsed.flags.to);
+      }
+      if (parseStringListFlag(parsed.flags.files)) {
+        payload.filePaths = parseStringListFlag(parsed.flags.files);
+      }
+      if (normalizeBool(parsed.flags.stat, false)) payload.noPatch = true;
+      if (parseOptionalStringFlag(parsed.flags.branch)) {
+        payload.branch = parseOptionalStringFlag(parsed.flags.branch);
+      }
+      if (parseOptionalStringFlag(parsed.flags.ref)) {
+        payload.ref = parseOptionalStringFlag(parsed.flags.ref);
+      }
+      if (normalizeBool(parsed.flags.detached, false)) payload.detached = true;
+      if (normalizeBool(parsed.flags.force, false)) payload.force = true;
+      return await runShellExec(
+        `/git ${serializeArgs(payload)}`,
+        resolveShellAliasProfile(parsed, "coding"),
+      );
+    } catch (error) {
+      return reportCliError(context, error);
+    }
+  }
+
+  if (root === "branch") {
+    try {
+      validateUnknownStandaloneOptions(parsed.flags, SHELL_EXEC_COMMAND_OPTIONS);
+      return await runShellExec(
+        "/branch",
+        resolveShellAliasProfile(parsed, "coding"),
+      );
+    } catch (error) {
+      return reportCliError(context, error);
+    }
+  }
+
+  if (root === "worktree") {
+    try {
+      validateUnknownStandaloneOptions(parsed.flags, SHELL_EXEC_COMMAND_OPTIONS);
+      const action = parsed.positional[1];
+      const worktreePath = parsed.positional[2];
+      const payload: Record<string, unknown> = {
+        ...(action ? { action } : {}),
+        ...(worktreePath ? { worktreePath } : {}),
+        ...(parseOptionalStringFlag(parsed.flags.branch)
+          ? { branch: parseOptionalStringFlag(parsed.flags.branch) }
+          : {}),
+        ...(parseOptionalStringFlag(parsed.flags.ref)
+          ? { ref: parseOptionalStringFlag(parsed.flags.ref) }
+          : {}),
+        ...(normalizeBool(parsed.flags.detached, false) ? { detached: true } : {}),
+        ...(normalizeBool(parsed.flags.force, false) ? { force: true } : {}),
+      };
+      return await runShellExec(
+        Object.keys(payload).length > 0
+          ? `/worktree ${serializeArgs(payload)}`
+          : "/worktree",
+        resolveShellAliasProfile(parsed, "coding"),
+      );
+    } catch (error) {
+      return reportCliError(context, error);
+    }
+  }
+
+  if (root === "diff") {
+    try {
+      validateUnknownStandaloneOptions(parsed.flags, SHELL_EXEC_COMMAND_OPTIONS);
+      const payload: Record<string, unknown> = {
+        ...(normalizeBool(parsed.flags.staged, false) ? { staged: true } : {}),
+        ...(parseOptionalStringFlag(parsed.flags.from)
+          ? { fromRef: parseOptionalStringFlag(parsed.flags.from) }
+          : {}),
+        ...(parseOptionalStringFlag(parsed.flags.to)
+          ? { toRef: parseOptionalStringFlag(parsed.flags.to) }
+          : {}),
+        ...(parseStringListFlag(parsed.flags.files)
+          ? { filePaths: parseStringListFlag(parsed.flags.files) }
+          : {}),
+      };
+      return await runShellExec(
+        Object.keys(payload).length > 0 ? `/diff ${serializeArgs(payload)}` : "/diff",
+        resolveShellAliasProfile(parsed, "coding"),
+      );
+    } catch (error) {
+      return reportCliError(context, error);
+    }
+  }
+
+  if (root === "review") {
+    try {
+      validateUnknownStandaloneOptions(parsed.flags, SHELL_EXEC_COMMAND_OPTIONS);
+      const payload: Record<string, unknown> = {
+        ...(normalizeBool(parsed.flags.staged, false) ? { staged: true } : {}),
+        ...(normalizeBool(parsed.flags.delegate, false) ? { delegate: true } : {}),
+      };
+      return await runShellExec(
+        Object.keys(payload).length > 0 ? `/review ${serializeArgs(payload)}` : "/review",
+        resolveShellAliasProfile(parsed, "coding"),
+      );
+    } catch (error) {
+      return reportCliError(context, error);
+    }
+  }
+
+  if (root === "permissions") {
+    try {
+      validateUnknownStandaloneOptions(parsed.flags, SHELL_EXEC_COMMAND_OPTIONS);
+      const args = parsed.positional.slice(1).join(" ").trim();
+      return await runShellExec(
+        args.length > 0 ? `/permissions ${args}` : "/permissions",
+        resolveShellAliasProfile(parsed, "operator"),
+      );
+    } catch (error) {
+      return reportCliError(context, error);
+    }
+  }
+
+  if (root === "mcp") {
+    try {
+      validateUnknownStandaloneOptions(parsed.flags, SHELL_EXEC_COMMAND_OPTIONS);
+      const args = parsed.positional.slice(1).join(" ").trim();
+      return await runShellExec(
+        args.length > 0 ? `/mcp ${args}` : "/mcp",
+        resolveShellAliasProfile(parsed, "operator"),
+      );
+    } catch (error) {
+      return reportCliError(context, error);
+    }
+  }
+
+  if (root === "skills") {
+    try {
+      validateUnknownStandaloneOptions(parsed.flags, SHELL_EXEC_COMMAND_OPTIONS);
+      const args = parsed.positional.slice(1).join(" ").trim();
+      return await runShellExec(
+        args.length > 0 ? `/skills ${args}` : "/skills",
+        resolveShellAliasProfile(parsed, "general"),
+      );
+    } catch (error) {
+      return reportCliError(context, error);
+    }
+  }
+
+  if (root === "model") {
+    try {
+      validateUnknownStandaloneOptions(parsed.flags, SHELL_EXEC_COMMAND_OPTIONS);
+      const args = parsed.positional.slice(1).join(" ").trim();
+      return await runShellExec(
+        args.length > 0 ? `/model ${args}` : "/model",
+        resolveShellAliasProfile(parsed, "general"),
+      );
+    } catch (error) {
+      return reportCliError(context, error);
+    }
+  }
+
+  if (root === "effort") {
+    try {
+      validateUnknownStandaloneOptions(parsed.flags, SHELL_EXEC_COMMAND_OPTIONS);
+      const args = parsed.positional.slice(1).join(" ").trim();
+      return await runShellExec(
+        args.length > 0 ? `/effort ${args}` : "/effort",
+        resolveShellAliasProfile(parsed, "general"),
+      );
+    } catch (error) {
+      return reportCliError(context, error);
+    }
+  }
+
+  if (root === "session") {
+    try {
+      validateUnknownStandaloneOptions(parsed.flags, SHELL_EXEC_COMMAND_OPTIONS);
+      const subcommand = parsed.positional[1];
+      if (!subcommand || subcommand === "current" || subcommand === "status") {
+        return await runShellExec(
+          "/session",
+          resolveShellAliasProfile(parsed, "general"),
+        );
+      }
+      if (subcommand === "list") {
+        const sessionsOpts: SessionContinuityListOptions = {
+          pidPath:
+            parseOptionalString(parsed.flags["pid-path"]) ?? getDefaultPidPath(),
+          controlPlanePort: parseIntValue(parsed.flags.port),
+          activeOnly: normalizeBool(parsed.flags["active-only"], false),
+          limit: parseOptionalNumberFlag(parsed.flags.limit),
+          profile: parseOptionalStringFlag(parsed.flags.profile),
+        };
+        return await runSessionContinuityListCommand(context, sessionsOpts);
+      }
+      if (subcommand === "inspect") {
+        const sessionId = parsed.positional[2] as string | undefined;
+        if (!sessionId) {
+          throw createCliError(
+            "session inspect requires a session ID argument",
+            ERROR_CODES.MISSING_SESSION_ID,
+          );
+        }
+        const inspectOpts: SessionContinuityInspectOptions = {
+          pidPath:
+            parseOptionalString(parsed.flags["pid-path"]) ?? getDefaultPidPath(),
+          sessionId,
+          controlPlanePort: parseIntValue(parsed.flags.port),
+        };
+        return await runSessionContinuityInspectCommand(context, inspectOpts);
+      }
+      if (subcommand === "history") {
+        const sessionId = parsed.positional[2] as string | undefined;
+        if (!sessionId) {
+          throw createCliError(
+            "session history requires a session ID argument",
+            ERROR_CODES.MISSING_SESSION_ID,
+          );
+        }
+        const historyOpts: SessionContinuityHistoryOptions = {
+          pidPath:
+            parseOptionalString(parsed.flags["pid-path"]) ?? getDefaultPidPath(),
+          sessionId,
+          controlPlanePort: parseIntValue(parsed.flags.port),
+          limit: parseOptionalNumberFlag(parsed.flags.limit),
+          includeTools: normalizeBool(parsed.flags["include-tools"], false),
+        };
+        return await runSessionContinuityHistoryCommand(context, historyOpts);
+      }
+      if (subcommand === "resume") {
+        const sessionId = parsed.positional[2] as string | undefined;
+        if (!sessionId) {
+          throw createCliError(
+            "session resume requires a session ID argument",
+            ERROR_CODES.MISSING_SESSION_ID,
+          );
+        }
+        return await runShellCommand(context, {
+          ...normalizeGlobalFlags(parsed.flags, {}, readEnvironmentConfig()),
+          ...buildShellExecBaseOptions(
+            parsed,
+            resolveShellAliasProfile(parsed, "general"),
+          ),
+          sessionId,
+        });
+      }
+      if (subcommand === "fork") {
+        const sessionId = parsed.positional[2] as string | undefined;
+        if (!sessionId) {
+          throw createCliError(
+            "session fork requires a session ID argument",
+            ERROR_CODES.MISSING_SESSION_ID,
+          );
+        }
+        const forkOpts: SessionContinuityForkOptions = {
+          pidPath:
+            parseOptionalString(parsed.flags["pid-path"]) ?? getDefaultPidPath(),
+          sessionId,
+          controlPlanePort: parseIntValue(parsed.flags.port),
+          objective: parseOptionalStringFlag(parsed.flags.objective),
+          profile: parseOptionalStringFlag(parsed.flags.profile),
+        };
+        return await runSessionContinuityForkCommand(context, forkOpts);
+      }
+      throw createCliError(
+        `unknown session subcommand: ${subcommand}`,
+        ERROR_CODES.UNKNOWN_COMMAND,
+      );
+    } catch (error) {
+      return reportCliError(context, error, [ERROR_CODES.MISSING_SESSION_ID]);
+    }
+  }
+
+  return null;
+}
+
 async function dispatchDaemonCommands(
   parsed: ParsedArgv,
   context: CliRuntimeContext,
 ): Promise<RoutedStatus> {
+  if (parsed.positional[0] === "shell") {
+    try {
+      validateUnknownStandaloneOptions(parsed.flags, SHELL_COMMAND_OPTIONS);
+      const configPath = resolveGatewayConfigPath(parsed.flags);
+      const pidPath =
+        parseOptionalString(parsed.flags["pid-path"]) ?? getDefaultPidPath();
+      const requestedProfile =
+        (parsed.positional[1] as string | undefined) ??
+        parseOptionalString(parsed.flags.profile);
+      if (requestedProfile && !coerceSessionShellProfile(requestedProfile)) {
+        throw createCliError(
+          "shell profile must be one of general|coding|research|validation|documentation|operator",
+          ERROR_CODES.INVALID_VALUE,
+        );
+      }
+      return await runShellCommand(context, {
+        ...normalizeGlobalFlags(parsed.flags, {}, readEnvironmentConfig()),
+        configPath,
+        pidPath,
+        controlPlanePort: parseIntValue(parsed.flags.port),
+        profile: requestedProfile,
+        newSession: normalizeBool(parsed.flags.new, false),
+        sessionId: parseOptionalString(parsed.flags.session),
+      });
+    } catch (error) {
+      return reportCliError(context, error);
+    }
+  }
+
   if (parsed.positional[0] === "start") {
     try {
       validateUnknownStandaloneOptions(parsed.flags, START_COMMAND_OPTIONS);
@@ -4030,6 +4751,7 @@ export async function runCli(
 
   const routed =
     (await dispatchBootstrapCommands(parsed, context, stdout)) ??
+    (await dispatchPhase3ShellCommands(parsed, context)) ??
     (await dispatchDaemonCommands(parsed, context)) ??
     (await dispatchConfigCommands(parsed, context)) ??
     (await dispatchConnectorCommands(parsed, context)) ??

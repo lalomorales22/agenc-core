@@ -8,11 +8,12 @@
  * @module
  */
 
-import { readFile, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { readFile, unlink, writeFile } from "node:fs/promises";
 import { resolve as resolvePath } from "node:path";
 import type { Logger } from "../utils/logger.js";
 import { toErrorMessage } from "../utils/async.js";
-import type { GatewayConfig } from "./types.js";
+import type { GatewayConfig, GatewayMCPServerConfig } from "./types.js";
 import type {
   LLMProvider,
   LLMProviderTraceEvent,
@@ -22,16 +23,43 @@ import type {
 import type { MemoryBackend } from "../memory/types.js";
 import { SlashCommandRegistry, createDefaultCommands } from "./commands.js";
 import {
+  buildSessionRuntimeContractStatusSnapshot,
   clearStatefulContinuationMetadata,
+  coerceSessionShellProfile,
+  DEFAULT_SESSION_SHELL_PROFILE,
+  ensureSessionShellProfile,
+  resolveSessionShellProfile,
   SessionManager,
+  SESSION_REVIEW_SURFACE_STATE_METADATA_KEY,
   SESSION_STATEFUL_HISTORY_COMPACTED_METADATA_KEY,
   SESSION_STATEFUL_RESUME_ANCHOR_METADATA_KEY,
+  SESSION_VERIFICATION_SURFACE_STATE_METADATA_KEY,
   type Session,
+  type SessionShellProfile,
 } from "./session.js";
+import {
+  formatSessionWorkflowStage,
+  formatSessionWorktreeMode,
+  resolveSessionWorkflowState,
+  updateSessionWorkflowState,
+  type SessionWorkflowStage,
+} from "./workflow-state.js";
 import type { DiscoveredSkill } from "../skills/markdown/discovery.js";
+import type { DiscoveryPaths } from "../skills/markdown/discovery.js";
 import { ToolRegistry } from "../tools/registry.js";
 import { HookDispatcher } from "./hooks.js";
 import { ApprovalEngine } from "./approvals.js";
+import {
+  coerceReviewSurfaceState,
+  coerceVerificationSurfaceState,
+  type ReviewSurfaceState,
+  type VerificationSurfaceState,
+  type WorkflowOwnershipEntry,
+} from "./watch-cockpit.js";
+import {
+  collectSessionWorkflowOwnership,
+  formatWorkflowOwnershipReply,
+} from "./workflow-ownership.js";
 import { ProgressTracker } from "./progress.js";
 import {
   PipelineExecutor,
@@ -53,19 +81,39 @@ import {
   resolveLocalCompactionThreshold,
   DEFAULT_GROK_MODEL,
 } from "./llm-provider-manager.js";
-import { clearWebSessionRuntimeState } from "./daemon-session-state.js";
+import {
+  clearWebSessionRuntimeState,
+  persistWebSessionRuntimeState,
+} from "./daemon-session-state.js";
 import { hasRuntimeLimit } from "../llm/runtime-limit-policy.js";
 import {
   listKnownGrokModels,
   normalizeGrokModel,
 } from "./context-window.js";
 import { getDefaultWorkspacePath } from "./workspace-files.js";
+import {
+  computeMCPToolCatalogSha256,
+  validateMCPServerBinaryIntegrity,
+  validateMCPServerStaticPolicy,
+} from "../policy/mcp-governance.js";
 import type {
   DelegationAggressivenessProfile,
   ResolvedSubAgentRuntimeConfig,
 } from "./subagent-infrastructure.js";
 import type { VoiceBridge } from "./voice-bridge.js";
 import type { WebChatChannel } from "../channels/webchat/plugin.js";
+import { PluginCatalog } from "../skills/catalog.js";
+import { TASK_LIST_ARG } from "../tools/system/task-tracker.js";
+import type {
+  ShellAgentRoleDescriptor,
+  ShellAgentRoleSource,
+  ShellAgentToolBundleName,
+} from "./shell-agent-roles.js";
+import {
+  evaluateShellFeatureRollout,
+  formatShellRolloutHoldback,
+  resolveConfiguredShellProfile,
+} from "./shell-rollout.js";
 
 // ============================================================================
 // Eval script helpers (moved from daemon.ts top-level)
@@ -329,6 +377,878 @@ function getSessionHistoryCompacted(session: Session | undefined): boolean {
   return session?.metadata[SESSION_STATEFUL_HISTORY_COMPACTED_METADATA_KEY] === true;
 }
 
+const SESSION_SHELL_PROFILES: readonly SessionShellProfile[] = [
+  "general",
+  "coding",
+  "research",
+  "validation",
+  "documentation",
+  "operator",
+];
+const SHELL_AGENT_TOOL_BUNDLES: readonly ShellAgentToolBundleName[] = [
+  "inherit",
+  "coding-core",
+  "docs-core",
+  "research-evidence",
+  "verification-probes",
+  "operator-core",
+  "marketplace-core",
+  "browser-test",
+  "remote-debug",
+];
+
+function formatShellProfileList(current: SessionShellProfile): string {
+  return SESSION_SHELL_PROFILES.map((profile) =>
+    `  ${profile}${profile === current ? " (current)" : ""}`,
+  ).join("\n");
+}
+
+function evaluateSessionShellRollout(params: {
+  readonly ctx: CommandRegistryDaemonContext;
+  readonly sessionId: string;
+  readonly feature:
+    | "shellProfiles"
+    | "codingCommands"
+    | "shellExtensions"
+    | "watchCockpit"
+    | "multiAgent";
+  readonly domain: "shell" | "extensions" | "watch";
+}) {
+  const scope = params.ctx.resolvePolicyScopeForSession({
+    sessionId: params.sessionId,
+    channel: "webchat",
+  });
+  return evaluateShellFeatureRollout({
+    autonomy: params.ctx.gateway?.config.autonomy,
+    tenantId: scope.tenantId,
+    feature: params.feature,
+    domain: params.domain,
+    stableKey: params.sessionId,
+  });
+}
+
+function resolveEffectiveShellProfileForSession(params: {
+  readonly ctx: CommandRegistryDaemonContext;
+  readonly sessionId: string;
+  readonly preferred?: unknown;
+}): SessionShellProfile {
+  const scope = params.ctx.resolvePolicyScopeForSession({
+    sessionId: params.sessionId,
+    channel: "webchat",
+  });
+  return resolveConfiguredShellProfile({
+    autonomy: params.ctx.gateway?.config.autonomy,
+    tenantId: scope.tenantId,
+    requested: params.preferred,
+    stableKey: params.sessionId,
+  }).profile;
+}
+
+function coerceShellAgentToolBundleName(
+  value: unknown,
+): ShellAgentToolBundleName | undefined {
+  return typeof value === "string" &&
+    SHELL_AGENT_TOOL_BUNDLES.includes(value as ShellAgentToolBundleName)
+    ? (value as ShellAgentToolBundleName)
+    : undefined;
+}
+
+const REASONING_EFFORTS = ["low", "medium", "high", "xhigh"] as const;
+
+function parseCommandJsonArgs(
+  args: string,
+): Record<string, unknown> | undefined {
+  const trimmed = args.trim();
+  if (!trimmed.startsWith("{")) {
+    return undefined;
+  }
+  const parsed = JSON.parse(trimmed) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("command JSON input must be an object");
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function parseCommandJsonArgv(
+  argv: readonly string[],
+  startIndex = 1,
+): Record<string, unknown> | undefined {
+  const candidate = argv.slice(startIndex).join(" ").trim();
+  if (!candidate.startsWith("{")) {
+    return undefined;
+  }
+  return parseCommandJsonArgs(candidate);
+}
+
+function parseInlineFlag(
+  argv: readonly string[],
+  flag: string,
+): string | undefined {
+  const exact = `--${flag}`;
+  const prefix = `--${flag}=`;
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index];
+    if (token === exact) {
+      const next = argv[index + 1];
+      return typeof next === "string" && !next.startsWith("--")
+        ? next
+        : undefined;
+    }
+    if (token.startsWith(prefix)) {
+      return token.slice(prefix.length);
+    }
+  }
+  return undefined;
+}
+
+function hasInlineFlag(argv: readonly string[], flag: string): boolean {
+  const exact = `--${flag}`;
+  const prefix = `--${flag}=`;
+  return argv.some((token) => token === exact || token.startsWith(prefix));
+}
+
+function parseCsvFlag(argv: readonly string[], flag: string): string[] | undefined {
+  const raw = parseInlineFlag(argv, flag);
+  if (!raw) return undefined;
+  const values = raw
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+  return values.length > 0 ? values : undefined;
+}
+
+function parseIntegerFlag(
+  argv: readonly string[],
+  flag: string,
+): number | undefined {
+  const raw = parseInlineFlag(argv, flag);
+  if (!raw) return undefined;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function formatToolError(result: Record<string, unknown>, fallback: string): string {
+  const message =
+    typeof result.error === "string" && result.error.trim().length > 0
+      ? result.error.trim()
+      : fallback;
+  return `Command failed: ${message}`;
+}
+
+async function executeStructuredTool(
+  baseToolHandler: ToolHandler,
+  toolName: string,
+  args: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const raw = await baseToolHandler(toolName, args);
+  const parsed = JSON.parse(raw) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`Tool ${toolName} returned non-object output`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function groupCatalogBySource(
+  catalog: readonly ReturnType<ToolRegistry["listCatalog"]>[number][],
+): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const entry of catalog) {
+    const source = entry.metadata.source ?? "builtin";
+    counts[source] = (counts[source] ?? 0) + 1;
+  }
+  return counts;
+}
+
+function formatMcpTrustLine(server: GatewayMCPServerConfig): string {
+  const trustTier = server.trustTier ?? "trusted";
+  const approvalRequired =
+    server.riskControls?.requireApproval === true || trustTier === "untrusted";
+  return `${trustTier}${approvalRequired ? " (approval required)" : ""}`;
+}
+
+function stripMcpToolPrefix(toolName: string, serverName: string): string {
+  return toolName.startsWith(`mcp.${serverName}.`)
+    ? toolName.slice(`mcp.${serverName}.`.length)
+    : toolName;
+}
+
+function getMcpCatalogEntries(
+  catalog: readonly ReturnType<ToolRegistry["listCatalog"]>[number][],
+  serverName?: string,
+): readonly ReturnType<ToolRegistry["listCatalog"]>[number][] {
+  return catalog.filter((entry) => {
+    if (entry.metadata.source !== "mcp") return false;
+    if (!serverName) return true;
+    return entry.name.startsWith(`mcp.${serverName}.`);
+  });
+}
+
+function getSkillDisabledMarker(sourcePath: string | undefined): boolean {
+  return typeof sourcePath === "string" && existsSync(`${sourcePath}.disabled`);
+}
+
+function formatSkillState(params: {
+  available: boolean;
+  disabled: boolean;
+}): string {
+  if (params.disabled) return "disabled";
+  return params.available ? "enabled" : "unavailable";
+}
+
+function renderPluginMutationNote(): string {
+  return (
+    "Catalog updated. Live plugin effects depend on the owning integration " +
+    "surface and may require reconnect, restart, or a host-specific reload."
+  );
+}
+
+function formatRepoInventoryReply(result: Record<string, unknown>): string {
+  if (typeof result.error === "string") {
+    return formatToolError(result, "repo inventory failed");
+  }
+  const repoRoot = typeof result.repoRoot === "string" ? result.repoRoot : "unknown";
+  const branch = typeof result.branch === "string" ? result.branch : null;
+  const fileCount =
+    typeof result.fileCount === "number" ? result.fileCount.toLocaleString("en-US") : "unknown";
+  const manifests = Array.isArray(result.manifests)
+    ? result.manifests.filter((value): value is string => typeof value === "string")
+    : [];
+  const directories = Array.isArray(result.topLevelDirectories)
+    ? result.topLevelDirectories.filter((value): value is string => typeof value === "string")
+    : [];
+  const languages = Array.isArray(result.languages)
+    ? result.languages
+        .filter(
+          (value): value is { language: string; count: number } =>
+            typeof value === "object" &&
+            value !== null &&
+            typeof (value as { language?: unknown }).language === "string" &&
+            typeof (value as { count?: unknown }).count === "number",
+        )
+        .slice(0, 8)
+        .map((entry) => `${entry.language}:${entry.count}`)
+    : [];
+  return [
+    "Repo inventory:",
+    `  Root: ${repoRoot}`,
+    `  Branch: ${branch ?? "detached/unknown"}`,
+    `  Files: ${fileCount}`,
+    `  Manifests: ${manifests.length > 0 ? manifests.join(", ") : "none"}`,
+    `  Top-level dirs: ${directories.length > 0 ? directories.join(", ") : "none"}`,
+    `  Languages: ${languages.length > 0 ? languages.join(", ") : "unknown"}`,
+  ].join("\n");
+}
+
+function formatSearchFilesReply(result: Record<string, unknown>): string {
+  if (typeof result.error === "string") {
+    return formatToolError(result, "file search failed");
+  }
+  const matches = Array.isArray(result.matches)
+    ? result.matches.filter((value): value is string => typeof value === "string")
+    : [];
+  if (matches.length === 0) {
+    return "No matching files found.";
+  }
+  return [
+    `Files (${matches.length}):`,
+    ...matches.slice(0, 50).map((match) => `  ${match}`),
+  ].join("\n");
+}
+
+function formatGrepReply(result: Record<string, unknown>): string {
+  if (typeof result.error === "string") {
+    return formatToolError(result, "grep failed");
+  }
+  const matches = Array.isArray(result.matches)
+    ? result.matches.filter(
+        (value): value is {
+          filePath: string;
+          line: number;
+          column: number;
+          matchText: string;
+        } =>
+          typeof value === "object" &&
+          value !== null &&
+          typeof (value as { filePath?: unknown }).filePath === "string" &&
+          typeof (value as { line?: unknown }).line === "number" &&
+          typeof (value as { column?: unknown }).column === "number" &&
+          typeof (value as { matchText?: unknown }).matchText === "string",
+      )
+    : [];
+  if (matches.length === 0) {
+    return "No grep matches found.";
+  }
+  const lines = matches.slice(0, 25).map(
+    (match) =>
+      `  ${match.filePath}:${match.line}:${match.column}  ${match.matchText}`,
+  );
+  return [
+    `Matches (${matches.length}${result.truncated === true ? ", truncated" : ""}):`,
+    ...lines,
+  ].join("\n");
+}
+
+function formatGitStatusReply(result: Record<string, unknown>): string {
+  if (typeof result.error === "string") {
+    return formatToolError(result, "git status failed");
+  }
+  const summary =
+    typeof result.summary === "object" && result.summary !== null
+      ? (result.summary as Record<string, unknown>)
+      : {};
+  const changed = Array.isArray(result.changed)
+    ? result.changed.length
+    : undefined;
+  return [
+    "Git status:",
+    `  Repo: ${typeof result.repoRoot === "string" ? result.repoRoot : "unknown"}`,
+    `  Branch: ${typeof result.branch === "string" ? result.branch : result.detached === true ? "detached" : "unknown"}`,
+    `  Upstream: ${typeof result.upstream === "string" ? result.upstream : "none"}`,
+    `  Ahead/behind: ${typeof result.ahead === "number" ? result.ahead : 0}/${typeof result.behind === "number" ? result.behind : 0}`,
+    `  Changed files: ${changed ?? "unknown"}`,
+    `  Staged: ${typeof summary.staged === "number" ? summary.staged : 0}`,
+    `  Unstaged: ${typeof summary.unstaged === "number" ? summary.unstaged : 0}`,
+    `  Untracked: ${typeof summary.untracked === "number" ? summary.untracked : 0}`,
+    `  Conflicted: ${typeof summary.conflicted === "number" ? summary.conflicted : 0}`,
+  ].join("\n");
+}
+
+function formatGitBranchReply(result: Record<string, unknown>): string {
+  if (typeof result.error === "string") {
+    return formatToolError(result, "git branch info failed");
+  }
+  return [
+    "Git branch:",
+    `  Repo: ${typeof result.repoRoot === "string" ? result.repoRoot : "unknown"}`,
+    `  Branch: ${typeof result.branch === "string" ? result.branch : result.detached === true ? "detached" : "unknown"}`,
+    `  HEAD: ${typeof result.head === "string" ? result.head : "unknown"}`,
+    `  Upstream: ${typeof result.upstream === "string" ? result.upstream : "none"}`,
+    `  Ahead/behind: ${typeof result.ahead === "number" ? result.ahead : 0}/${typeof result.behind === "number" ? result.behind : 0}`,
+  ].join("\n");
+}
+
+function formatGitSummaryReply(result: Record<string, unknown>): string {
+  if (typeof result.error === "string") {
+    return formatToolError(result, "git summary failed");
+  }
+  const summary =
+    typeof result.summary === "object" && result.summary !== null
+      ? (result.summary as Record<string, unknown>)
+      : {};
+  return [
+    "Git change summary:",
+    `  Staged: ${typeof summary.staged === "number" ? summary.staged : 0}`,
+    `  Unstaged: ${typeof summary.unstaged === "number" ? summary.unstaged : 0}`,
+    `  Untracked: ${typeof summary.untracked === "number" ? summary.untracked : 0}`,
+    `  Renamed: ${typeof summary.renamed === "number" ? summary.renamed : 0}`,
+    `  Deleted: ${typeof summary.deleted === "number" ? summary.deleted : 0}`,
+    `  Conflicted: ${typeof summary.conflicted === "number" ? summary.conflicted : 0}`,
+  ].join("\n");
+}
+
+function formatGitDiffReply(result: Record<string, unknown>): string {
+  if (typeof result.error === "string") {
+    return formatToolError(result, "git diff failed");
+  }
+  const diff = typeof result.diff === "string" ? result.diff.trimEnd() : "";
+  if (diff.length === 0) {
+    return "No git diff output.";
+  }
+  return (
+    `Git diff${result.truncated === true ? " (truncated)" : ""}:\n` +
+    diff
+  );
+}
+
+function formatGitShowReply(result: Record<string, unknown>): string {
+  if (typeof result.error === "string") {
+    return formatToolError(result, "git show failed");
+  }
+  const output = typeof result.output === "string" ? result.output.trimEnd() : "";
+  return output.length > 0 ? output : "No git show output.";
+}
+
+function formatGitWorktreeListReply(result: Record<string, unknown>): string {
+  if (typeof result.error === "string") {
+    return formatToolError(result, "git worktree list failed");
+  }
+  const worktrees = Array.isArray(result.worktrees)
+    ? result.worktrees.filter(
+        (value): value is {
+          path: string;
+          branch: string | null;
+          head: string | null;
+          detached: boolean;
+        } =>
+          typeof value === "object" &&
+          value !== null &&
+          typeof (value as { path?: unknown }).path === "string",
+      )
+    : [];
+  if (worktrees.length === 0) {
+    return "No git worktrees found.";
+  }
+  return [
+    `Worktrees (${worktrees.length}):`,
+    ...worktrees.map(
+      (worktree) =>
+        `  ${worktree.path} — ${worktree.branch ?? (worktree.detached ? "detached" : "unknown")} (${worktree.head ?? "no head"})`,
+    ),
+  ].join("\n");
+}
+
+function formatGitWorktreeMutationReply(
+  action: "create" | "remove",
+  result: Record<string, unknown>,
+): string {
+  if (typeof result.error === "string") {
+    return formatToolError(
+      result,
+      action === "create" ? "git worktree create failed" : "git worktree remove failed",
+    );
+  }
+  if (action === "create") {
+    return [
+      "Worktree created:",
+      `  Path: ${typeof result.worktreePath === "string" ? result.worktreePath : "unknown"}`,
+      `  Branch: ${typeof result.branch === "string" ? result.branch : "none"}`,
+      `  Ref: ${typeof result.ref === "string" ? result.ref : "none"}`,
+    ].join("\n");
+  }
+  return [
+    "Worktree removed:",
+    `  Path: ${typeof result.worktreePath === "string" ? result.worktreePath : "unknown"}`,
+    `  Dirty before removal: ${result.dirty === true ? "yes" : "no"}`,
+  ].join("\n");
+}
+
+function formatGitWorktreeStatusReply(result: Record<string, unknown>): string {
+  if (typeof result.error === "string") {
+    return formatToolError(result, "git worktree status failed");
+  }
+  const statusLines = Array.isArray(result.statusLines)
+    ? result.statusLines.filter((value): value is string => typeof value === "string")
+    : [];
+  return [
+    "Worktree status:",
+    `  Path: ${typeof result.worktreePath === "string" ? result.worktreePath : "unknown"}`,
+    `  Branch: ${typeof result.branch === "string" ? result.branch : "unknown"}`,
+    `  HEAD: ${typeof result.head === "string" ? result.head : "unknown"}`,
+    `  Dirty: ${result.dirty === true ? "yes" : "no"}`,
+    ...(statusLines.length > 0 ? ["  Status lines:", ...statusLines.map((line) => `    ${line}`)] : []),
+  ].join("\n");
+}
+
+function formatTaskListReply(result: Record<string, unknown>): string {
+  if (typeof result.error === "string") {
+    return formatToolError(result, "task list failed");
+  }
+  const tasks = Array.isArray(result.tasks)
+    ? result.tasks.filter(
+        (value): value is { id: string; subject: string; status: string } =>
+          typeof value === "object" &&
+          value !== null &&
+          typeof (value as { id?: unknown }).id === "string" &&
+          typeof (value as { subject?: unknown }).subject === "string" &&
+          typeof (value as { status?: unknown }).status === "string",
+      )
+    : [];
+  if (tasks.length === 0) {
+    return "No tasks for this session.";
+  }
+  return [
+    `Tasks (${tasks.length}):`,
+    ...tasks.map((task) => `  ${task.id} [${task.status}] ${task.subject}`),
+  ].join("\n");
+}
+
+function formatTaskDetailReply(result: Record<string, unknown>): string {
+  if (typeof result.error === "string") {
+    return formatToolError(result, "task lookup failed");
+  }
+  const task =
+    typeof result.task === "object" && result.task !== null
+      ? (result.task as Record<string, unknown>)
+      : undefined;
+  if (!task) {
+    return "Task detail unavailable.";
+  }
+  return [
+    `Task ${typeof task.id === "string" ? task.id : "unknown"}:`,
+    `  Status: ${typeof task.status === "string" ? task.status : "unknown"}`,
+    `  Subject: ${typeof task.subject === "string" ? task.subject : "unknown"}`,
+    `  Description: ${typeof task.description === "string" ? task.description : "none"}`,
+  ].join("\n");
+}
+
+function formatAgentRoleCatalog(
+  roles: readonly ShellAgentRoleDescriptor[],
+): string {
+  if (roles.length === 0) {
+    return "No child-agent roles are available.";
+  }
+  return [
+    `Child-agent roles (${roles.length}):`,
+    ...roles.map((role) =>
+      [
+        `  ${role.id}`,
+        `source=${role.source}`,
+        `trust=${role.trustLabel}`,
+        `profile=${role.defaultShellProfile}`,
+        `bundle=${role.defaultToolBundle}`,
+        role.worktreeEligible ? "worktree=eligible" : "worktree=off",
+        role.mutating ? "mutating=yes" : "mutating=no",
+        `:: ${role.description}`,
+      ].join(" "),
+    ),
+  ].join("\n");
+}
+
+function formatAgentListReply(entries: readonly {
+  sessionId: string;
+  status: string;
+  task: string;
+  role?: string;
+  roleSource?: string;
+  toolBundle?: string;
+  taskId?: string;
+  shellProfile?: SessionShellProfile;
+  executionLocation?: string;
+  worktreePath?: string;
+}[]): string {
+  if (entries.length === 0) {
+    return "No child agents matched the current filter.";
+  }
+  return [
+    `Child agents (${entries.length}):`,
+    ...entries.map((entry) =>
+      [
+        `  ${entry.sessionId}`,
+        `[${entry.status}]`,
+        entry.role ? `role=${entry.role}` : null,
+        entry.roleSource ? `source=${entry.roleSource}` : null,
+        entry.taskId ? `task=${entry.taskId}` : null,
+        entry.shellProfile ? `profile=${entry.shellProfile}` : null,
+        entry.toolBundle ? `bundle=${entry.toolBundle}` : null,
+        entry.executionLocation ? `exec=${entry.executionLocation}` : null,
+        entry.worktreePath ? `worktree=${entry.worktreePath}` : null,
+        `:: ${entry.task}`,
+      ]
+        .filter((value): value is string => Boolean(value))
+        .join(" "),
+    ),
+  ].join("\n");
+}
+
+function formatAgentInspectReply(entry: {
+  sessionId?: string;
+  taskId?: string;
+  status: string;
+  task: string;
+  role?: string;
+  roleSource?: string;
+  toolBundle?: string;
+  shellProfile?: SessionShellProfile;
+  executionLocation?: string;
+  workspaceRoot?: string;
+  workingDirectory?: string;
+  worktreePath?: string;
+  outputPreview?: string;
+}): string {
+  return [
+    "Child agent:",
+    `  Session: ${entry.sessionId ?? "none"}`,
+    `  Task id: ${entry.taskId ?? "none"}`,
+    `  Status: ${entry.status}`,
+    `  Role: ${entry.role ?? "unknown"}`,
+    `  Role source: ${entry.roleSource ?? "unknown"}`,
+    `  Shell profile: ${entry.shellProfile ?? "unknown"}`,
+    `  Tool bundle: ${entry.toolBundle ?? "inherit"}`,
+    `  Objective: ${entry.task}`,
+    `  Execution: ${entry.executionLocation ?? "unknown"}`,
+    `  Workspace: ${entry.workspaceRoot ?? "unknown"}`,
+    `  Working directory: ${entry.workingDirectory ?? "unknown"}`,
+    `  Worktree: ${entry.worktreePath ?? "none"}`,
+    `  Preview: ${entry.outputPreview ?? "none"}`,
+  ].join("\n");
+}
+
+function formatContinuitySessionList(
+  sessions: readonly Record<string, unknown>[],
+): string {
+  if (sessions.length === 0) {
+    return "No resumable sessions found.";
+  }
+  return [
+    `Resumable sessions (${sessions.length}):`,
+    ...sessions.map((session) => {
+      const sessionId =
+        typeof session.sessionId === "string" ? session.sessionId : "unknown";
+      const profile =
+        typeof session.shellProfile === "string"
+          ? ` profile=${session.shellProfile}`
+          : "";
+      const stage =
+        typeof session.workflowStage === "string"
+          ? ` stage=${session.workflowStage}`
+          : "";
+      const state =
+        typeof session.resumabilityState === "string"
+          ? ` state=${session.resumabilityState}`
+          : "";
+      const branch =
+        typeof session.branch === "string" ? ` branch=${session.branch}` : "";
+      const messages =
+        typeof session.messageCount === "number"
+          ? ` messages=${session.messageCount}`
+          : "";
+      const preview =
+        typeof session.preview === "string" ? session.preview : "New conversation";
+      return `  ${sessionId}${profile}${stage}${state}${branch}${messages} :: ${preview}`;
+    }),
+  ].join("\n");
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function compactSurfacePreview(value: string, maxChars = 220): string | undefined {
+  const compact = value.replace(/\s+/g, " ").trim();
+  if (compact.length === 0) {
+    return undefined;
+  }
+  return compact.length <= maxChars ? compact : `${compact.slice(0, maxChars - 3)}...`;
+}
+
+function updateReviewSurfaceState(
+  session: Session,
+  state: Partial<ReviewSurfaceState> & Pick<ReviewSurfaceState, "status" | "source">,
+): ReviewSurfaceState {
+  const prior = coerceReviewSurfaceState(
+    session.metadata[SESSION_REVIEW_SURFACE_STATE_METADATA_KEY],
+  );
+  const now = Date.now();
+  const next: ReviewSurfaceState = {
+    status: state.status,
+    source: state.source,
+    startedAt:
+      state.startedAt ??
+      (state.status === "running" ? now : prior?.startedAt ?? now),
+    updatedAt: state.updatedAt ?? now,
+    ...(state.completedAt !== undefined
+      ? { completedAt: state.completedAt }
+      : state.status === "completed" || state.status === "failed" || state.status === "stale"
+        ? { completedAt: now }
+        : {}),
+    ...(state.delegatedSessionId ? { delegatedSessionId: state.delegatedSessionId } : {}),
+    ...(state.backgroundRunId ? { backgroundRunId: state.backgroundRunId } : {}),
+    ...(state.summaryPreview
+      ? { summaryPreview: compactSurfacePreview(state.summaryPreview) }
+      : {}),
+  };
+  session.metadata[SESSION_REVIEW_SURFACE_STATE_METADATA_KEY] = next;
+  return next;
+}
+
+function updateVerificationSurfaceState(
+  session: Session,
+  state: Partial<VerificationSurfaceState> &
+    Pick<VerificationSurfaceState, "status" | "source">,
+): VerificationSurfaceState {
+  const prior = coerceVerificationSurfaceState(
+    session.metadata[SESSION_VERIFICATION_SURFACE_STATE_METADATA_KEY],
+  );
+  const now = Date.now();
+  const next: VerificationSurfaceState = {
+    status: state.status,
+    source: state.source,
+    startedAt:
+      state.startedAt ??
+      (state.status === "running" ? now : prior?.startedAt ?? now),
+    updatedAt: state.updatedAt ?? now,
+    ...(state.completedAt !== undefined
+      ? { completedAt: state.completedAt }
+      : state.status === "completed" || state.status === "failed" || state.status === "stale"
+        ? { completedAt: now }
+        : {}),
+    ...(state.delegatedSessionId ? { delegatedSessionId: state.delegatedSessionId } : {}),
+    ...(state.backgroundRunId ? { backgroundRunId: state.backgroundRunId } : {}),
+    ...(state.summaryPreview
+      ? { summaryPreview: compactSurfacePreview(state.summaryPreview) }
+      : {}),
+    ...(state.verdict ?? prior?.verdict ? { verdict: state.verdict ?? prior?.verdict } : {}),
+  };
+  session.metadata[SESSION_VERIFICATION_SURFACE_STATE_METADATA_KEY] = next;
+  return next;
+}
+
+function formatContinuitySessionInspect(
+  detail: Record<string, unknown>,
+): string {
+  const session = asRecord(detail.session);
+  if (!session) {
+    return typeof detail.error === "string"
+      ? `Session inspect failed: ${detail.error}`
+      : "Session detail unavailable.";
+  }
+  const lines = [
+    "Session detail:",
+    `  Session id: ${typeof session.sessionId === "string" ? session.sessionId : "unknown"}`,
+    `  Profile: ${typeof session.shellProfile === "string" ? session.shellProfile : "general"}`,
+    `  Workflow stage: ${typeof session.workflowStage === "string" ? session.workflowStage : "idle"}`,
+    `  Resumability: ${typeof session.resumabilityState === "string" ? session.resumabilityState : "unknown"}`,
+    ...(typeof session.workspaceRoot === "string"
+      ? [`  Workspace root: ${session.workspaceRoot}`]
+      : []),
+    ...(typeof session.repoRoot === "string"
+      ? [`  Repo root: ${session.repoRoot}`]
+      : []),
+    ...(typeof session.branch === "string" ? [`  Branch: ${session.branch}`] : []),
+    ...(typeof session.head === "string" ? [`  Head: ${session.head}`] : []),
+    ...(typeof detail.objective === "string" ? [`  Objective: ${detail.objective}`] : []),
+    `  Messages: ${typeof session.messageCount === "number" ? session.messageCount : 0}`,
+    `  Pending approvals: ${typeof session.pendingApprovalCount === "number" ? session.pendingApprovalCount : 0}`,
+    `  Child sessions: ${typeof session.childSessionCount === "number" ? session.childSessionCount : 0}`,
+    `  Worktrees: ${typeof session.worktreeCount === "number" ? session.worktreeCount : 0}`,
+    ...(typeof session.activeTaskSummary === "string"
+      ? [`  Active task: ${session.activeTaskSummary}`]
+      : []),
+    ...(typeof session.lastAssistantOutputPreview === "string"
+      ? [`  Last assistant output: ${session.lastAssistantOutputPreview}`]
+      : []),
+  ];
+  const forkLineage = asRecord(session.forkLineage);
+  if (forkLineage) {
+    lines.push(
+      `  Forked from: ${typeof forkLineage.parentSessionId === "string" ? forkLineage.parentSessionId : "unknown"} (${typeof forkLineage.source === "string" ? forkLineage.source : "unknown"})`,
+    );
+  }
+  const backgroundRun = asRecord(detail.backgroundRun);
+  if (backgroundRun) {
+    lines.push("");
+    lines.push("Background run:");
+    lines.push(
+      `  ${typeof backgroundRun.runId === "string" ? backgroundRun.runId : "unknown"} ${typeof backgroundRun.state === "string" ? `[${backgroundRun.state}]` : ""} ${typeof backgroundRun.currentPhase === "string" ? backgroundRun.currentPhase : ""}`.trim(),
+    );
+    if (typeof backgroundRun.objective === "string") {
+      lines.push(`  Objective: ${backgroundRun.objective}`);
+    }
+    if (backgroundRun.checkpointAvailable === true) {
+      lines.push("  Checkpoint available: yes");
+    }
+  }
+  const history = Array.isArray(detail.recentHistory)
+    ? detail.recentHistory
+        .map((entry) => asRecord(entry))
+        .filter((entry): entry is Record<string, unknown> => Boolean(entry))
+    : [];
+  if (history.length > 0) {
+    lines.push("");
+    lines.push("Recent history:");
+    for (const entry of history) {
+      const sender =
+        typeof entry.sender === "string" ? entry.sender : "unknown";
+      const content =
+        typeof entry.content === "string" ? entry.content.trim() : "";
+      lines.push(`  ${sender}: ${content || "(empty)"}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+function formatSessionHistoryReply(
+  history: readonly Record<string, unknown>[],
+): string {
+  if (history.length === 0) {
+    return "No session history found.";
+  }
+  return [
+    `Session history (${history.length}):`,
+    ...history.map((entry) => {
+      const sender =
+        typeof entry.sender === "string" ? entry.sender : "unknown";
+      const toolName =
+        typeof entry.toolName === "string" ? ` ${entry.toolName}` : "";
+      const content =
+        typeof entry.content === "string" && entry.content.trim().length > 0
+          ? entry.content.trim()
+          : "(empty)";
+      return `  ${sender}${toolName}: ${content}`;
+    }),
+  ].join("\n");
+}
+
+function suggestNextWorkflowStage(params: {
+  readonly currentStage: SessionWorkflowStage;
+  readonly plannerStatus: string;
+  readonly ownership: readonly WorkflowOwnershipEntry[];
+  readonly hasChanges: boolean;
+}): SessionWorkflowStage | undefined {
+  if (params.currentStage === "plan") {
+    return "implement";
+  }
+  if (params.currentStage === "implement") {
+    if (params.plannerStatus === "needs_verification") {
+      return "verify";
+    }
+    if (params.hasChanges) {
+      return "review";
+    }
+  }
+  if (params.currentStage === "review") {
+    return "verify";
+  }
+  if (params.currentStage === "verify") {
+    return params.plannerStatus === "completed" ? "idle" : undefined;
+  }
+  if (params.currentStage === "idle" && params.ownership.length > 0) {
+    return "review";
+  }
+  return undefined;
+}
+
+function buildReviewDelegatePrompt(params: {
+  readonly branchReply: string;
+  readonly summaryReply: string;
+  readonly diffReply: string;
+}): string {
+  return [
+    "Review the current changes and return findings-first output.",
+    "",
+    params.branchReply,
+    "",
+    params.summaryReply,
+    "",
+    params.diffReply,
+  ].join("\n");
+}
+
+function buildVerifyDelegatePrompt(params: {
+  readonly branchReply: string;
+  readonly summaryReply: string;
+  readonly taskReply: string;
+  readonly runtimeStatusSnapshot?: Record<string, unknown>;
+}): string {
+  const verifierStages =
+    typeof params.runtimeStatusSnapshot?.verifierStages === "object" &&
+    params.runtimeStatusSnapshot.verifierStages !== null
+      ? JSON.stringify(params.runtimeStatusSnapshot.verifierStages, null, 2)
+      : undefined;
+  return [
+    "Verify the current implementation state for this session.",
+    "",
+    params.branchReply,
+    "",
+    params.summaryReply,
+    "",
+    params.taskReply,
+    ...(verifierStages ? ["", "Runtime verifier snapshot:", verifierStages] : []),
+  ].join("\n");
+}
+
 function summarizeStoredResponse(response: LLMStoredResponse): string {
   const usage = response.usage
     ? `prompt=${response.usage.promptTokens}, completion=${response.usage.completionTokens}, total=${response.usage.totalTokens}`
@@ -553,6 +1473,14 @@ export interface CommandRegistryDaemonContext {
     usedFallback: boolean;
   } | undefined;
   handleConfigReload(): Promise<void>;
+  getMcpManager(): import("../mcp-client/manager.js").MCPManager | null;
+  getPluginCatalog(): PluginCatalog;
+  discoverShellSkills(params: {
+    sessionId: string;
+  }): Promise<DiscoveredSkill[]>;
+  resolveShellSkillDiscoveryPaths(params: {
+    sessionId: string;
+  }): Promise<DiscoveryPaths>;
   getVoiceBridge(): VoiceBridge | null;
   getDesktopManager(): {
     getOrCreate(sessionId: string, opts?: { maxMemory?: string; maxCpu?: string }): Promise<{
@@ -614,6 +1542,63 @@ export interface CommandRegistryDaemonContext {
     channel: string;
     reply: (content: string) => Promise<void>;
   }): Promise<{ filePath: string; started: boolean }>;
+  listAgentRoles(): readonly ShellAgentRoleDescriptor[];
+  launchShellAgentTask(params: {
+    parentSessionId: string;
+    roleId: string;
+    objective: string;
+    prompt?: string;
+    taskId?: string;
+    shellProfile?: SessionShellProfile;
+    toolBundle?: ShellAgentToolBundleName;
+    workspaceRoot?: string;
+    workingDirectory?: string;
+    worktree?: "auto" | string;
+    wait?: boolean;
+    timeoutMs?: number;
+  }): Promise<{
+    role: ShellAgentRoleDescriptor;
+    sessionId: string;
+    taskId?: string;
+    output: string;
+    success: boolean;
+    status: string;
+    waited: boolean;
+  }>;
+  inspectShellAgentTask(parentSessionId: string, target: string): Promise<{
+    sessionId?: string;
+    taskId?: string;
+    status: string;
+    task: string;
+    role?: string;
+    roleSource?: ShellAgentRoleSource;
+    toolBundle?: string;
+    shellProfile?: SessionShellProfile;
+    executionLocation?: string;
+    workspaceRoot?: string;
+    workingDirectory?: string;
+    worktreePath?: string;
+    outputPreview?: string;
+  } | undefined>;
+  stopShellAgentTask(parentSessionId: string, target: string): Promise<{
+    stopped: boolean;
+    sessionId?: string;
+    taskId?: string;
+  }>;
+  listSubAgentInfo(parentSessionId: string): Array<{
+    sessionId: string;
+    status: string;
+    task: string;
+    role?: string;
+    roleSource?: string;
+    toolBundle?: string;
+    taskId?: string;
+    shellProfile?: SessionShellProfile;
+    workspaceRoot?: string;
+    workingDirectory?: string;
+    executionLocation?: string;
+    worktreePath?: string;
+  }>;
 }
 
 // ============================================================================
@@ -635,8 +1620,39 @@ export function createDaemonCommandRegistry(
   progressTracker?: ProgressTracker,
   pipelineExecutor?: PipelineExecutor,
 ): SlashCommandRegistry {
-  void hooks; void baseToolHandler; void approvalEngine;
+  void hooks; void baseToolHandler; void approvalEngine; void skillList;
   const commandRegistry = new SlashCommandRegistry({ logger: ctx.logger });
+  const requireShellFeature = async (params: {
+    readonly cmdCtx: {
+      sessionId: string;
+      reply: (content: string) => Promise<void>;
+    };
+    readonly feature:
+      | "shellProfiles"
+      | "codingCommands"
+      | "shellExtensions"
+      | "watchCockpit"
+      | "multiAgent";
+    readonly domain: "shell" | "extensions" | "watch";
+    readonly label: string;
+  }): Promise<boolean> => {
+    const decision = evaluateSessionShellRollout({
+      ctx,
+      sessionId: resolveSessionId(params.cmdCtx.sessionId),
+      feature: params.feature,
+      domain: params.domain,
+    });
+    if (decision.allowed) {
+      return true;
+    }
+    await params.cmdCtx.reply(
+      formatShellRolloutHoldback({
+        label: params.label,
+        decision,
+      }),
+    );
+    return false;
+  };
   for (const command of createDefaultCommands()) {
     commandRegistry.register(command);
   }
@@ -882,10 +1898,19 @@ export function createDaemonCommandRegistry(
       const encryptedReasoningEnabled =
         ctx.gateway?.config.llm?.includeEncryptedReasoning === true;
       const responseAnchor = getSessionResumeAnchorResponseId(session);
+      const shellProfile = resolveEffectiveShellProfileForSession({
+        ctx,
+        sessionId,
+        preferred: resolveSessionShellProfile(session?.metadata ?? {}),
+      });
+      const workflowState = resolveSessionWorkflowState(session?.metadata ?? {});
       await cmdCtx.reply(
         `Agent is running.\n` +
           `Session: ${cmdCtx.sessionId}\n` +
           `History: ${historyLen} messages\n` +
+          `Shell Profile: ${shellProfile}\n` +
+          `Workflow Stage: ${formatSessionWorkflowStage(workflowState.stage)}\n` +
+          `Worktree Mode: ${formatSessionWorktreeMode(workflowState.worktreeMode)}\n` +
           `LLM: ${providerNames}\n` +
           `Stateful: ${
             statefulConfig?.enabled === true
@@ -899,11 +1924,1599 @@ export function createDaemonCommandRegistry(
     },
   });
   commandRegistry.register({
+    name: "profile",
+    description: "Show or set the active shell profile",
+    args: "[list|general|coding|research|validation|documentation|operator]",
+    global: true,
+    handler: async (cmdCtx) => {
+      const sessionId = resolveSessionId(cmdCtx.sessionId);
+      const session = sessionMgr.get(sessionId);
+      if (!session) {
+        await cmdCtx.reply("No active session.");
+        return;
+      }
+
+      const current = resolveEffectiveShellProfileForSession({
+        ctx,
+        sessionId,
+        preferred: resolveSessionShellProfile(session.metadata),
+      });
+      const arg = cmdCtx.argv[0]?.toLowerCase();
+
+      if (!arg || arg === "status") {
+        await cmdCtx.reply(
+          `Shell profile: ${current}\n` +
+            `Available: ${SESSION_SHELL_PROFILES.join(", ")}`,
+        );
+        return;
+      }
+
+      if (arg === "list") {
+        await cmdCtx.reply(
+          `Shell profile: ${current}\n` +
+            `Default: ${DEFAULT_SESSION_SHELL_PROFILE}\n` +
+            "Profiles:\n" +
+            formatShellProfileList(current),
+        );
+        return;
+      }
+
+      const nextProfile = coerceSessionShellProfile(arg);
+      if (!nextProfile) {
+        await cmdCtx.reply(
+          "Usage: /profile [list|general|coding|research|validation|documentation|operator]",
+        );
+        return;
+      }
+
+      const resolvedProfile = resolveConfiguredShellProfile({
+        autonomy: ctx.gateway?.config.autonomy,
+        tenantId: ctx.resolvePolicyScopeForSession({
+          sessionId,
+          channel: "webchat",
+        }).tenantId,
+        requested: nextProfile,
+        stableKey: sessionId,
+      });
+      ensureSessionShellProfile(session.metadata, resolvedProfile.profile);
+      if (cmdCtx.channel === "webchat") {
+        await persistWebSessionRuntimeState(
+          memoryBackend,
+          cmdCtx.sessionId,
+          session,
+        );
+      }
+
+      await cmdCtx.reply(
+        resolvedProfile.coerced
+          ? [
+              `Shell profile set to ${resolvedProfile.profile}.`,
+              formatShellRolloutHoldback({
+                label: `Profile "${resolvedProfile.requestedProfile}"`,
+                decision: resolvedProfile.decision,
+              }),
+            ].join("\n")
+          : `Shell profile set to ${resolvedProfile.profile}.\nThis currently updates session metadata; profile-aware routing and tool curation build on top of it.`,
+      );
+    },
+  });
+  commandRegistry.register({
+    name: "files",
+    description: "Show repo inventory or search files in the active workspace",
+    args: "[query|json]",
+    global: true,
+    handler: async (cmdCtx) => {
+      if (
+        !(await requireShellFeature({
+          cmdCtx,
+          feature: "codingCommands",
+          domain: "shell",
+          label: "Files command",
+        }))
+      ) {
+        return;
+      }
+      let jsonArgs: Record<string, unknown> | undefined;
+      try {
+        jsonArgs = parseCommandJsonArgs(cmdCtx.args);
+      } catch (error) {
+        await cmdCtx.reply(
+          `Usage: /files [query] [--regex] [--path <dir>] [--glob <pattern1,pattern2>] [--max <n>]\n${toErrorMessage(error)}`,
+        );
+        return;
+      }
+      if (jsonArgs) {
+        const query =
+          typeof jsonArgs.query === "string" ? jsonArgs.query.trim() : "";
+        const result = await executeStructuredTool(
+          baseToolHandler,
+          query.length > 0 ? "system.searchFiles" : "system.repoInventory",
+          jsonArgs,
+        );
+        await cmdCtx.reply(
+          query.length > 0
+            ? formatSearchFilesReply(result)
+            : formatRepoInventoryReply(result),
+        );
+        return;
+      }
+      const query = cmdCtx.argv
+        .filter((token) => !token.startsWith("--"))
+        .join(" ")
+        .trim();
+      if (!query) {
+        const result = await executeStructuredTool(
+          baseToolHandler,
+          "system.repoInventory",
+          {},
+        );
+        await cmdCtx.reply(formatRepoInventoryReply(result));
+        return;
+      }
+      const result = await executeStructuredTool(
+        baseToolHandler,
+        "system.searchFiles",
+        {
+          query,
+          ...(parseInlineFlag(cmdCtx.argv, "path")
+            ? { path: parseInlineFlag(cmdCtx.argv, "path") }
+            : {}),
+          ...(hasInlineFlag(cmdCtx.argv, "regex") ? { regex: true } : {}),
+          ...(parseCsvFlag(cmdCtx.argv, "glob")
+            ? { filePatterns: parseCsvFlag(cmdCtx.argv, "glob") }
+            : {}),
+          ...(parseIntegerFlag(cmdCtx.argv, "max")
+            ? { maxResults: parseIntegerFlag(cmdCtx.argv, "max") }
+            : {}),
+        },
+      );
+      await cmdCtx.reply(formatSearchFilesReply(result));
+    },
+  });
+  commandRegistry.register({
+    name: "grep",
+    description: "Search repo-local files with the native coding grep tool",
+    args: "<pattern|json>",
+    global: true,
+    handler: async (cmdCtx) => {
+      if (
+        !(await requireShellFeature({
+          cmdCtx,
+          feature: "codingCommands",
+          domain: "shell",
+          label: "Grep command",
+        }))
+      ) {
+        return;
+      }
+      let jsonArgs: Record<string, unknown> | undefined;
+      try {
+        jsonArgs = parseCommandJsonArgs(cmdCtx.args);
+      } catch (error) {
+        await cmdCtx.reply(
+          `Usage: /grep <pattern> [--regex] [--path <dir>] [--glob <pattern1,pattern2>] [--context <n>] [--max <n>]\n${toErrorMessage(error)}`,
+        );
+        return;
+      }
+      const args =
+        jsonArgs ??
+        {
+          pattern: cmdCtx.argv
+            .filter((token) => !token.startsWith("--"))
+            .join(" ")
+            .trim(),
+          ...(parseInlineFlag(cmdCtx.argv, "path")
+            ? { path: parseInlineFlag(cmdCtx.argv, "path") }
+            : {}),
+          ...(hasInlineFlag(cmdCtx.argv, "regex") ? { regex: true } : {}),
+          ...(parseCsvFlag(cmdCtx.argv, "glob")
+            ? { filePatterns: parseCsvFlag(cmdCtx.argv, "glob") }
+            : {}),
+          ...(parseIntegerFlag(cmdCtx.argv, "context")
+            ? { contextLines: parseIntegerFlag(cmdCtx.argv, "context") }
+            : {}),
+          ...(parseIntegerFlag(cmdCtx.argv, "max")
+            ? { maxResults: parseIntegerFlag(cmdCtx.argv, "max") }
+            : {}),
+        };
+      if (typeof args.pattern !== "string" || args.pattern.trim().length === 0) {
+        await cmdCtx.reply(
+          "Usage: /grep <pattern> [--regex] [--path <dir>] [--glob <pattern1,pattern2>] [--context <n>] [--max <n>]",
+        );
+        return;
+      }
+      const result = await executeStructuredTool(
+        baseToolHandler,
+        "system.grep",
+        args,
+      );
+      await cmdCtx.reply(formatGrepReply(result));
+    },
+  });
+  commandRegistry.register({
+    name: "git",
+    description: "Run structured git status, diff, branch, show, summary, or worktree commands",
+    args: "<status|diff|show|branch|summary|worktree>",
+    global: true,
+    handler: async (cmdCtx) => {
+      if (
+        !(await requireShellFeature({
+          cmdCtx,
+          feature: "codingCommands",
+          domain: "shell",
+          label: "Git command",
+        }))
+      ) {
+        return;
+      }
+      let jsonArgs: Record<string, unknown> | undefined;
+      try {
+        jsonArgs = parseCommandJsonArgs(cmdCtx.args);
+      } catch (error) {
+        await cmdCtx.reply(`Usage: /git <status|diff|show|branch|summary|worktree>\n${toErrorMessage(error)}`);
+        return;
+      }
+
+      const subcommand =
+        typeof jsonArgs?.subcommand === "string"
+          ? jsonArgs.subcommand.trim().toLowerCase()
+          : cmdCtx.argv[0]?.toLowerCase();
+      if (!subcommand) {
+        await cmdCtx.reply(
+          "Usage: /git <status|diff|show|branch|summary|worktree>",
+        );
+        return;
+      }
+
+      if (subcommand === "status") {
+        const result = await executeStructuredTool(
+          baseToolHandler,
+          "system.gitStatus",
+          jsonArgs ?? {},
+        );
+        await cmdCtx.reply(formatGitStatusReply(result));
+        return;
+      }
+
+      if (subcommand === "branch") {
+        const result = await executeStructuredTool(
+          baseToolHandler,
+          "system.gitBranchInfo",
+          jsonArgs ?? {},
+        );
+        await cmdCtx.reply(formatGitBranchReply(result));
+        return;
+      }
+
+      if (subcommand === "summary") {
+        const result = await executeStructuredTool(
+          baseToolHandler,
+          "system.gitChangeSummary",
+          jsonArgs ?? {},
+        );
+        await cmdCtx.reply(formatGitSummaryReply(result));
+        return;
+      }
+
+      if (subcommand === "show") {
+        const ref =
+          typeof jsonArgs?.ref === "string"
+            ? jsonArgs.ref.trim()
+            : cmdCtx.argv[1]?.trim();
+        if (!ref) {
+          await cmdCtx.reply("Usage: /git show <ref> [--stat]");
+          return;
+        }
+        const result = await executeStructuredTool(
+          baseToolHandler,
+          "system.gitShow",
+          jsonArgs ?? {
+            ref,
+            ...(hasInlineFlag(cmdCtx.argv, "stat") ? { noPatch: true } : {}),
+          },
+        );
+        await cmdCtx.reply(formatGitShowReply(result));
+        return;
+      }
+
+      if (subcommand === "diff") {
+        const result = await executeStructuredTool(
+          baseToolHandler,
+          "system.gitDiff",
+          jsonArgs ?? {
+            ...(hasInlineFlag(cmdCtx.argv, "staged") ? { staged: true } : {}),
+            ...(parseInlineFlag(cmdCtx.argv, "from")
+              ? { fromRef: parseInlineFlag(cmdCtx.argv, "from") }
+              : {}),
+            ...(parseInlineFlag(cmdCtx.argv, "to")
+              ? { toRef: parseInlineFlag(cmdCtx.argv, "to") }
+              : {}),
+            ...(parseCsvFlag(cmdCtx.argv, "files")
+              ? { filePaths: parseCsvFlag(cmdCtx.argv, "files") }
+              : {}),
+          },
+        );
+        await cmdCtx.reply(formatGitDiffReply(result));
+        return;
+      }
+
+      if (subcommand === "worktree") {
+        const worktreeCommand =
+          typeof jsonArgs?.action === "string"
+            ? jsonArgs.action.trim().toLowerCase()
+            : cmdCtx.argv[1]?.toLowerCase();
+        if (!worktreeCommand) {
+          await cmdCtx.reply(
+            "Usage: /git worktree <list|create|remove|status> [...]",
+          );
+          return;
+        }
+        if (worktreeCommand === "list") {
+          const result = await executeStructuredTool(
+            baseToolHandler,
+            "system.gitWorktreeList",
+            jsonArgs ?? {},
+          );
+          await cmdCtx.reply(formatGitWorktreeListReply(result));
+          return;
+        }
+        if (worktreeCommand === "create") {
+          const worktreePath =
+            typeof jsonArgs?.worktreePath === "string"
+              ? jsonArgs.worktreePath.trim()
+              : cmdCtx.argv[2]?.trim();
+          if (!worktreePath) {
+            await cmdCtx.reply(
+              "Usage: /git worktree create <path> [--branch <name>] [--ref <ref>] [--detached]",
+            );
+            return;
+          }
+          const result = await executeStructuredTool(
+            baseToolHandler,
+            "system.gitWorktreeCreate",
+            jsonArgs ?? {
+              worktreePath,
+              ...(parseInlineFlag(cmdCtx.argv, "branch")
+                ? { branch: parseInlineFlag(cmdCtx.argv, "branch") }
+                : {}),
+              ...(parseInlineFlag(cmdCtx.argv, "ref")
+                ? { ref: parseInlineFlag(cmdCtx.argv, "ref") }
+                : {}),
+              ...(hasInlineFlag(cmdCtx.argv, "detached") ? { detached: true } : {}),
+            },
+          );
+          await cmdCtx.reply(formatGitWorktreeMutationReply("create", result));
+          return;
+        }
+        if (worktreeCommand === "remove") {
+          const worktreePath =
+            typeof jsonArgs?.worktreePath === "string"
+              ? jsonArgs.worktreePath.trim()
+              : cmdCtx.argv[2]?.trim();
+          if (!worktreePath) {
+            await cmdCtx.reply(
+              "Usage: /git worktree remove <path> [--force]",
+            );
+            return;
+          }
+          const result = await executeStructuredTool(
+            baseToolHandler,
+            "system.gitWorktreeRemove",
+            jsonArgs ?? {
+              worktreePath,
+              ...(hasInlineFlag(cmdCtx.argv, "force") ? { force: true } : {}),
+            },
+          );
+          await cmdCtx.reply(formatGitWorktreeMutationReply("remove", result));
+          return;
+        }
+        if (worktreeCommand === "status") {
+          const worktreePath =
+            typeof jsonArgs?.worktreePath === "string"
+              ? jsonArgs.worktreePath.trim()
+              : cmdCtx.argv[2]?.trim();
+          if (!worktreePath) {
+            await cmdCtx.reply(
+              "Usage: /git worktree status <path>",
+            );
+            return;
+          }
+          const result = await executeStructuredTool(
+            baseToolHandler,
+            "system.gitWorktreeStatus",
+            jsonArgs ?? { worktreePath },
+          );
+          await cmdCtx.reply(formatGitWorktreeStatusReply(result));
+          return;
+        }
+        await cmdCtx.reply(
+          "Usage: /git worktree <list|create|remove|status> [...]",
+        );
+        return;
+      }
+
+      await cmdCtx.reply(
+        "Usage: /git <status|diff|show|branch|summary|worktree>",
+      );
+    },
+  });
+  commandRegistry.register({
+    name: "branch",
+    description: "Alias for /git branch",
+    global: true,
+    handler: async (cmdCtx) => {
+      await commandRegistry
+        .get("git")
+        ?.handler({
+          ...cmdCtx,
+          args: "branch",
+          argv: ["branch"],
+        });
+    },
+  });
+  commandRegistry.register({
+    name: "worktree",
+    description: "Alias for /git worktree",
+    args: "<list|create|remove|status>",
+    global: true,
+    handler: async (cmdCtx) => {
+      const args = cmdCtx.args.trim();
+      const forwardedArgs =
+        args.startsWith("{")
+          ? JSON.stringify({
+              subcommand: "worktree",
+              ...(JSON.parse(args) as Record<string, unknown>),
+            })
+          : `worktree${args.length > 0 ? ` ${args}` : ""}`;
+      await commandRegistry
+        .get("git")
+        ?.handler({
+          ...cmdCtx,
+          args: forwardedArgs,
+          argv: args.startsWith("{") ? ["worktree"] : ["worktree", ...cmdCtx.argv],
+        });
+    },
+  });
+  commandRegistry.register({
+    name: "diff",
+    description: "Show repo change summary plus a structured git diff",
+    args: "[--staged|json]",
+    global: true,
+    handler: async (cmdCtx) => {
+      if (
+        !(await requireShellFeature({
+          cmdCtx,
+          feature: "codingCommands",
+          domain: "shell",
+          label: "Diff command",
+        }))
+      ) {
+        return;
+      }
+      let jsonArgs: Record<string, unknown> | undefined;
+      try {
+        jsonArgs = parseCommandJsonArgs(cmdCtx.args);
+      } catch (error) {
+        await cmdCtx.reply(`Usage: /diff [--staged] [--from <ref>] [--to <ref>] [--files <a,b>]\n${toErrorMessage(error)}`);
+        return;
+      }
+      const summary = await executeStructuredTool(
+        baseToolHandler,
+        "system.gitChangeSummary",
+        jsonArgs ?? {},
+      );
+      const diff = await executeStructuredTool(
+        baseToolHandler,
+        "system.gitDiff",
+        jsonArgs ?? {
+          ...(hasInlineFlag(cmdCtx.argv, "staged") ? { staged: true } : {}),
+          ...(parseInlineFlag(cmdCtx.argv, "from")
+            ? { fromRef: parseInlineFlag(cmdCtx.argv, "from") }
+            : {}),
+          ...(parseInlineFlag(cmdCtx.argv, "to")
+            ? { toRef: parseInlineFlag(cmdCtx.argv, "to") }
+            : {}),
+          ...(parseCsvFlag(cmdCtx.argv, "files")
+            ? { filePaths: parseCsvFlag(cmdCtx.argv, "files") }
+            : {}),
+        },
+      );
+      await cmdCtx.reply(
+        `${formatGitSummaryReply(summary)}\n\n${formatGitDiffReply(diff)}`,
+      );
+    },
+  });
+  commandRegistry.register({
+    name: "review",
+    description: "Summarize the current repo state for human or agent review",
+    args: "[--staged|--delegate]",
+    global: true,
+    handler: async (cmdCtx) => {
+      if (
+        !(await requireShellFeature({
+          cmdCtx,
+          feature: "codingCommands",
+          domain: "shell",
+          label: "Review command",
+        }))
+      ) {
+        return;
+      }
+      let jsonArgs: Record<string, unknown> | undefined;
+      try {
+        jsonArgs = parseCommandJsonArgs(cmdCtx.args);
+      } catch (error) {
+        await cmdCtx.reply(`Usage: /review [--staged] [--delegate]\n${toErrorMessage(error)}`);
+        return;
+      }
+      const wantsDelegate =
+        jsonArgs?.delegate === true || hasInlineFlag(cmdCtx.argv, "delegate");
+      const branchInfo = await executeStructuredTool(
+        baseToolHandler,
+        "system.gitBranchInfo",
+        {},
+      );
+      const summary = await executeStructuredTool(
+        baseToolHandler,
+        "system.gitChangeSummary",
+        {},
+      );
+      const diff = await executeStructuredTool(
+        baseToolHandler,
+        "system.gitDiff",
+        jsonArgs ??
+          (hasInlineFlag(cmdCtx.argv, "staged") ? { staged: true } : {}),
+      );
+      const reviewSurface = [
+        "Review surface:",
+        formatGitBranchReply(branchInfo),
+        "",
+        formatGitSummaryReply(summary),
+        "",
+        typeof diff.diff === "string" && diff.diff.trim().length > 0
+          ? formatGitDiffReply(diff)
+          : "No diff content to review.",
+      ].join("\n");
+      const resolvedSessionId = resolveSessionId(cmdCtx.sessionId);
+      const session = sessionMgr.get(resolvedSessionId);
+      const effectiveShellProfile = resolveEffectiveShellProfileForSession({
+        ctx,
+        sessionId: resolvedSessionId,
+        preferred: resolveSessionShellProfile(session?.metadata ?? {}),
+      });
+      if (!wantsDelegate) {
+        if (session) {
+          updateReviewSurfaceState(session, {
+            status: "completed",
+            source: "local",
+            summaryPreview: reviewSurface,
+          });
+          await persistWebSessionRuntimeState(memoryBackend, cmdCtx.sessionId, session);
+        }
+        await cmdCtx.reply(reviewSurface);
+        return;
+      }
+      if (session) {
+        updateReviewSurfaceState(session, {
+          status: "running",
+          source: "delegated",
+        });
+        await persistWebSessionRuntimeState(memoryBackend, cmdCtx.sessionId, session);
+      }
+      const delegated = await ctx.launchShellAgentTask({
+        parentSessionId: resolvedSessionId,
+        roleId: "review",
+        objective: "Review the current changes and return findings-first output.",
+        prompt: buildReviewDelegatePrompt({
+          branchReply: formatGitBranchReply(branchInfo),
+          summaryReply: formatGitSummaryReply(summary),
+          diffReply:
+            typeof diff.diff === "string" && diff.diff.trim().length > 0
+              ? formatGitDiffReply(diff)
+              : "No diff content to review.",
+        }),
+        shellProfile: effectiveShellProfile,
+        wait: true,
+      });
+      if (session) {
+        updateReviewSurfaceState(session, {
+          status: delegated.success === true ? "completed" : "failed",
+          source: "delegated",
+          delegatedSessionId: delegated.sessionId,
+          summaryPreview: delegated.output,
+        });
+        await persistWebSessionRuntimeState(memoryBackend, cmdCtx.sessionId, session);
+      }
+      await cmdCtx.reply(
+        [
+          reviewSurface,
+          "",
+          `Delegated reviewer session: ${delegated.sessionId} [${delegated.status}]`,
+          delegated.output.trim().length > 0
+            ? delegated.output.trim()
+            : "Delegated reviewer returned no output.",
+        ].join("\n"),
+      );
+    },
+  });
+  commandRegistry.register({
+    name: "agents",
+    description: "List, spawn, inspect, assign, or stop child agents",
+    args: "[roles|list|spawn|assign|inspect|stop]",
+    global: true,
+    handler: async (cmdCtx) => {
+      const sessionId = resolveSessionId(cmdCtx.sessionId);
+      const session = sessionMgr.get(sessionId);
+      if (!session) {
+        await cmdCtx.reply("No active session.");
+        return;
+      }
+      if (
+        !(await requireShellFeature({
+          cmdCtx,
+          feature: "multiAgent",
+          domain: "shell",
+          label: "Agents command",
+        }))
+      ) {
+        return;
+      }
+      let jsonArgs: Record<string, unknown> | undefined;
+      try {
+        jsonArgs = parseCommandJsonArgs(cmdCtx.args);
+      } catch (error) {
+        await cmdCtx.reply(
+          `Usage: /agents [roles|list|spawn|assign|inspect|stop]\n${toErrorMessage(error)}`,
+        );
+        return;
+      }
+      const subcommand =
+        typeof jsonArgs?.subcommand === "string"
+          ? jsonArgs.subcommand.trim().toLowerCase()
+          : cmdCtx.argv[0]?.toLowerCase() ?? "list";
+      if (subcommand === "roles") {
+        await cmdCtx.reply(formatAgentRoleCatalog(ctx.listAgentRoles()));
+        return;
+      }
+      if (subcommand === "list") {
+        const includeAll =
+          jsonArgs?.all === true || hasInlineFlag(cmdCtx.argv, "all");
+        const entries = ctx.listSubAgentInfo(sessionId).filter((entry) =>
+          includeAll ? true : entry.status === "running"
+        );
+        await cmdCtx.reply(formatAgentListReply(entries));
+        return;
+      }
+      if (subcommand === "inspect") {
+        const target =
+          typeof jsonArgs?.target === "string"
+            ? jsonArgs.target.trim()
+            : cmdCtx.argv[1]?.trim();
+        if (!target) {
+          await cmdCtx.reply("Usage: /agents inspect <childSessionId|taskId>");
+          return;
+        }
+        const detail = await ctx.inspectShellAgentTask(sessionId, target);
+        await cmdCtx.reply(
+          detail
+            ? formatAgentInspectReply(detail)
+            : `Child agent "${target}" is unavailable.`,
+        );
+        return;
+      }
+      if (subcommand === "stop") {
+        const target =
+          typeof jsonArgs?.target === "string"
+            ? jsonArgs.target.trim()
+            : cmdCtx.argv[1]?.trim();
+        if (!target) {
+          await cmdCtx.reply("Usage: /agents stop <childSessionId|taskId>");
+          return;
+        }
+        const stopped = await ctx.stopShellAgentTask(sessionId, target);
+        await cmdCtx.reply(
+          stopped.stopped
+            ? `Stopped child agent ${stopped.sessionId ?? target}.${stopped.taskId ? ` Task ${stopped.taskId}.` : ""}`
+            : `Child agent "${target}" could not be stopped.`,
+        );
+        return;
+      }
+      if (subcommand !== "spawn" && subcommand !== "assign") {
+        await cmdCtx.reply(
+          "Usage: /agents [roles|list|spawn|assign|inspect|stop]",
+        );
+        return;
+      }
+
+      const taskId =
+        subcommand === "assign"
+          ? typeof jsonArgs?.taskId === "string"
+            ? jsonArgs.taskId.trim()
+            : cmdCtx.argv[1]?.trim()
+          : undefined;
+      const roleId =
+        typeof jsonArgs?.roleId === "string"
+          ? jsonArgs.roleId.trim()
+          : subcommand === "assign"
+            ? cmdCtx.argv[2]?.trim()
+            : cmdCtx.argv[1]?.trim();
+      if (!roleId) {
+        await cmdCtx.reply(
+          subcommand === "assign"
+            ? "Usage: /agents assign <taskId> <role> [--objective <text>] [--profile <name>] [--bundle <name>] [--workspace <path>] [--worktree auto|<path>] [--cwd <path>] [--wait]"
+            : "Usage: /agents spawn <role> --objective <text> [--profile <name>] [--bundle <name>] [--workspace <path>] [--worktree auto|<path>] [--cwd <path>] [--wait]",
+        );
+        return;
+      }
+      const shellProfile = coerceSessionShellProfile(
+        typeof jsonArgs?.profile === "string"
+          ? jsonArgs.profile
+          : parseInlineFlag(cmdCtx.argv, "profile"),
+      );
+      const toolBundle = coerceShellAgentToolBundleName(
+        typeof jsonArgs?.toolBundle === "string"
+          ? jsonArgs.toolBundle
+          : parseInlineFlag(cmdCtx.argv, "bundle"),
+      );
+      const worktreeValue =
+        typeof jsonArgs?.worktree === "string"
+          ? jsonArgs.worktree.trim()
+          : parseInlineFlag(cmdCtx.argv, "worktree");
+      const workspaceRoot =
+        typeof jsonArgs?.workspaceRoot === "string"
+          ? jsonArgs.workspaceRoot.trim()
+          : parseInlineFlag(cmdCtx.argv, "workspace");
+      const workingDirectory =
+        typeof jsonArgs?.workingDirectory === "string"
+          ? jsonArgs.workingDirectory.trim()
+          : parseInlineFlag(cmdCtx.argv, "cwd");
+      const wantsWait =
+        jsonArgs?.wait === true || hasInlineFlag(cmdCtx.argv, "wait");
+
+      let objective =
+        typeof jsonArgs?.objective === "string"
+          ? jsonArgs.objective.trim()
+          : parseInlineFlag(cmdCtx.argv, "objective");
+      let prompt =
+        typeof jsonArgs?.prompt === "string" ? jsonArgs.prompt.trim() : undefined;
+      if (subcommand === "assign") {
+        if (!taskId) {
+          await cmdCtx.reply(
+            "Usage: /agents assign <taskId> <role> [--objective <text>] [--profile <name>] [--bundle <name>] [--workspace <path>] [--worktree auto|<path>] [--cwd <path>] [--wait]",
+          );
+          return;
+        }
+        const taskDetail = await executeStructuredTool(
+          baseToolHandler,
+          "task.get",
+          { [TASK_LIST_ARG]: cmdCtx.sessionId, taskId },
+        );
+        const taskRecord =
+          typeof taskDetail.task === "object" && taskDetail.task !== null
+            ? (taskDetail.task as Record<string, unknown>)
+            : undefined;
+        if (!taskRecord) {
+          await cmdCtx.reply(`Task "${taskId}" is unavailable.`);
+          return;
+        }
+        objective =
+          objective ??
+          (typeof taskRecord.subject === "string" ? taskRecord.subject : undefined);
+        prompt =
+          prompt ??
+          [
+            "Execute the assigned task for the parent session.",
+            `Task id: ${taskId}`,
+            `Subject: ${typeof taskRecord.subject === "string" ? taskRecord.subject : "unknown"}`,
+            `Description: ${typeof taskRecord.description === "string" ? taskRecord.description : "none"}`,
+            objective ? `Objective: ${objective}` : null,
+          ]
+            .filter((value): value is string => Boolean(value))
+            .join("\n");
+      }
+      if (!objective) {
+        await cmdCtx.reply(
+          subcommand === "assign"
+            ? "Assigned child agents need a task subject or explicit --objective."
+            : "Child agent spawn requires --objective <text>.",
+        );
+        return;
+      }
+
+      const launched = await ctx.launchShellAgentTask({
+        parentSessionId: sessionId,
+        roleId,
+        objective,
+        ...(prompt ? { prompt } : {}),
+        ...(taskId ? { taskId } : {}),
+        ...(shellProfile ? { shellProfile } : {}),
+        ...(toolBundle ? { toolBundle } : {}),
+        ...(workspaceRoot ? { workspaceRoot } : {}),
+        ...(workingDirectory ? { workingDirectory } : {}),
+        ...(worktreeValue
+          ? { worktree: worktreeValue === "auto" ? "auto" : worktreeValue }
+          : {}),
+        ...(wantsWait ? { wait: true } : {}),
+      });
+      await cmdCtx.reply(
+        launched.waited
+          ? [
+              `${launched.role.displayName} agent ${launched.sessionId} [${launched.status}]`,
+              ...(launched.taskId ? [`Task: ${launched.taskId}`] : []),
+              launched.output.trim().length > 0
+                ? launched.output.trim()
+                : `${launched.role.displayName} agent returned no output.`,
+            ].join("\n")
+          : [
+              `${launched.role.displayName} agent started.`,
+              `Session: ${launched.sessionId}`,
+              ...(launched.taskId ? [`Task: ${launched.taskId}`] : []),
+              `Role: ${launched.role.id}`,
+              `Profile: ${shellProfile ?? launched.role.defaultShellProfile}`,
+              `Bundle: ${toolBundle ?? launched.role.defaultToolBundle}`,
+            ].join("\n"),
+      );
+    },
+  });
+  commandRegistry.register({
+    name: "tasks",
+    description: "List or inspect session task-tracker tasks",
+    args: "[list|get <taskId>|wait <taskId>|output <taskId>]",
+    global: true,
+    handler: async (cmdCtx) => {
+      let jsonArgs: Record<string, unknown> | undefined;
+      try {
+        jsonArgs = parseCommandJsonArgs(cmdCtx.args);
+      } catch (error) {
+        await cmdCtx.reply(
+          `Usage: /tasks [list|get <taskId>|wait <taskId>|output <taskId>]\n${toErrorMessage(error)}`,
+        );
+        return;
+      }
+      const subcommand =
+        typeof jsonArgs?.subcommand === "string"
+          ? jsonArgs.subcommand.trim().toLowerCase()
+          : cmdCtx.argv[0]?.toLowerCase() ?? "list";
+      if (subcommand === "list") {
+        const result = await executeStructuredTool(
+          baseToolHandler,
+          "task.list",
+          {
+            [TASK_LIST_ARG]: cmdCtx.sessionId,
+            ...(jsonArgs?.status ? { status: jsonArgs.status } : {}),
+            ...(parseInlineFlag(cmdCtx.argv, "status")
+              ? { status: parseInlineFlag(cmdCtx.argv, "status") }
+              : {}),
+          },
+        );
+        await cmdCtx.reply(formatTaskListReply(result));
+        return;
+      }
+
+      const taskId =
+        typeof jsonArgs?.taskId === "string"
+          ? jsonArgs.taskId.trim()
+          : cmdCtx.argv[1]?.trim();
+      if (!taskId) {
+        await cmdCtx.reply(
+          "Usage: /tasks [list|get <taskId>|wait <taskId>|output <taskId>]",
+        );
+        return;
+      }
+
+      if (subcommand === "get") {
+        const result = await executeStructuredTool(
+          baseToolHandler,
+          "task.get",
+          { [TASK_LIST_ARG]: cmdCtx.sessionId, taskId },
+        );
+        await cmdCtx.reply(formatTaskDetailReply(result));
+        return;
+      }
+
+      if (subcommand === "wait") {
+        const result = await executeStructuredTool(
+          baseToolHandler,
+          "task.wait",
+          {
+            [TASK_LIST_ARG]: cmdCtx.sessionId,
+            taskId,
+            ...(typeof jsonArgs?.timeoutMs === "number"
+              ? { timeoutMs: jsonArgs.timeoutMs }
+              : {}),
+            ...(parseIntegerFlag(cmdCtx.argv, "timeout")
+              ? { timeoutMs: parseIntegerFlag(cmdCtx.argv, "timeout") }
+              : {}),
+          },
+        );
+        await cmdCtx.reply(formatTaskDetailReply(result));
+        return;
+      }
+
+      if (subcommand === "output") {
+        const result = await executeStructuredTool(
+          baseToolHandler,
+          "task.output",
+          {
+            [TASK_LIST_ARG]: cmdCtx.sessionId,
+            taskId,
+            ...(jsonArgs?.block === true ? { block: true } : {}),
+            ...(typeof jsonArgs?.timeoutMs === "number"
+              ? { timeoutMs: jsonArgs.timeoutMs }
+              : {}),
+            ...(hasInlineFlag(cmdCtx.argv, "block") ? { block: true } : {}),
+            ...(parseIntegerFlag(cmdCtx.argv, "timeout")
+              ? { timeoutMs: parseIntegerFlag(cmdCtx.argv, "timeout") }
+              : {}),
+          },
+        );
+        await cmdCtx.reply(
+          typeof result.output === "string"
+            ? result.output
+            : formatTaskDetailReply(result),
+        );
+        return;
+      }
+
+      await cmdCtx.reply(
+        "Usage: /tasks [list|get <taskId>|wait <taskId>|output <taskId>]",
+      );
+    },
+  });
+  commandRegistry.register({
+    name: "plan",
+    description: "Show or change the current coding workflow stage for this session",
+    args: "[status|enter|exit|implement|review|verify]",
+    global: true,
+    handler: async (cmdCtx) => {
+      const sessionId = resolveSessionId(cmdCtx.sessionId);
+      const session = sessionMgr.get(sessionId);
+      if (!session) {
+        await cmdCtx.reply("No active session.");
+        return;
+      }
+      if (
+        !(await requireShellFeature({
+          cmdCtx,
+          feature: "codingCommands",
+          domain: "shell",
+          label: "Plan command",
+        }))
+      ) {
+        return;
+      }
+      let jsonArgs: Record<string, unknown> | undefined;
+      try {
+        jsonArgs = parseCommandJsonArgs(cmdCtx.args);
+      } catch (error) {
+        await cmdCtx.reply(
+          `Usage: /plan [status|enter|exit|implement|review|verify]\n${toErrorMessage(error)}`,
+        );
+        return;
+      }
+      const subcommand =
+        typeof jsonArgs?.subcommand === "string"
+          ? jsonArgs.subcommand.trim().toLowerCase()
+          : cmdCtx.argv[0]?.toLowerCase() ?? "status";
+      const shellProfile = resolveEffectiveShellProfileForSession({
+        ctx,
+        sessionId,
+        preferred: resolveSessionShellProfile(session?.metadata ?? {}),
+      });
+      const currentWorkflowState = resolveSessionWorkflowState(session.metadata);
+      const wantsDelegate =
+        jsonArgs?.delegate === true || hasInlineFlag(cmdCtx.argv, "delegate");
+      if (
+        wantsDelegate &&
+        !(await requireShellFeature({
+          cmdCtx,
+          feature: "multiAgent",
+          domain: "shell",
+          label: `Plan ${subcommand} delegation`,
+        }))
+      ) {
+        return;
+      }
+      const wantsStaged =
+        jsonArgs?.staged === true || hasInlineFlag(cmdCtx.argv, "staged");
+      const branchInfo = await executeStructuredTool(
+        baseToolHandler,
+        "system.gitBranchInfo",
+        {},
+      );
+      const summary = await executeStructuredTool(
+        baseToolHandler,
+        "system.gitChangeSummary",
+        {},
+      );
+      const hasChanges =
+        typeof summary.summary === "object" &&
+        summary.summary !== null &&
+        Object.values(summary.summary as Record<string, unknown>).some(
+          (value) => typeof value === "number" && value > 0,
+        );
+      const tasks = await executeStructuredTool(
+        baseToolHandler,
+        "task.list",
+        { [TASK_LIST_ARG]: cmdCtx.sessionId },
+      );
+      const activePipelines = pipelineExecutor
+        ? await pipelineExecutor.listActive()
+        : [];
+      const runtimeStatusSnapshot = buildSessionRuntimeContractStatusSnapshot(
+        session.metadata,
+      ) as Record<string, unknown> | undefined;
+      const ownership = collectSessionWorkflowOwnership({
+        runtimeStatusSnapshot,
+        taskResult: tasks,
+        childInfos: ctx.listSubAgentInfo(sessionId),
+      });
+      const formatPlanSurface = (
+        workflowState = resolveSessionWorkflowState(session.metadata),
+      ): string => {
+        const suggestedStage = suggestNextWorkflowStage({
+          currentStage: workflowState.stage,
+          plannerStatus:
+            typeof runtimeStatusSnapshot?.completionState === "string"
+              ? runtimeStatusSnapshot.completionState
+              : "idle",
+          ownership,
+          hasChanges,
+        });
+        return [
+          "Plan surface:",
+          `  Session: ${cmdCtx.sessionId}`,
+          `  Shell profile: ${shellProfile}`,
+          `  Workflow stage: ${formatSessionWorkflowStage(workflowState.stage)}`,
+          `  Worktree mode: ${formatSessionWorktreeMode(workflowState.worktreeMode)}`,
+          ...(workflowState.objective ? [`  Objective: ${workflowState.objective}`] : []),
+          `  History messages: ${session.history.length}`,
+          `  Active pipelines: ${activePipelines.length}`,
+          `  Planner DAG: ${typeof runtimeStatusSnapshot?.completionState === "string" ? runtimeStatusSnapshot.completionState : "idle"}`,
+          `  Suggested next stage: ${suggestedStage ? formatSessionWorkflowStage(suggestedStage) : "none"}`,
+          "",
+          formatGitBranchReply(branchInfo),
+          "",
+          formatGitSummaryReply(summary),
+          "",
+          formatTaskListReply(tasks),
+          "",
+          formatWorkflowOwnershipReply(ownership),
+        ].join("\n");
+      };
+      if (subcommand === "status") {
+        await cmdCtx.reply(formatPlanSurface(currentWorkflowState));
+        return;
+      }
+      if (subcommand === "enter") {
+        const objective =
+          typeof jsonArgs?.objective === "string"
+            ? jsonArgs.objective
+            : parseInlineFlag(cmdCtx.argv, "objective");
+        const explicitWorktreeMode =
+          typeof jsonArgs?.worktreeMode === "string"
+            ? jsonArgs.worktreeMode
+            : parseInlineFlag(cmdCtx.argv, "worktrees");
+        const workflowState = updateSessionWorkflowState(
+          session.metadata,
+          {
+            stage: "plan",
+            worktreeMode:
+              explicitWorktreeMode === "child"
+                ? "child_optional"
+                : explicitWorktreeMode === "off"
+                  ? "off"
+                  : shellProfile === "coding"
+                    ? "child_optional"
+                    : "off",
+            ...(objective !== undefined ? { objective } : {}),
+          },
+        );
+        await persistWebSessionRuntimeState(memoryBackend, cmdCtx.sessionId, session);
+        await cmdCtx.reply(
+          `Workflow stage set to ${formatSessionWorkflowStage(workflowState.stage)}.\n\n${formatPlanSurface(workflowState)}`,
+        );
+        return;
+      }
+      if (subcommand === "exit") {
+        if (currentWorkflowState.stage !== "plan") {
+          await cmdCtx.reply("Workflow exit is only available while the session is in plan mode.");
+          return;
+        }
+        const workflowState = updateSessionWorkflowState(session.metadata, {
+          stage: "implement",
+        });
+        await persistWebSessionRuntimeState(memoryBackend, cmdCtx.sessionId, session);
+        await cmdCtx.reply(
+          `Workflow stage set to ${formatSessionWorkflowStage(workflowState.stage)}.\n\n${formatPlanSurface(workflowState)}`,
+        );
+        return;
+      }
+      if (subcommand === "implement") {
+        const workflowState = updateSessionWorkflowState(session.metadata, {
+          stage: "implement",
+        });
+        await persistWebSessionRuntimeState(memoryBackend, cmdCtx.sessionId, session);
+        await cmdCtx.reply(
+          `Workflow stage set to ${formatSessionWorkflowStage(workflowState.stage)}.\n\n${formatPlanSurface(workflowState)}`,
+        );
+        return;
+      }
+      if (subcommand === "review") {
+        const workflowState = updateSessionWorkflowState(session.metadata, {
+          stage: "review",
+        });
+        updateReviewSurfaceState(session, {
+          status: wantsDelegate ? "running" : "idle",
+          source: wantsDelegate ? "delegated" : "local",
+          ...(wantsDelegate ? {} : { summaryPreview: "Review stage entered." }),
+        });
+        await persistWebSessionRuntimeState(memoryBackend, cmdCtx.sessionId, session);
+        if (!wantsDelegate) {
+          await cmdCtx.reply(
+            `Workflow stage set to ${formatSessionWorkflowStage(workflowState.stage)}.\n\n${formatPlanSurface(workflowState)}`,
+          );
+          return;
+        }
+        const diff = await executeStructuredTool(
+          baseToolHandler,
+          "system.gitDiff",
+          wantsStaged ? { staged: true } : {},
+        );
+        const delegated = await ctx.launchShellAgentTask({
+          parentSessionId: sessionId,
+          roleId: "review",
+          objective: "Review the current changes and return findings-first output.",
+          prompt: buildReviewDelegatePrompt({
+            branchReply: formatGitBranchReply(branchInfo),
+            summaryReply: formatGitSummaryReply(summary),
+            diffReply:
+              typeof diff.diff === "string" && diff.diff.trim().length > 0
+                ? formatGitDiffReply(diff)
+                : "No diff content to review.",
+          }),
+          shellProfile,
+          wait: true,
+        });
+        updateReviewSurfaceState(session, {
+          status: delegated.success === true ? "completed" : "failed",
+          source: "delegated",
+          delegatedSessionId: delegated.sessionId,
+          summaryPreview: delegated.output,
+        });
+        await persistWebSessionRuntimeState(memoryBackend, cmdCtx.sessionId, session);
+        await cmdCtx.reply(
+          [
+            `Workflow stage set to ${formatSessionWorkflowStage(workflowState.stage)}.`,
+            "",
+            formatPlanSurface(workflowState),
+            "",
+            `Delegated reviewer session: ${delegated.sessionId} [${delegated.status}]`,
+            delegated.output.trim().length > 0
+              ? delegated.output.trim()
+              : "Delegated reviewer returned no output.",
+          ].join("\n"),
+        );
+        return;
+      }
+      if (subcommand === "verify") {
+        const workflowState = updateSessionWorkflowState(session.metadata, {
+          stage: "verify",
+        });
+        updateVerificationSurfaceState(session, {
+          status: wantsDelegate ? "running" : "idle",
+          source: wantsDelegate ? "delegated" : "local",
+          verdict: "unknown",
+          ...(wantsDelegate ? {} : { summaryPreview: "Verification stage entered." }),
+        });
+        await persistWebSessionRuntimeState(memoryBackend, cmdCtx.sessionId, session);
+        if (!wantsDelegate) {
+          await cmdCtx.reply(
+            `Workflow stage set to ${formatSessionWorkflowStage(workflowState.stage)}.\n\n${formatPlanSurface(workflowState)}`,
+          );
+          return;
+        }
+        const delegated = await ctx.launchShellAgentTask({
+          parentSessionId: sessionId,
+          roleId: "verify",
+          objective: "Verify the current implementation state and return a verdict.",
+          prompt: buildVerifyDelegatePrompt({
+            branchReply: formatGitBranchReply(branchInfo),
+            summaryReply: formatGitSummaryReply(summary),
+            taskReply: formatTaskListReply(tasks),
+            runtimeStatusSnapshot,
+          }),
+          shellProfile,
+          wait: true,
+        });
+        updateVerificationSurfaceState(session, {
+          status: delegated.success === true ? "completed" : "failed",
+          source: "delegated",
+          delegatedSessionId: delegated.sessionId,
+          summaryPreview: delegated.output,
+          verdict: delegated.success === true ? "pass" : "fail",
+        });
+        await persistWebSessionRuntimeState(memoryBackend, cmdCtx.sessionId, session);
+        await cmdCtx.reply(
+          [
+            `Workflow stage set to ${formatSessionWorkflowStage(workflowState.stage)}.`,
+            "",
+            formatPlanSurface(workflowState),
+            "",
+            `Delegated verifier session: ${delegated.sessionId} [${delegated.status}]`,
+            delegated.output.trim().length > 0
+              ? delegated.output.trim()
+              : "Delegated verifier returned no output.",
+          ].join("\n"),
+        );
+        return;
+      }
+      await cmdCtx.reply(
+        "Usage: /plan [status|enter|exit|implement|review|verify]",
+      );
+    },
+  });
+  commandRegistry.register({
+    name: "verify",
+    description: "Show verification state or run the restricted verifier child",
+    args: "[--delegate]",
+    global: true,
+    handler: async (cmdCtx) => {
+      const resolvedSessionId = resolveSessionId(cmdCtx.sessionId);
+      const session = sessionMgr.get(resolvedSessionId);
+      if (!session) {
+        await cmdCtx.reply("No active session.");
+        return;
+      }
+      if (
+        !(await requireShellFeature({
+          cmdCtx,
+          feature: "codingCommands",
+          domain: "shell",
+          label: "Verify command",
+        }))
+      ) {
+        return;
+      }
+      let jsonArgs: Record<string, unknown> | undefined;
+      try {
+        jsonArgs = parseCommandJsonArgs(cmdCtx.args);
+      } catch (error) {
+        await cmdCtx.reply(`Usage: /verify [--delegate]\n${toErrorMessage(error)}`);
+        return;
+      }
+      const wantsDelegate =
+        jsonArgs?.delegate === true || hasInlineFlag(cmdCtx.argv, "delegate");
+      if (
+        wantsDelegate &&
+        !(await requireShellFeature({
+          cmdCtx,
+          feature: "multiAgent",
+          domain: "shell",
+          label: "Verify delegation",
+        }))
+      ) {
+        return;
+      }
+      const branchInfo = await executeStructuredTool(
+        baseToolHandler,
+        "system.gitBranchInfo",
+        {},
+      );
+      const summary = await executeStructuredTool(
+        baseToolHandler,
+        "system.gitChangeSummary",
+        {},
+      );
+      const hasChanges =
+        typeof summary.summary === "object" &&
+        summary.summary !== null &&
+        Object.values(summary.summary as Record<string, unknown>).some(
+          (value) => typeof value === "number" && value > 0,
+        );
+      const tasks = await executeStructuredTool(
+        baseToolHandler,
+        "task.list",
+        { [TASK_LIST_ARG]: cmdCtx.sessionId },
+      );
+      const runtimeStatusSnapshot = buildSessionRuntimeContractStatusSnapshot(
+        session.metadata,
+      ) as Record<string, unknown> | undefined;
+      const verifierSnapshot =
+        typeof runtimeStatusSnapshot?.verifierStages === "object" &&
+        runtimeStatusSnapshot.verifierStages !== null
+          ? JSON.stringify(runtimeStatusSnapshot.verifierStages, null, 2)
+          : "No runtime verifier snapshot available.";
+      const verificationSurface = [
+        "Verification surface:",
+        formatGitBranchReply(branchInfo),
+        "",
+        formatGitSummaryReply(summary),
+        "",
+        formatTaskListReply(tasks),
+        "",
+        "Runtime verifier snapshot:",
+        verifierSnapshot,
+      ].join("\n");
+      if (!wantsDelegate) {
+        updateVerificationSurfaceState(session, {
+          status: "completed",
+          source: "local",
+          summaryPreview: verificationSurface,
+          verdict: hasChanges ? "mixed" : "pass",
+        });
+        await persistWebSessionRuntimeState(memoryBackend, cmdCtx.sessionId, session);
+        await cmdCtx.reply(verificationSurface);
+        return;
+      }
+      updateVerificationSurfaceState(session, {
+        status: "running",
+        source: "delegated",
+        verdict: "unknown",
+      });
+      await persistWebSessionRuntimeState(memoryBackend, cmdCtx.sessionId, session);
+      const delegated = await ctx.launchShellAgentTask({
+        parentSessionId: resolvedSessionId,
+        roleId: "verify",
+        objective: "Verify the current implementation state and return a verdict.",
+        prompt: buildVerifyDelegatePrompt({
+          branchReply: formatGitBranchReply(branchInfo),
+          summaryReply: formatGitSummaryReply(summary),
+          taskReply: formatTaskListReply(tasks),
+          runtimeStatusSnapshot,
+        }),
+        shellProfile: resolveEffectiveShellProfileForSession({
+          ctx,
+          sessionId: resolvedSessionId,
+          preferred: resolveSessionShellProfile(session.metadata),
+        }),
+        wait: true,
+      });
+      updateVerificationSurfaceState(session, {
+        status: delegated.success === true ? "completed" : "failed",
+        source: "delegated",
+        delegatedSessionId: delegated.sessionId,
+        summaryPreview: delegated.output,
+        verdict: delegated.success === true ? "pass" : "fail",
+      });
+      await persistWebSessionRuntimeState(memoryBackend, cmdCtx.sessionId, session);
+      await cmdCtx.reply(
+        [
+          verificationSurface,
+          "",
+          `Delegated verifier session: ${delegated.sessionId} [${delegated.status}]`,
+          delegated.output.trim().length > 0
+            ? delegated.output.trim()
+            : "Delegated verifier returned no output.",
+        ].join("\n"),
+      );
+    },
+  });
+  commandRegistry.register({
+    name: "session",
+    description: "Inspect the current shell session or continuity catalog",
+    global: true,
+    handler: async (cmdCtx) => {
+      const subcommand = cmdCtx.argv[0]?.toLowerCase() ?? "status";
+      const webChat = ctx.getWebChatChannel();
+      const replyCurrentSession = async (): Promise<void> => {
+        const resolvedSessionId = resolveSessionId(cmdCtx.sessionId);
+        const session = sessionMgr.get(resolvedSessionId);
+        const workspaceRoot =
+          (session?.metadata?.workspaceRoot as string | undefined) ??
+          (typeof webChat?.loadSessionWorkspaceRoot === "function"
+            ? await webChat.loadSessionWorkspaceRoot(cmdCtx.sessionId)
+            : undefined) ??
+          ctx.getHostWorkspacePath() ??
+          process.cwd();
+        const modelInfo = ctx.getSessionModelInfo(cmdCtx.sessionId);
+        const shellProfile = resolveEffectiveShellProfileForSession({
+          ctx,
+          sessionId: resolvedSessionId,
+          preferred: resolveSessionShellProfile(session?.metadata ?? {}),
+        });
+        const workflowState = resolveSessionWorkflowState(session?.metadata ?? {});
+        const runtimeStatusSnapshot = buildSessionRuntimeContractStatusSnapshot(
+          session?.metadata ?? {},
+        ) as Record<string, unknown> | undefined;
+        const tasks = await executeStructuredTool(baseToolHandler, "task.list", {
+          [TASK_LIST_ARG]: cmdCtx.sessionId,
+        });
+        const ownership = collectSessionWorkflowOwnership({
+          runtimeStatusSnapshot,
+          taskResult: tasks,
+          childInfos: ctx.listSubAgentInfo(resolvedSessionId),
+        });
+        await cmdCtx.reply(
+          [
+            "Shell session:",
+            `  Session id: ${cmdCtx.sessionId}`,
+            `  Runtime session id: ${resolvedSessionId}`,
+            `  Profile: ${shellProfile}`,
+            `  Workflow stage: ${formatSessionWorkflowStage(workflowState.stage)}`,
+            `  Worktree mode: ${formatSessionWorktreeMode(workflowState.worktreeMode)}`,
+            ...(workflowState.objective
+              ? [`  Objective: ${workflowState.objective}`]
+              : []),
+            `  Workspace root: ${workspaceRoot}`,
+            `  History messages: ${session?.history.length ?? 0}`,
+            `  Model: ${
+              modelInfo
+                ? `${modelInfo.provider}:${modelInfo.model}${modelInfo.usedFallback ? " (fallback)" : ""}`
+                : "unknown"
+            }`,
+            "",
+            formatWorkflowOwnershipReply(ownership),
+          ].join("\n"),
+        );
+      };
+
+      if (!subcommand || subcommand === "status" || subcommand === "current") {
+        await replyCurrentSession();
+        return;
+      }
+
+      if (!webChat) {
+        await cmdCtx.reply("Session continuity is unavailable.");
+        return;
+      }
+
+      if (subcommand === "list") {
+        const jsonArgs = parseCommandJsonArgv(cmdCtx.argv);
+        const profile =
+          coerceSessionShellProfile(
+            jsonArgs?.profile ?? parseInlineFlag(cmdCtx.argv.slice(1), "profile"),
+          ) ?? undefined;
+        const sessions = await webChat.listContinuitySessionsForSession(
+          cmdCtx.sessionId,
+          {
+            activeOnly:
+              jsonArgs?.activeOnly === true ||
+              hasInlineFlag(cmdCtx.argv.slice(1), "active-only"),
+            limit:
+              typeof jsonArgs?.limit === "number"
+                ? jsonArgs.limit
+                : parseIntegerFlag(cmdCtx.argv.slice(1), "limit"),
+            ...(profile ? { shellProfile: profile } : {}),
+          },
+        );
+        await cmdCtx.reply(
+          formatContinuitySessionList(
+            sessions as unknown as readonly Record<string, unknown>[],
+          ),
+        );
+        return;
+      }
+
+      if (subcommand === "inspect") {
+        const jsonArgs = parseCommandJsonArgv(cmdCtx.argv);
+        const targetSessionId =
+          (typeof jsonArgs?.sessionId === "string" ? jsonArgs.sessionId : undefined) ??
+          cmdCtx.argv[1];
+        const detail = await webChat.inspectOwnedSession(
+          cmdCtx.sessionId,
+          targetSessionId,
+        );
+        await cmdCtx.reply(
+          detail
+            ? formatContinuitySessionInspect(detail)
+            : `Session "${targetSessionId ?? cmdCtx.sessionId}" not found.`,
+        );
+        return;
+      }
+
+      if (subcommand === "history") {
+        const jsonArgs = parseCommandJsonArgv(cmdCtx.argv);
+        const argvTarget = cmdCtx.argv[1]?.startsWith("--") ? undefined : cmdCtx.argv[1];
+        const history = await webChat.loadOwnedSessionHistory(cmdCtx.sessionId, {
+          sessionId:
+            (typeof jsonArgs?.sessionId === "string" ? jsonArgs.sessionId : undefined) ??
+            argvTarget,
+          limit:
+            typeof jsonArgs?.limit === "number"
+              ? jsonArgs.limit
+              : parseIntegerFlag(cmdCtx.argv.slice(1), "limit"),
+          includeTools:
+            jsonArgs?.includeTools === true ||
+            hasInlineFlag(cmdCtx.argv.slice(1), "include-tools"),
+        });
+        await cmdCtx.reply(
+          formatSessionHistoryReply(
+            history as unknown as readonly Record<string, unknown>[],
+          ),
+        );
+        return;
+      }
+
+      if (subcommand === "resume") {
+        const jsonArgs = parseCommandJsonArgv(cmdCtx.argv);
+        const targetSessionId =
+          (typeof jsonArgs?.sessionId === "string" ? jsonArgs.sessionId : undefined) ??
+          cmdCtx.argv[1];
+        if (!targetSessionId) {
+          await cmdCtx.reply("Usage: /session resume <sessionId>");
+          return;
+        }
+        const resumed = await webChat.resumeOwnedSession(
+          cmdCtx.sessionId,
+          targetSessionId,
+        );
+        await cmdCtx.reply(
+          resumed
+            ? [
+                `Resumed session ${resumed.sessionId}.`,
+                `  Messages: ${resumed.messageCount}`,
+                ...(resumed.workspaceRoot
+                  ? [`  Workspace root: ${resumed.workspaceRoot}`]
+                  : []),
+              ].join("\n")
+            : `Session "${targetSessionId}" not found.`,
+        );
+        return;
+      }
+
+      if (subcommand === "fork") {
+        const jsonArgs = parseCommandJsonArgv(cmdCtx.argv);
+        const argvTarget = cmdCtx.argv[1]?.startsWith("--") ? undefined : cmdCtx.argv[1];
+        const profile =
+          coerceSessionShellProfile(
+            jsonArgs?.profile ?? parseInlineFlag(cmdCtx.argv.slice(1), "profile"),
+          ) ?? undefined;
+        const objective =
+          typeof jsonArgs?.objective === "string"
+            ? jsonArgs.objective
+            : parseInlineFlag(cmdCtx.argv.slice(1), "objective");
+        const forked = await webChat.forkOwnedSessionForRequester(
+          cmdCtx.sessionId,
+          {
+            ...(argvTarget ? { sessionId: argvTarget } : {}),
+            ...(profile ? { shellProfile: profile } : {}),
+            ...(objective ? { objective } : {}),
+          },
+        );
+        if (!forked) {
+          await cmdCtx.reply(
+            `Session "${argvTarget ?? cmdCtx.sessionId}" could not be forked.`,
+          );
+          return;
+        }
+        const sessionDetail = asRecord(forked.session);
+        await cmdCtx.reply(
+          [
+            `Forked session ${typeof forked.targetSessionId === "string" ? forked.targetSessionId : "unknown"} from ${
+              typeof forked.sourceSessionId === "string" ? forked.sourceSessionId : cmdCtx.sessionId
+            }.`,
+            `  Source: ${typeof forked.forkSource === "string" ? forked.forkSource : "unknown"}`,
+            ...(typeof sessionDetail?.preview === "string"
+              ? [`  Preview: ${sessionDetail.preview}`]
+              : []),
+            "  Use /session resume <sessionId> to switch into the fork.",
+          ].join("\n"),
+        );
+        return;
+      }
+
+      await cmdCtx.reply(
+        "Usage: /session [status|list|inspect [sessionId]|history [sessionId] [--limit N] [--include-tools]|resume <sessionId>|fork [sessionId] [--objective TEXT] [--profile PROFILE]]",
+      );
+    },
+  });
+  commandRegistry.register({
     name: "response",
     description: "Inspect or delete stored xAI Responses API objects",
     args: "[status|get [response-id|latest] [--json]|delete [response-id|latest]]",
     global: true,
     handler: async (cmdCtx) => {
+      if (
+        !(await requireShellFeature({
+          cmdCtx,
+          feature: "shellExtensions",
+          domain: "extensions",
+          label: "MCP command",
+        }))
+      ) {
+        return;
+      }
       const subcommand = cmdCtx.argv[0]?.toLowerCase() ?? "status";
       const sessionId = resolveSessionId(cmdCtx.sessionId);
       const session = sessionMgr.get(sessionId);
@@ -1172,6 +3785,298 @@ export function createDaemonCommandRegistry(
             ? `Approval preview: ${approvalPreview.message}`
             : "Approval preview: none",
         ].join("\n"),
+      );
+    },
+  });
+  commandRegistry.register({
+    name: "permissions",
+    description: "Alias for /policy with coding-shell wording",
+    args: "[status|simulate <toolName> [jsonArgs]|credentials|revoke-credentials [credentialId]|update <allow|deny|clear|reset> [pattern]]",
+    global: true,
+    handler: async (cmdCtx) => {
+      const policy = commandRegistry.get("policy");
+      if (!policy) {
+        await cmdCtx.reply("Policy command is unavailable.");
+        return;
+      }
+      await policy.handler(cmdCtx);
+    },
+  });
+  commandRegistry.register({
+    name: "mcp",
+    description: "Inspect and control already-configured MCP servers",
+    args: "[status|list|inspect <server>|tools [server]|validate [server]|reconnect <server>|enable <server>|disable <server>]",
+    global: true,
+    handler: async (cmdCtx) => {
+      if (
+        !(await requireShellFeature({
+          cmdCtx,
+          feature: "shellExtensions",
+          domain: "extensions",
+          label: "MCP command",
+        }))
+      ) {
+        return;
+      }
+      const subcommand = cmdCtx.argv[0]?.toLowerCase() ?? "status";
+      const catalog = registry.listCatalog();
+      const mcpCatalog = getMcpCatalogEntries(catalog);
+      const sourceCounts = groupCatalogBySource(catalog);
+      const configuredServers = Array.isArray(ctx.gateway?.config.mcp?.servers)
+        ? ctx.gateway?.config.mcp?.servers
+        : [];
+      const mcpManager = ctx.getMcpManager();
+      const connectedServers = new Set(mcpManager?.getConnectedServers() ?? []);
+      const renderStatus = (): string => [
+        "MCP surface:",
+        `  Configured servers: ${configuredServers.length}`,
+        `  Connected servers: ${connectedServers.size}`,
+        `  Visible MCP tools: ${mcpCatalog.length}`,
+        `  Builtin tools: ${sourceCounts.builtin ?? 0}`,
+        `  Plugin tools: ${sourceCounts.plugin ?? 0}`,
+        `  Skill tools: ${sourceCounts.skill ?? 0}`,
+      ].join("\n");
+      const findServer = (name: string | undefined) =>
+        configuredServers.find((server) => server.name === name);
+
+      if (subcommand === "status") {
+        await cmdCtx.reply(renderStatus());
+        return;
+      }
+      if (subcommand === "list") {
+        if (configuredServers.length === 0) {
+          await cmdCtx.reply(`${renderStatus()}\n\nNo MCP servers are configured.`);
+          return;
+        }
+        const lines = configuredServers.map((server) => {
+          const toolCount = getMcpCatalogEntries(mcpCatalog, server.name).length;
+          const state =
+            server.enabled === false
+              ? "disabled"
+              : server.container === "desktop"
+                ? "container-routed"
+                : connectedServers.has(server.name)
+                  ? "connected"
+                  : "disconnected";
+          return (
+            `  ${server.name} — ${state} — trust=${formatMcpTrustLine(server)} ` +
+            `— tools=${toolCount}`
+          );
+        });
+        await cmdCtx.reply(`${renderStatus()}\n\nServers:\n${lines.join("\n")}`);
+        return;
+      }
+      if (subcommand === "tools") {
+        const serverName = cmdCtx.argv[1];
+        const visibleCatalog =
+          serverName && serverName.trim().length > 0
+            ? getMcpCatalogEntries(mcpCatalog, serverName.trim())
+            : mcpCatalog;
+        if (visibleCatalog.length === 0) {
+          await cmdCtx.reply(`${renderStatus()}\n\nNo MCP tools are currently connected.`);
+          return;
+        }
+        const lines = visibleCatalog
+          .slice(0, 100)
+          .map((entry) => `  ${entry.name} — ${entry.description}`);
+        await cmdCtx.reply(
+          `${renderStatus()}\n\nTools${serverName ? ` (${serverName.trim()})` : ""}:\n${lines.join("\n")}`,
+        );
+        return;
+      }
+      if (subcommand === "inspect") {
+        const serverName = cmdCtx.argv[1]?.trim();
+        const server = findServer(serverName);
+        if (!serverName || !server) {
+          await cmdCtx.reply("Usage: /mcp inspect <server>");
+          return;
+        }
+        const serverCatalog = getMcpCatalogEntries(mcpCatalog, serverName);
+        const allowList = server.riskControls?.toolAllowList?.join(", ") ?? "none";
+        const denyList = server.riskControls?.toolDenyList?.join(", ") ?? "none";
+        const lines = [
+          `MCP server: ${server.name}`,
+          `  Enabled: ${server.enabled === false ? "no" : "yes"}`,
+          `  Runtime state: ${
+            server.enabled === false
+              ? "disabled"
+              : server.container === "desktop"
+                ? "container-routed"
+                : connectedServers.has(server.name)
+                  ? "connected"
+                  : "disconnected"
+          }`,
+          `  Trust: ${formatMcpTrustLine(server)}`,
+          `  Route: ${server.container === "desktop" ? "desktop container" : "host process"}`,
+          `  Timeout: ${server.timeout ?? 30000}ms`,
+          `  Tool allow-list: ${allowList}`,
+          `  Tool deny-list: ${denyList}`,
+          `  Supply chain: pinnedPackage=${
+            server.supplyChain?.requirePinnedPackageVersion === true ? "yes" : "no"
+          }, desktopDigest=${
+            server.supplyChain?.requireDesktopImageDigest === true ? "yes" : "no"
+          }, binarySha=${server.supplyChain?.binarySha256 ? "set" : "unset"}, catalogSha=${
+            server.supplyChain?.catalogSha256 ? "set" : "unset"
+          }`,
+          `  Visible tools: ${serverCatalog.length}`,
+        ];
+        if (serverCatalog.length > 0) {
+          lines.push(
+            "",
+            "Tools:",
+            ...serverCatalog
+              .slice(0, 25)
+              .map((entry) => `  ${stripMcpToolPrefix(entry.name, server.name)} — ${entry.description}`),
+          );
+        }
+        await cmdCtx.reply(lines.join("\n"));
+        return;
+      }
+      if (subcommand === "validate") {
+        const serverName = cmdCtx.argv[1]?.trim();
+        const targets =
+          serverName && serverName.length > 0
+            ? configuredServers.filter((server) => server.name === serverName)
+            : configuredServers;
+        if (targets.length === 0) {
+          await cmdCtx.reply(
+            serverName
+              ? `MCP server "${serverName}" is not configured.`
+              : "No MCP servers are configured.",
+          );
+          return;
+        }
+        const desktopImage = ctx.gateway?.config.desktop?.image ?? "agenc/desktop:latest";
+        const sections: string[] = [];
+        for (const server of targets) {
+          const violations = [
+            ...validateMCPServerStaticPolicy(server, { desktopImage }),
+            ...(server.container
+              ? []
+              : await validateMCPServerBinaryIntegrity({ server })),
+          ];
+          const serverCatalog = getMcpCatalogEntries(mcpCatalog, server.name);
+          const liveCatalogSha =
+            serverCatalog.length > 0
+              ? computeMCPToolCatalogSha256(
+                  serverCatalog.map((entry) => ({
+                    name: stripMcpToolPrefix(entry.name, server.name),
+                    description: entry.description,
+                    inputSchema: entry.inputSchema,
+                  })),
+                )
+              : undefined;
+          sections.push(
+            [
+              `MCP validate: ${server.name}`,
+              `  Static policy: ${violations.length === 0 ? "ok" : "violations"}`,
+              ...(violations.length > 0
+                ? violations.map(
+                    (violation) => `  - ${violation.code}: ${violation.message}`,
+                  )
+                : []),
+              `  Trust: ${formatMcpTrustLine(server)}`,
+              `  Runtime state: ${
+                server.enabled === false
+                  ? "disabled"
+                  : server.container === "desktop"
+                    ? "container-routed"
+                    : connectedServers.has(server.name)
+                      ? "connected"
+                      : "disconnected"
+              }`,
+              `  Binary integrity: ${
+                server.container
+                  ? "n/a (container-routed)"
+                  : server.supplyChain?.binarySha256
+                    ? violations.some((item) => item.code === "binary_integrity_mismatch")
+                      ? "mismatch"
+                      : "ok"
+                    : "not configured"
+              }`,
+              `  Catalog integrity: ${
+                server.supplyChain?.catalogSha256
+                  ? liveCatalogSha
+                    ? liveCatalogSha === server.supplyChain.catalogSha256.trim().toLowerCase()
+                      ? "ok"
+                      : "mismatch"
+                    : "not visible at runtime"
+                  : "not configured"
+              }`,
+              ...(liveCatalogSha ? [`  Live catalog sha256: ${liveCatalogSha}`] : []),
+            ].join("\n"),
+          );
+        }
+        await cmdCtx.reply(sections.join("\n\n"));
+        return;
+      }
+      if (subcommand === "reconnect") {
+        const serverName = cmdCtx.argv[1]?.trim();
+        const server = findServer(serverName);
+        if (!serverName || !server) {
+          await cmdCtx.reply("Usage: /mcp reconnect <server>");
+          return;
+        }
+        if (server.container === "desktop") {
+          await cmdCtx.reply(
+            `MCP server "${server.name}" is desktop-container routed and cannot be reconnected from the daemon shell.`,
+          );
+          return;
+        }
+        if (!mcpManager) {
+          await cmdCtx.reply("MCP manager is unavailable in this daemon.");
+          return;
+        }
+        const result = await mcpManager.reconnectServer(server.name);
+        await cmdCtx.reply(
+          result.success
+            ? `MCP server "${server.name}" reconnected (${result.toolCount} tools).`
+            : `MCP server "${server.name}" reconnect failed: ${result.error ?? "unknown error"}`,
+        );
+        return;
+      }
+      if (subcommand === "enable" || subcommand === "disable") {
+        const serverName = cmdCtx.argv[1]?.trim();
+        const server = findServer(serverName);
+        if (!serverName || !server) {
+          await cmdCtx.reply(`Usage: /mcp ${subcommand} <server>`);
+          return;
+        }
+        const nextEnabled = subcommand === "enable";
+        if ((server.enabled !== false) === nextEnabled) {
+          await cmdCtx.reply(
+            `MCP server "${server.name}" is already ${nextEnabled ? "enabled" : "disabled"}.`,
+          );
+          return;
+        }
+        try {
+          const raw = await readFile(ctx.configPath, "utf-8");
+          const parsed = JSON.parse(raw) as GatewayConfig;
+          const servers = Array.isArray(parsed.mcp?.servers) ? parsed.mcp.servers : [];
+          const index = servers.findIndex((entry) => entry.name === server.name);
+          if (index < 0) {
+            await cmdCtx.reply(`MCP server "${server.name}" is not present in ${ctx.configPath}.`);
+            return;
+          }
+          servers[index] = {
+            ...servers[index],
+            enabled: nextEnabled,
+          };
+          parsed.mcp = { ...(parsed.mcp ?? {}), servers };
+          await writeFile(ctx.configPath, JSON.stringify(parsed, null, 2) + "\n");
+          await ctx.handleConfigReload();
+          await cmdCtx.reply(
+            `MCP server "${server.name}" ${nextEnabled ? "enabled" : "disabled"} via config reload.`,
+          );
+        } catch (error) {
+          await cmdCtx.reply(
+            `Failed to ${subcommand} MCP server "${server.name}": ${toErrorMessage(error)}`,
+          );
+        }
+        return;
+      }
+      await cmdCtx.reply(
+        "Usage: /mcp [status|list|inspect <server>|tools [server]|validate [server]|reconnect <server>|enable <server>|disable <server>]",
       );
     },
   });
@@ -1454,18 +4359,260 @@ export function createDaemonCommandRegistry(
   });
   commandRegistry.register({
     name: "skills",
-    description: "List available skills",
+    description: "Inspect and toggle local discovered skills",
+    args: "[list|inspect <name>|enable <name>|disable <name>|sources]",
     global: true,
     handler: async (cmdCtx) => {
-      if (skillList.length === 0) {
-        await cmdCtx.reply("No skills available.");
+      if (
+        !(await requireShellFeature({
+          cmdCtx,
+          feature: "shellExtensions",
+          domain: "extensions",
+          label: "Skills command",
+        }))
+      ) {
         return;
       }
-      const lines = skillList.map(
-        (skill) =>
-          `  ${skill.enabled ? "●" : "○"} ${skill.name} — ${skill.description}`,
+      const subcommand = cmdCtx.argv[0]?.toLowerCase() ?? "list";
+      const discovered = await ctx.discoverShellSkills({
+        sessionId: cmdCtx.sessionId,
+      });
+      const resolveState = (entry: DiscoveredSkill) => {
+        const disabled = getSkillDisabledMarker(entry.skill.sourcePath);
+        return {
+          disabled,
+          state: formatSkillState({
+            available: entry.available,
+            disabled,
+          }),
+        };
+      };
+      const resolveByName = (name: string | undefined) =>
+        discovered.find((entry) => entry.skill.name === name);
+
+      if (subcommand === "list") {
+        if (discovered.length === 0) {
+          await cmdCtx.reply(
+            "No local skills discovered.\nMarketplace listings remain under `agenc market skills ...`.",
+          );
+          return;
+        }
+        const lines = discovered.map((entry) => {
+          const { state } = resolveState(entry);
+          return (
+            `  ${entry.skill.name} — ${entry.skill.description} ` +
+            `(${entry.tier}, ${state})`
+          );
+        });
+        await cmdCtx.reply(
+          "Local skills:\n" +
+            lines.join("\n") +
+            "\n\nMarketplace listings: use `agenc market skills ...`.",
+        );
+        return;
+      }
+
+      if (subcommand === "inspect") {
+        const skillName = cmdCtx.argv[1]?.trim();
+        const skill = resolveByName(skillName);
+        if (!skillName || !skill) {
+          await cmdCtx.reply("Usage: /skills inspect <name>");
+          return;
+        }
+        const { disabled, state } = resolveState(skill);
+        const lines = [
+          `Skill: ${skill.skill.name}`,
+          `  State: ${state}`,
+          `  Tier: ${skill.tier}`,
+          `  Description: ${skill.skill.description}`,
+          `  Source: ${skill.skill.sourcePath ?? "inline/unknown"}`,
+          `  Tags: ${
+            skill.skill.metadata.tags.length > 0
+              ? skill.skill.metadata.tags.join(", ")
+              : "none"
+          }`,
+          `  Primary env: ${skill.skill.metadata.primaryEnv ?? "none"}`,
+          `  Disabled marker: ${disabled ? "present" : "absent"}`,
+          `  Availability: ${skill.available ? "usable" : "blocked"}`,
+          ...(skill.missingRequirements && skill.missingRequirements.length > 0
+            ? [
+                "  Missing requirements:",
+                ...skill.missingRequirements.map(
+                  (item) => `    - ${item.message}`,
+                ),
+              ]
+            : []),
+        ];
+        const preview =
+          skill.skill.body.length > 240
+            ? `${skill.skill.body.slice(0, 240)}...`
+            : skill.skill.body;
+        if (preview.trim().length > 0) {
+          lines.push("", "Preview:", preview);
+        }
+        await cmdCtx.reply(lines.join("\n"));
+        return;
+      }
+
+      if (subcommand === "sources") {
+        const sources = await ctx.resolveShellSkillDiscoveryPaths({
+          sessionId: cmdCtx.sessionId,
+        });
+        await cmdCtx.reply(
+          [
+            "Skill discovery sources:",
+            `  Agent: ${sources.agentSkills ?? "not configured"}`,
+            `  Project: ${sources.projectSkills ?? "not configured"}`,
+            `  User: ${sources.userSkills ?? "not configured"}`,
+            `  Builtin: ${sources.builtinSkills ?? "not configured"}`,
+            "",
+            "Marketplace listings: use `agenc market skills ...`.",
+          ].join("\n"),
+        );
+        return;
+      }
+
+      if (subcommand === "enable" || subcommand === "disable") {
+        const skillName = cmdCtx.argv[1]?.trim();
+        const skill = resolveByName(skillName);
+        if (!skillName || !skill) {
+          await cmdCtx.reply(`Usage: /skills ${subcommand} <name>`);
+          return;
+        }
+        const sourcePath = skill.skill.sourcePath;
+        if (!sourcePath) {
+          await cmdCtx.reply(
+            `Skill "${skill.skill.name}" has no source path and cannot be toggled.`,
+          );
+          return;
+        }
+        const markerPath = `${sourcePath}.disabled`;
+        try {
+          if (subcommand === "enable") {
+            if (existsSync(markerPath)) {
+              await unlink(markerPath);
+            }
+          } else if (!existsSync(markerPath)) {
+            await writeFile(markerPath, "", "utf8");
+          }
+          await cmdCtx.reply(
+            `Skill "${skill.skill.name}" ${subcommand}d.\n` +
+              "Marketplace listings remain separate under `agenc market skills ...`.",
+          );
+        } catch (error) {
+          await cmdCtx.reply(
+            `Failed to ${subcommand} skill "${skill.skill.name}": ${toErrorMessage(error)}`,
+          );
+        }
+        return;
+      }
+
+      await cmdCtx.reply(
+        "Usage: /skills [list|inspect <name>|enable <name>|disable <name>|sources]",
       );
-      await cmdCtx.reply("Skills:\n" + lines.join("\n"));
+    },
+  });
+  commandRegistry.register({
+    name: "plugin",
+    description: "Inspect and toggle the local plugin catalog",
+    args: "[list|inspect <pluginId>|enable <pluginId>|disable <pluginId>|reload <pluginId>]",
+    global: true,
+    handler: async (cmdCtx) => {
+      if (
+        !(await requireShellFeature({
+          cmdCtx,
+          feature: "shellExtensions",
+          domain: "extensions",
+          label: "Plugin command",
+        }))
+      ) {
+        return;
+      }
+      const subcommand = cmdCtx.argv[0]?.toLowerCase() ?? "list";
+      const catalog = ctx.getPluginCatalog();
+
+      if (subcommand === "list") {
+        const entries = catalog.list();
+        if (entries.length === 0) {
+          await cmdCtx.reply("No plugins are registered in the local catalog.");
+          return;
+        }
+        const lines = entries.map(
+          (entry) =>
+            `  ${entry.manifest.id} — ${entry.enabled ? "enabled" : "disabled"} ` +
+            `(${entry.precedence}${entry.slot ? `, slot=${entry.slot}` : ""})`,
+        );
+        await cmdCtx.reply("Plugin catalog:\n" + lines.join("\n"));
+        return;
+      }
+
+      const pluginId = cmdCtx.argv[1]?.trim();
+      const entry = catalog.list().find((item) => item.manifest.id === pluginId);
+
+      if (subcommand === "inspect") {
+        if (!pluginId || !entry) {
+          await cmdCtx.reply("Usage: /plugin inspect <pluginId>");
+          return;
+        }
+        const permissions =
+          entry.manifest.permissions.length > 0
+            ? entry.manifest.permissions.map(
+                (permission) =>
+                  `  - ${permission.type}:${permission.scope} (${permission.required ? "required" : "optional"})`,
+              )
+            : ["  - none"];
+        const allowList =
+          entry.manifest.allowDeny?.allow?.length
+            ? entry.manifest.allowDeny.allow.join(", ")
+            : "all";
+        const denyList =
+          entry.manifest.allowDeny?.deny?.length
+            ? entry.manifest.allowDeny.deny.join(", ")
+            : "none";
+        await cmdCtx.reply(
+          [
+            `Plugin: ${entry.manifest.id}`,
+            `  Display name: ${entry.manifest.displayName}`,
+            `  State: ${entry.enabled ? "enabled" : "disabled"}`,
+            `  Version: ${entry.manifest.version}`,
+            `  Schema version: ${entry.manifest.schemaVersion}`,
+            `  Precedence: ${entry.precedence}`,
+            `  Slot: ${entry.slot ?? "none"}`,
+            `  Source path: ${entry.sourcePath ?? "unknown"}`,
+            `  Labels: ${entry.manifest.labels.join(", ") || "none"}`,
+            `  Description: ${entry.manifest.description ?? "none"}`,
+            `  Allow: ${allowList}`,
+            `  Deny: ${denyList}`,
+            "Permissions:",
+            ...permissions,
+          ].join("\n"),
+        );
+        return;
+      }
+
+      if (subcommand === "enable" || subcommand === "disable" || subcommand === "reload") {
+        if (!pluginId || !entry) {
+          await cmdCtx.reply(`Usage: /plugin ${subcommand} <pluginId>`);
+          return;
+        }
+        const result =
+          subcommand === "enable"
+            ? catalog.enable(pluginId)
+            : subcommand === "disable"
+              ? catalog.disable(pluginId)
+              : catalog.reload(pluginId);
+        await cmdCtx.reply(
+          [
+            result.message,
+            renderPluginMutationNote(),
+          ].join("\n"),
+        );
+        return;
+      }
+
+      await cmdCtx.reply(
+        "Usage: /plugin [list|inspect <pluginId>|enable <pluginId>|disable <pluginId>|reload <pluginId>]",
+      );
     },
   });
   commandRegistry.register({
@@ -1592,6 +4739,70 @@ export function createDaemonCommandRegistry(
       } catch (err) {
         ctx.logger.error("Failed to update model config", { error: toErrorMessage(err) });
         await cmdCtx.reply(`Failed to switch model: ${toErrorMessage(err)}`);
+      }
+    },
+  });
+  commandRegistry.register({
+    name: "effort",
+    description: "Show or switch the configured reasoning effort",
+    args: "[current|list|low|medium|high|xhigh]",
+    global: true,
+    handler: async (cmdCtx) => {
+      const arg = cmdCtx.args.trim().toLowerCase();
+      const configuredEffort =
+        ctx.gateway?.config.llm?.reasoningEffort ?? "medium";
+
+      if (!arg || arg === "current" || arg === "status") {
+        await cmdCtx.reply(
+          [
+            "Reasoning effort:",
+            `  Current: ${configuredEffort}`,
+            `  Available: ${REASONING_EFFORTS.join(", ")}`,
+            "",
+            "Switch with: /effort <low|medium|high|xhigh>",
+          ].join("\n"),
+        );
+        return;
+      }
+
+      if (arg === "list") {
+        await cmdCtx.reply(
+          `Reasoning efforts:\n${REASONING_EFFORTS.map((effort) => `  ${effort}${effort === configuredEffort ? " (active)" : ""}`).join("\n")}`,
+        );
+        return;
+      }
+
+      if (!REASONING_EFFORTS.includes(arg as (typeof REASONING_EFFORTS)[number])) {
+        await cmdCtx.reply(
+          "Usage: /effort [current|list|low|medium|high|xhigh]",
+        );
+        return;
+      }
+
+      if (arg === configuredEffort) {
+        await cmdCtx.reply(`Already using reasoning effort "${arg}".`);
+        return;
+      }
+
+      try {
+        const raw = await readFile(ctx.configPath, "utf-8");
+        const config = JSON.parse(raw) as Record<string, unknown>;
+        const llm = (config.llm ?? {}) as Record<string, unknown>;
+        llm.reasoningEffort = arg;
+        config.llm = llm;
+        await writeFile(ctx.configPath, JSON.stringify(config, null, 2) + "\n");
+        ctx.logger.info(`Reasoning effort switched to ${arg} via /effort command`);
+        await ctx.handleConfigReload();
+        await cmdCtx.reply(
+          `Reasoning effort switched: ${configuredEffort} → ${arg}`,
+        );
+      } catch (error) {
+        ctx.logger.error("Failed to update reasoning effort config", {
+          error: toErrorMessage(error),
+        });
+        await cmdCtx.reply(
+          `Failed to switch reasoning effort: ${toErrorMessage(error)}`,
+        );
       }
     },
   });

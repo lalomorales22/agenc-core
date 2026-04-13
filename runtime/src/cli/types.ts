@@ -258,6 +258,20 @@ export interface DaemonStatusOptions {
   controlPlanePort?: number;
 }
 
+export interface ShellOptions extends BaseCliOptions {
+  configPath: string;
+  pidPath: string;
+  controlPlanePort?: number;
+  profile?: string;
+  newSession?: boolean;
+  sessionId?: string;
+}
+
+export interface ShellExecOptions extends ShellOptions {
+  commandText: string;
+  quietConnection?: boolean;
+}
+
 export interface ServiceInstallOptions {
   configPath?: string;
   macos?: boolean;
@@ -302,6 +316,36 @@ export interface SessionsKillOptions {
   pidPath: string;
   sessionId: string;
   controlPlanePort?: number;
+}
+
+export interface SessionContinuityListOptions {
+  pidPath: string;
+  controlPlanePort?: number;
+  activeOnly?: boolean;
+  limit?: number;
+  profile?: string;
+}
+
+export interface SessionContinuityInspectOptions {
+  pidPath: string;
+  sessionId: string;
+  controlPlanePort?: number;
+}
+
+export interface SessionContinuityHistoryOptions {
+  pidPath: string;
+  sessionId: string;
+  controlPlanePort?: number;
+  limit?: number;
+  includeTools?: boolean;
+}
+
+export interface SessionContinuityForkOptions {
+  pidPath: string;
+  sessionId: string;
+  controlPlanePort?: number;
+  objective?: string;
+  profile?: string;
 }
 
 export interface LogsOptions {

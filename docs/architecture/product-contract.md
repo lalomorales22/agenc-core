@@ -9,6 +9,7 @@ AgenC is an installable agent framework product with:
 
 - a public CLI
 - one local daemon/gateway as runtime authority
+- shell profiles on that same runtime authority
 - a TUI/operator console
 - a web dashboard using that same daemon
 - plugin/connector/task/marketplace behavior through the same runtime
@@ -35,8 +36,32 @@ Primary responsibilities:
 
 - onboarding
 - lifecycle control: start/stop/restart/status/logs
+- shell entrypoints such as bare `agenc` and `agenc shell coding`
 - connector and plugin management
 - eventual task/bid interaction
+
+Shell profiles are a client/runtime contract, not a separate product fork.
+Current supported profiles:
+
+- `general`
+- `coding`
+- `research`
+- `validation`
+- `documentation`
+- `operator`
+
+All profiles share the same daemon, policy authority, approvals, memory, and
+tooling substrate. Profiles only change default behavior such as prompt rules,
+tool advertisement bias, delegation posture, and session identity.
+
+The `coding` profile now has a native coding tool surface on that shared
+runtime. It is expected to expose:
+
+- repo inventory and file search
+- structured git and worktree inspection/mutation tools
+- safe read-range and patch-application tools
+- native tool discovery for mixed-mode expansion
+- native code-intelligence lookups for definitions and references
 
 V1 connector contract:
 
@@ -52,6 +77,10 @@ Primary responsibilities:
 - mature operator workflow
 - advanced session/workspace/log/approval visibility
 - deep local control
+
+The operator console is now an explicit compatibility surface behind
+`agenc console`; the default public interactive surface is the shell-first
+launcher.
 
 ### Web dashboard
 
@@ -83,9 +112,10 @@ agenc
 agenc ui
 ```
 
-`agenc` and `agenc ui` both target the same local daemon. `agenc ui` is not a
-second runtime; it is a loopback dashboard surface mounted at `/ui/` on the
-daemon HTTP port.
+`agenc`, `agenc console`, and `agenc ui` all target the same local daemon.
+Bare `agenc` opens the `general` shell by default. `agenc ui` is not a second
+runtime; it is a loopback dashboard surface mounted at `/ui/` on the daemon
+HTTP port.
 
 `agenc onboard` is the canonical first-run experience. In V1 it is an
 interactive terminal onboarding flow that validates xAI access, collects the

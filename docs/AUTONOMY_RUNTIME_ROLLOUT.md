@@ -28,6 +28,10 @@ Every major autonomy subsystem must have both a positive feature flag and a kill
 - `notifications`
 - `replayGates`
 - `canaryRollout`
+- `shellProfiles`
+- `codingCommands`
+- `shellExtensions`
+- `watchCockpit`
 
 Feature flags are the rollout lever. Kill switches are the emergency rollback lever. Broad rollout is blocked if any of them are left implicit.
 
@@ -48,12 +52,35 @@ Autonomy rollout is staged by:
 
 The runtime hashes a stable session key into a deterministic canary cohort and combines that with explicit allow-lists. This is enforced for background runs and durable multi-agent orchestration before execution begins.
 
+Shell rollout reuses the same canary plane with the following domains:
+
+- `shell` for profile selection, continuity, coding commands, and shell-native multi-agent orchestration
+- `extensions` for `/mcp`, `/skills`, and `/plugin`
+- `watch` for cockpit payloads and console panels
+
 ### Canary Success Criteria
 
 - Background-run quality gates stay green.
 - No autonomy SLO regression during the canary window.
 - Multi-agent delegation benchmarks remain net-positive before enabling durable subruns broadly.
 - Rollback drill stays green for the current release train.
+
+## Shell Rollout Strategy
+
+The baseline `general` shell remains available even when advanced shell rollout is held back.
+
+- `shellProfiles` gates non-`general` profiles. When held back, non-general profile requests are coerced to `general` and profile-specific routing/prompt bias is suppressed.
+- `codingCommands` gates the coding-first product surface: `plan`, `files`, `grep`, `git`, `branch`, `worktree`, `diff`, `review`, and coding-biased tool advertisement. Underlying low-level tools remain intact for the runtime.
+- `shellExtensions` gates shell-native `/mcp`, `/skills`, and `/plugin`. The underlying MCP, plugin, and local-skill infrastructure remains intact for direct admin/config flows.
+- `watchCockpit` gates cockpit payload fetches and cockpit-specific console panels. `agenc console` falls back to the existing planner/subagent surfaces without error.
+- Shell child-agent orchestration reuses the `multiAgent` rollout feature with domain `shell`. When held back, `/agents` and delegated review/verify shortcuts fail closed with rollout-policy messaging while local review/verify still work.
+
+Required shell rollout evidence:
+
+- delegated task-tracker flow coverage
+- MCP shell-management policy coverage
+- watch cockpit integration and export coverage
+- `packages/agenc` wrapper smoke coverage
 
 ## Stuck Runs
 
@@ -130,6 +157,13 @@ Rollback is release-blocking and must be validated by drill before widening roll
 - drain workers before tearing down ownership
 - keep persisted run state intact so replay and recovery remain possible
 - re-run rollout gates before restoring traffic
+
+Shell-specific rollback behavior:
+
+- if `shellProfiles` is rolled back, live sessions stay resumable but resolve to the `general` shell
+- if `codingCommands` is rolled back, shell-native coding commands return rollout-policy holdback replies instead of silently degrading into a different product surface
+- if `shellExtensions` is rolled back, `/mcp`, `/skills`, and `/plugin` return holdback replies while direct admin/config paths remain available
+- if `watchCockpit` is rolled back, the console requests no cockpit payloads and the existing watch surfaces remain usable
 
 ## Game Days and Chaos Drills
 

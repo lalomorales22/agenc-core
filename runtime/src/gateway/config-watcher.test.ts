@@ -452,6 +452,10 @@ describe("validateGatewayConfig autonomy controls", () => {
           notifications: true,
           replayGates: true,
           canaryRollout: true,
+          shellProfiles: true,
+          codingCommands: true,
+          shellExtensions: true,
+          watchCockpit: true,
         },
         killSwitches: {
           backgroundRuns: false,
@@ -459,6 +463,10 @@ describe("validateGatewayConfig autonomy controls", () => {
           notifications: false,
           replayGates: false,
           canaryRollout: false,
+          shellProfiles: false,
+          codingCommands: false,
+          shellExtensions: false,
+          watchCockpit: false,
         },
         slo: {
           runStartLatencyMs: 500,
@@ -471,8 +479,8 @@ describe("validateGatewayConfig autonomy controls", () => {
         canary: {
           enabled: true,
           tenantAllowList: ["tenant-a"],
-          featureAllowList: ["multiAgent"],
-          domainAllowList: ["research"],
+          featureAllowList: ["multiAgent", "codingCommands", "watchCockpit"],
+          domainAllowList: ["research", "shell", "watch"],
           percentage: 10,
         },
         notifications: {

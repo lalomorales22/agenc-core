@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "migration": {
     "playbook": {
       "path": "docs/AUTONOMY_RUNTIME_ROLLOUT.md",
@@ -18,6 +18,25 @@
       "No autonomy SLO regression during the canary window."
     ],
     "automatedGate": "npm --prefix runtime run autonomy:rollout:gates"
+  },
+  "shell": {
+    "strategy": {
+      "path": "docs/AUTONOMY_RUNTIME_ROLLOUT.md",
+      "section": "Shell Rollout Strategy"
+    },
+    "successCriteria": [
+      "Shell profile holdbacks coerce safely to the general shell.",
+      "Coding commands and shell extensions fail closed with rollout-policy messaging.",
+      "Watch cockpit falls back cleanly without breaking the console."
+    ],
+    "automatedGate": "npm --prefix runtime run autonomy:rollout:gates",
+    "testRefs": [
+      "runtime/scripts/run-shell-rollout-readiness.ts",
+      "runtime/src/gateway/daemon-command-registry.test.ts",
+      "runtime/src/channels/webchat/plugin.test.ts",
+      "runtime/tests/watch/agenc-watch-export-bundle.test.mjs",
+      "packages/agenc/tests/cli.test.mjs"
+    ]
   },
   "runbooks": {
     "stuck_run": {

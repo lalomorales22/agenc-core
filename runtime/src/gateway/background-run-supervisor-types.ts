@@ -7,7 +7,8 @@
  * @module
  */
 
-import type { ChatExecutor, ChatExecutorResult } from "../llm/chat-executor.js";
+import type { ChatExecutor } from "../llm/chat-executor.js";
+import type { ChatExecutorResult } from "../llm/chat-executor-types.js";
 import type { LLMMessage, LLMProvider, ToolHandler } from "../llm/types.js";
 import type { GatewayMessage } from "./message.js";
 import type { Logger } from "../utils/logger.js";
@@ -24,6 +25,7 @@ import type { BackgroundRunNotifier } from "./background-run-notifier.js";
 import type { EffectLedger } from "../workflow/effect-ledger.js";
 import type { RuntimeFaultInjector } from "../eval/fault-injection.js";
 import type { StopHookRuntime } from "../llm/hooks/stop-hooks.js";
+import type { SessionShellProfile } from "./shell-profile.js";
 import {
   AGENT_RUN_SCHEMA_VERSION,
 } from "./agent-run-contract.js";
@@ -103,6 +105,7 @@ export interface ActiveBackgroundRun {
   id: string;
   sessionId: string;
   objective: string;
+  shellProfile?: SessionShellProfile;
   policyScope?: PolicyEvaluationScope;
   contract: BackgroundRunContract;
   state: BackgroundRunState;
@@ -147,11 +150,13 @@ export interface BackgroundRunSupervisorConfig {
     sessionId: string;
     runId: string;
     cycleIndex: number;
+    shellProfile: SessionShellProfile;
   }) => ToolHandler;
   readonly buildToolRoutingDecision?: (
     sessionId: string,
     messageText: string,
     history: readonly LLMMessage[],
+    shellProfile: SessionShellProfile,
   ) => ToolRoutingDecision | undefined;
   readonly seedHistoryForSession?: (sessionId: string) => readonly LLMMessage[];
   readonly isSessionBusy?: (sessionId: string) => boolean;
@@ -189,6 +194,7 @@ export interface StartBackgroundRunParams {
     readonly contract?: BackgroundRunContract;
     readonly seedHistory?: readonly LLMMessage[];
     readonly lineage?: BackgroundRunLineage;
+    readonly shellProfile?: SessionShellProfile;
   };
 }
 
@@ -263,6 +269,7 @@ export function toPersistedRun(run: ActiveBackgroundRun): PersistedBackgroundRun
     id: run.id,
     sessionId: run.sessionId,
     objective: run.objective,
+    shellProfile: run.shellProfile,
     policyScope: run.policyScope,
     contract: run.contract,
     state: run.state,
@@ -306,6 +313,7 @@ export function toRecentSnapshot(
     runId: run.id,
     sessionId: run.sessionId,
     objective: run.objective,
+    shellProfile: run.shellProfile,
     policyScope: run.policyScope,
     state: run.state,
     contractKind: run.contract.kind,
@@ -337,6 +345,7 @@ export function toActiveRun(run: PersistedBackgroundRun): ActiveBackgroundRun {
     id: run.id,
     sessionId: run.sessionId,
     objective: run.objective,
+    shellProfile: run.shellProfile,
     policyScope: run.policyScope,
     contract: run.contract,
     state: run.state,

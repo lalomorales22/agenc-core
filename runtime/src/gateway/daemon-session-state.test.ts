@@ -6,18 +6,24 @@ import {
   buildSessionStatefulOptions,
   clearWebSessionRuntimeState,
   enrichRuntimeContractSnapshotForSession,
+  forkWebSessionRuntimeState,
   hydrateWebSessionRuntimeState,
+  loadPersistedWebSessionRuntimeState,
   persistSessionRuntimeContractStatusSnapshot,
   persistWebSessionRuntimeState,
 } from "./daemon-session-state.js";
 import {
+  SESSION_SHELL_PROFILE_METADATA_KEY,
   SESSION_STATEFUL_ARTIFACT_CONTEXT_METADATA_KEY,
   SESSION_STATEFUL_ARTIFACT_RECORDS_METADATA_KEY,
   SESSION_STATEFUL_HISTORY_COMPACTED_METADATA_KEY,
   SESSION_STATEFUL_RESUME_ANCHOR_METADATA_KEY,
   SESSION_ACTIVE_TASK_CONTEXT_METADATA_KEY,
+  SESSION_REVIEW_SURFACE_STATE_METADATA_KEY,
   SESSION_RUNTIME_CONTRACT_STATUS_SNAPSHOT_METADATA_KEY,
+  SESSION_VERIFICATION_SURFACE_STATE_METADATA_KEY,
   type Session,
+  SESSION_WORKFLOW_STATE_METADATA_KEY,
 } from "./session.js";
 import type {
   ArtifactCompactionState,
@@ -288,6 +294,215 @@ describe("web session runtime state helpers", () => {
     expect(
       hydrated.metadata[SESSION_ACTIVE_TASK_CONTEXT_METADATA_KEY],
     ).toEqual(activeTaskContext);
+  });
+
+  it("persists and hydrates workflow state across web-session resume", async () => {
+    const memoryBackend = createMemoryBackendStub();
+
+    await persistWebSessionRuntimeState(
+      memoryBackend,
+      "web-session-workflow",
+      createSession({
+        [SESSION_WORKFLOW_STATE_METADATA_KEY]: {
+          stage: "review",
+          worktreeMode: "child_optional",
+          objective: "Review the coding workflow changes",
+          enteredAt: 111,
+          updatedAt: 222,
+        },
+      }),
+    );
+
+    const hydrated = createSession();
+    await hydrateWebSessionRuntimeState(
+      memoryBackend,
+      "web-session-workflow",
+      hydrated,
+    );
+
+    expect(hydrated.metadata[SESSION_WORKFLOW_STATE_METADATA_KEY]).toEqual({
+      stage: "review",
+      worktreeMode: "child_optional",
+      objective: "Review the coding workflow changes",
+      enteredAt: 111,
+      updatedAt: 222,
+    });
+  });
+
+  it("persists and hydrates review and verification surface state", async () => {
+    const memoryBackend = createMemoryBackendStub();
+    await persistWebSessionRuntimeState(
+      memoryBackend,
+      "web-session-cockpit",
+      createSession({
+        [SESSION_REVIEW_SURFACE_STATE_METADATA_KEY]: {
+          status: "completed",
+          source: "local",
+          startedAt: 100,
+          updatedAt: 200,
+          completedAt: 210,
+          summaryPreview: "Review complete.",
+        },
+        [SESSION_VERIFICATION_SURFACE_STATE_METADATA_KEY]: {
+          status: "completed",
+          source: "delegated",
+          startedAt: 300,
+          updatedAt: 400,
+          completedAt: 410,
+          delegatedSessionId: "child-verify-1",
+          summaryPreview: "Verification complete.",
+          verdict: "pass",
+        },
+      }),
+    );
+    const hydrated = createSession();
+    await hydrateWebSessionRuntimeState(memoryBackend, "web-session-cockpit", hydrated);
+    expect(hydrated.metadata[SESSION_REVIEW_SURFACE_STATE_METADATA_KEY]).toMatchObject({
+      status: "completed",
+      source: "local",
+      summaryPreview: "Review complete.",
+    });
+    expect(hydrated.metadata[SESSION_VERIFICATION_SURFACE_STATE_METADATA_KEY]).toMatchObject({
+      status: "completed",
+      source: "delegated",
+      delegatedSessionId: "child-verify-1",
+      verdict: "pass",
+    });
+  });
+
+  it("clears cockpit review and verification state when forking runtime state", async () => {
+    const memoryBackend = createMemoryBackendStub();
+    await memoryBackend.set("webchat:runtime-state:web-source", {
+      version: 6,
+      reviewSurfaceState: {
+        status: "completed",
+        source: "local",
+        startedAt: 10,
+        updatedAt: 20,
+        completedAt: 21,
+        summaryPreview: "done",
+      },
+      verificationSurfaceState: {
+        status: "running",
+        source: "delegated",
+        startedAt: 30,
+        updatedAt: 40,
+        delegatedSessionId: "child-1",
+        verdict: "unknown",
+      },
+    });
+    const forked = await forkWebSessionRuntimeState(memoryBackend, {
+      sourceWebSessionId: "web-source",
+      targetWebSessionId: "web-target",
+    });
+    expect(forked).toBe(true);
+    const persisted = await loadPersistedWebSessionRuntimeState(memoryBackend, "web-target");
+    expect(persisted?.reviewSurfaceState).toMatchObject({
+      status: "idle",
+      source: "local",
+    });
+    expect(persisted?.verificationSurfaceState).toMatchObject({
+      status: "idle",
+      source: "local",
+      verdict: "unknown",
+    });
+  });
+
+  it("persists and hydrates non-default shell profiles across web-session resume", async () => {
+    const memoryBackend = createMemoryBackendStub();
+
+    await persistWebSessionRuntimeState(
+      memoryBackend,
+      "web-session-profile",
+      createSession({
+        [SESSION_SHELL_PROFILE_METADATA_KEY]: "coding",
+      }),
+    );
+
+    const hydrated = createSession();
+    await hydrateWebSessionRuntimeState(
+      memoryBackend,
+      "web-session-profile",
+      hydrated,
+    );
+
+    expect(hydrated.metadata[SESSION_SHELL_PROFILE_METADATA_KEY]).toBe(
+      "coding",
+    );
+  });
+
+  it("forks persisted runtime state while stripping live task ownership", async () => {
+    const memoryBackend = createMemoryBackendStub();
+    const artifactContext: ArtifactCompactionState = {
+      version: 1,
+      snapshotId: "snapshot:fork",
+      sessionId: "session:test",
+      createdAt: 123,
+      source: "session_compaction",
+      historyDigest: "digest-fork",
+      sourceMessageCount: 6,
+      retainedTailCount: 3,
+      openLoops: [],
+      artifactRefs: [],
+    };
+
+    await persistWebSessionRuntimeState(
+      memoryBackend,
+      "web-session-source",
+      createSession({
+        [SESSION_SHELL_PROFILE_METADATA_KEY]: "coding",
+        [SESSION_WORKFLOW_STATE_METADATA_KEY]: {
+          stage: "implement",
+          worktreeMode: "child_optional",
+          objective: "Ship the continuity layer",
+          enteredAt: 10,
+          updatedAt: 20,
+        },
+        [SESSION_STATEFUL_RESUME_ANCHOR_METADATA_KEY]: {
+          previousResponseId: "resp-123",
+        },
+        [SESSION_STATEFUL_HISTORY_COMPACTED_METADATA_KEY]: true,
+        [SESSION_STATEFUL_ARTIFACT_CONTEXT_METADATA_KEY]: artifactContext,
+        [SESSION_ACTIVE_TASK_CONTEXT_METADATA_KEY]: {
+          taskId: "task-live",
+        },
+      }),
+    );
+
+    await expect(
+      forkWebSessionRuntimeState(memoryBackend, {
+        sourceWebSessionId: "web-session-source",
+        targetWebSessionId: "web-session-target",
+        shellProfile: "research",
+        workflowState: {
+          objective: "Investigate a branch",
+        },
+      }),
+    ).resolves.toBe(true);
+
+    expect(
+      await loadPersistedWebSessionRuntimeState(
+        memoryBackend,
+        "web-session-target",
+      ),
+    ).toMatchObject({
+      shellProfile: "research",
+      workflowState: expect.objectContaining({
+        objective: "Investigate a branch",
+      }),
+      statefulResumeAnchor: {
+        previousResponseId: "resp-123",
+      },
+      statefulHistoryCompacted: true,
+    });
+    expect(
+      (
+        await loadPersistedWebSessionRuntimeState(
+          memoryBackend,
+          "web-session-target",
+        )
+      )?.activeTaskContext,
+    ).toBeUndefined();
   });
 
   it("persists and hydrates runtime contract status snapshots across web-session resume", async () => {

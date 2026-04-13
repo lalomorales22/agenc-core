@@ -8,7 +8,10 @@ This package owns the user-facing global install surface:
 npm install -g @tetsuo-ai/agenc
 agenc onboard
 agenc start
-agenc
+agenc shell coding
+agenc plan
+agenc agents roles
+agenc git status
 agenc ui
 ```
 
@@ -49,8 +52,56 @@ binary remains `agenc`.
 
 `agenc` exposes two primary local operator surfaces against the same daemon:
 
-- `agenc` attaches the terminal operator console
+- bare `agenc` opens the `general` shell by default
+- `agenc shell [profile]` opens a line-oriented terminal shell over the daemon's WebChat/control-plane path
+- `agenc resume [--profile <name>]` reopens the shell session for the current workspace/profile
+- `agenc session list|inspect|history|resume|fork` is the continuity surface for active and resumable daemon-backed sessions
+- `agenc console` opens the explicit operator console compatibility surface
 - `agenc ui` opens or prints the local dashboard URL on `/ui/`
+
+Current coding-shell command surface on the same daemon:
+
+- `agenc plan status|enter|exit|implement|review|verify`
+- `agenc agents roles|list|spawn|assign|inspect|stop`
+- `agenc tasks`
+- `agenc files`
+- `agenc grep`
+- `agenc git status|diff|show|branch|summary|worktree`
+- `agenc branch`
+- `agenc worktree`
+- `agenc diff`
+- `agenc review`
+- `agenc agents spawn coding --objective "Implement the task" --worktree auto`
+- `agenc agents assign <taskId> verification --wait`
+- `/verify` inside the shell for verification-stage checks or delegated verifier runs
+- `agenc session`
+- `agenc session list --active-only`
+- `agenc session inspect <sessionId>`
+- `agenc session history <sessionId> --include-tools`
+- `agenc session resume <sessionId>`
+- `agenc session fork <sessionId> --objective "Investigate variant"`
+- `agenc permissions`
+- `agenc mcp status|list|inspect|tools|validate|reconnect|enable|disable`
+- `agenc skills list|inspect|enable|disable|sources`
+- `/plugin list|inspect|enable|disable|reload` inside the shell for local plugin catalog operations
+- `agenc model`
+- `agenc effort`
+
+Extension surfaces stay separate on purpose:
+
+- `agenc mcp ...` is bounded runtime control for already-configured MCP servers; creation and transport/auth/secrets edits remain admin/config workflows
+- `agenc skills ...` is the shell alias for local discovered skills only
+- `agenc market skills ...` is still the explicit marketplace browsing and purchase surface
+- `agenc plugin ...` remains the direct plugin catalog/admin CLI; `/plugin ...` is the shell-native catalog view and toggle surface
+
+Supported shell profiles:
+
+- `general`
+- `coding`
+- `research`
+- `validation`
+- `documentation`
+- `operator`
 
 For automation or remote shells, use:
 

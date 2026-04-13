@@ -52,6 +52,14 @@ export const WATCH_STATE_PRIMITIVE_KEYS = Object.freeze([
   "plannerDagNote",
   "plannerDagUpdatedAt",
   "plannerDagHydratedSessionId",
+  "workflowStage",
+  "workflowStageUpdatedAt",
+  "workflowOwnershipSummary",
+  "workflowOwnershipUpdatedAt",
+  "cockpit",
+  "cockpitUpdatedAt",
+  "cockpitFingerprint",
+  "eventCategoryFilter",
 ]);
 
 const WATCH_CHECKPOINT_STATE_KEYS = Object.freeze([
@@ -87,6 +95,14 @@ const WATCH_CHECKPOINT_STATE_KEYS = Object.freeze([
   "plannerDagNote",
   "plannerDagUpdatedAt",
   "plannerDagHydratedSessionId",
+  "workflowStage",
+  "workflowStageUpdatedAt",
+  "workflowOwnershipSummary",
+  "workflowOwnershipUpdatedAt",
+  "cockpit",
+  "cockpitUpdatedAt",
+  "cockpitFingerprint",
+  "eventCategoryFilter",
 ]);
 
 export const DEFAULT_WATCH_CHECKPOINT_LIMIT = 12;
@@ -112,9 +128,13 @@ const DEFAULT_BOUND_STATE_KEYS = Object.freeze([
   "lastUsageSummary",
   "liveSessionModelRoute",
   "lastStatus",
+  "cockpit",
+  "cockpitUpdatedAt",
+  "cockpitFingerprint",
   "configuredModelRoute",
   "manualStatusRequestPending",
   "lastStatusFeedFingerprint",
+  "eventCategoryFilter",
 ]);
 
 function normalizeStoredValue(value) {
@@ -586,6 +606,14 @@ export function createWatchState({
     plannerDagNote: null,
     plannerDagUpdatedAt: 0,
     plannerDagHydratedSessionId: null,
+    workflowStage: "idle",
+    workflowStageUpdatedAt: 0,
+    workflowOwnershipSummary: "",
+    workflowOwnershipUpdatedAt: 0,
+    cockpit: null,
+    cockpitUpdatedAt: 0,
+    cockpitFingerprint: null,
+    eventCategoryFilter: "all",
     events: [],
   };
 }
@@ -660,6 +688,13 @@ export function resetDelegatedWatchState(state) {
   state.plannerDagNote = null;
   state.plannerDagUpdatedAt = 0;
   state.plannerDagHydratedSessionId = null;
+  state.workflowStage = "idle";
+  state.workflowStageUpdatedAt = 0;
+  state.workflowOwnershipSummary = "";
+  state.workflowOwnershipUpdatedAt = 0;
+  state.cockpit = null;
+  state.cockpitUpdatedAt = 0;
+  state.cockpitFingerprint = null;
 }
 
 export function captureWatchCheckpoint(state, {

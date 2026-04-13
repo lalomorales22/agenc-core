@@ -15,6 +15,34 @@ import type {
   RuntimeContractStatusSnapshot,
 } from "../runtime-contract/types.js";
 import { compactHistoryIntoArtifactContext } from "../llm/context-compaction.js";
+import {
+  DEFAULT_SESSION_SHELL_PROFILE,
+  SESSION_SHELL_PROFILE_METADATA_KEY,
+  coerceSessionShellProfile,
+  ensureSessionShellProfile,
+  isSessionShellProfile,
+  resolveSessionShellProfile,
+  type SessionShellProfile,
+} from "./shell-profile.js";
+import {
+  DEFAULT_SESSION_WORKFLOW_STATE,
+  SESSION_WORKFLOW_STATE_METADATA_KEY,
+  coerceSessionWorkflowStage,
+  ensureSessionWorkflowState,
+  resolveSessionWorkflowState,
+  type SessionWorkflowStage,
+  type SessionWorkflowUpdate,
+} from "./workflow-state.js";
+import {
+  SESSION_REVIEW_SURFACE_STATE_METADATA_KEY,
+  SESSION_VERIFICATION_SURFACE_STATE_METADATA_KEY,
+  coerceReviewSurfaceState,
+  coerceVerificationSurfaceState,
+  createIdleReviewSurfaceState,
+  createIdleVerificationSurfaceState,
+  type ReviewSurfaceState,
+  type VerificationSurfaceState,
+} from "./watch-cockpit.js";
 
 export const SESSION_STATEFUL_RESUME_ANCHOR_METADATA_KEY =
   "statefulResumeAnchor";
@@ -41,6 +69,8 @@ export function clearStatefulContinuationMetadata(
   delete metadata[SESSION_ACTIVE_TASK_CONTEXT_METADATA_KEY];
   delete metadata[SESSION_RUNTIME_CONTRACT_SNAPSHOT_METADATA_KEY];
   delete metadata[SESSION_RUNTIME_CONTRACT_STATUS_SNAPSHOT_METADATA_KEY];
+  delete metadata[SESSION_REVIEW_SURFACE_STATE_METADATA_KEY];
+  delete metadata[SESSION_VERIFICATION_SURFACE_STATE_METADATA_KEY];
 }
 
 export function buildSessionRuntimeContractSnapshot(
@@ -62,6 +92,33 @@ export function buildSessionRuntimeContractStatusSnapshot(
   }
   return candidate as RuntimeContractStatusSnapshot;
 }
+
+export {
+  DEFAULT_SESSION_SHELL_PROFILE,
+  SESSION_SHELL_PROFILE_METADATA_KEY,
+  coerceSessionShellProfile,
+  ensureSessionShellProfile,
+  isSessionShellProfile,
+  resolveSessionShellProfile,
+};
+export type { SessionShellProfile };
+export {
+  DEFAULT_SESSION_WORKFLOW_STATE,
+  SESSION_WORKFLOW_STATE_METADATA_KEY,
+  coerceSessionWorkflowStage,
+  ensureSessionWorkflowState,
+  resolveSessionWorkflowState,
+};
+export type { SessionWorkflowStage, SessionWorkflowUpdate };
+export {
+  SESSION_REVIEW_SURFACE_STATE_METADATA_KEY,
+  SESSION_VERIFICATION_SURFACE_STATE_METADATA_KEY,
+  coerceReviewSurfaceState,
+  coerceVerificationSurfaceState,
+  createIdleReviewSurfaceState,
+  createIdleVerificationSurfaceState,
+};
+export type { ReviewSurfaceState, VerificationSurfaceState };
 
 // ---------------------------------------------------------------------------
 // Types
@@ -150,9 +207,17 @@ export interface SessionInfo {
   readonly id: string;
   readonly channel: string;
   readonly senderId: string;
+  readonly shellProfile: SessionShellProfile;
+  readonly workflowStage: SessionWorkflowStage;
   readonly messageCount: number;
   readonly createdAt: number;
   readonly lastActiveAt: number;
+}
+
+export interface SessionCreateOptions {
+  readonly metadata?: Record<string, unknown>;
+  readonly shellProfile?: unknown;
+  readonly workflowState?: SessionWorkflowUpdate;
 }
 
 /** Callback that summarizes messages into a single string. */
@@ -334,23 +399,50 @@ export class SessionManager {
   /**
    * Return an existing session or create a new one for the given params.
    */
-  getOrCreate(params: SessionLookupParams): Session {
+  getOrCreate(
+    params: SessionLookupParams,
+    options?: SessionCreateOptions,
+  ): Session {
     const effective = this.resolveConfig(params);
     const id = deriveSessionId(params, effective.scope);
+    const now = Date.now();
 
     const existing = this.sessions.get(id);
     if (existing) {
+      ensureSessionShellProfile(
+        existing.metadata,
+        options?.shellProfile ??
+          options?.metadata?.[SESSION_SHELL_PROFILE_METADATA_KEY],
+      );
+      ensureSessionWorkflowState(
+        existing.metadata,
+        options?.workflowState,
+        now,
+      );
+      existing.lastActiveAt = now;
       return existing;
     }
 
-    const now = Date.now();
+    const metadata = { ...(options?.metadata ?? {}) };
+    ensureSessionShellProfile(
+      metadata,
+      options?.shellProfile ?? metadata[SESSION_SHELL_PROFILE_METADATA_KEY],
+    );
+    ensureSessionWorkflowState(
+      metadata,
+      options?.workflowState ??
+        (metadata[SESSION_WORKFLOW_STATE_METADATA_KEY] as
+          | SessionWorkflowUpdate
+          | undefined),
+      now,
+    );
     const session: Session = {
       id,
       workspaceId: params.workspaceId,
       history: [],
       createdAt: now,
       lastActiveAt: now,
-      metadata: {},
+      metadata,
     };
 
     this.sessions.set(id, session);
@@ -645,6 +737,8 @@ export class SessionManager {
         id,
         channel: params?.channel ?? "",
         senderId: params?.senderId ?? "",
+        shellProfile: resolveSessionShellProfile(session.metadata),
+        workflowStage: resolveSessionWorkflowState(session.metadata).stage,
         messageCount: session.history.length,
         createdAt: session.createdAt,
         lastActiveAt: session.lastActiveAt,

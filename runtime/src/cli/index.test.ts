@@ -58,6 +58,21 @@ const { runMarketTuiCommand } = vi.hoisted(() => ({
 const { runAgentRegisterCommand } = vi.hoisted(() => ({
   runAgentRegisterCommand: vi.fn(async () => 0),
 }));
+const { runShellCommand, runShellExecCommand } = vi.hoisted(() => ({
+  runShellCommand: vi.fn(async () => 0),
+  runShellExecCommand: vi.fn(async () => 0),
+}));
+const {
+  runSessionContinuityListCommand,
+  runSessionContinuityInspectCommand,
+  runSessionContinuityHistoryCommand,
+  runSessionContinuityForkCommand,
+} = vi.hoisted(() => ({
+  runSessionContinuityListCommand: vi.fn(async () => 0),
+  runSessionContinuityInspectCommand: vi.fn(async () => 0),
+  runSessionContinuityHistoryCommand: vi.fn(async () => 0),
+  runSessionContinuityForkCommand: vi.fn(async () => 0),
+}));
 
 vi.mock("./init.js", () => ({
   runInitCommand,
@@ -113,6 +128,18 @@ vi.mock("./agent-cli.js", async () => {
     runAgentRegisterCommand,
   };
 });
+
+vi.mock("./shell.js", () => ({
+  runShellCommand,
+  runShellExecCommand,
+}));
+
+vi.mock("./session-continuity.js", () => ({
+  runSessionContinuityListCommand,
+  runSessionContinuityInspectCommand,
+  runSessionContinuityHistoryCommand,
+  runSessionContinuityForkCommand,
+}));
 
 import { runCli } from "./index.js";
 
@@ -228,6 +255,10 @@ describe("runtime root CLI", () => {
     expect(code).toBe(0);
     expect(stderr.data()).toBe("");
     expect(stdout.data()).toContain("init [--help] [options]");
+    expect(stdout.data()).toContain("shell [profile] [--help] [options]");
+    expect(stdout.data()).toContain(
+      "agents [roles|list|spawn|assign|inspect|stop] [--help] [options]",
+    );
     expect(stdout.data()).toContain("agent [--help] <command> [options]");
     expect(stdout.data()).toContain("market [--help] <domain> <command> [options]");
     expect(stdout.data()).toContain("market inspect <surface> [subject]");
@@ -239,6 +270,392 @@ describe("runtime root CLI", () => {
       "init      Generate an AGENC.md contributor guide for the current repo",
     );
     expect(stdout.data()).toContain("agenc-runtime init");
+    expect(stdout.data()).toContain("agenc-runtime shell coding");
+  });
+
+  it("routes shell flags through the root CLI command surface", async () => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+
+    const code = await runCli({
+      argv: [
+        "shell",
+        "coding",
+        "--pid-path",
+        "/tmp/agenc.pid",
+        "--port",
+        "4555",
+        "--new",
+        "--session",
+        "session-123",
+      ],
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(code).toBe(0);
+    expect(runShellCommand).toHaveBeenCalledTimes(1);
+    expect(runShellCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        configPath: process.env.AGENC_CONFIG,
+        pidPath: "/tmp/agenc.pid",
+        controlPlanePort: 4555,
+        profile: "coding",
+        newSession: true,
+        sessionId: "session-123",
+      }),
+    );
+  });
+
+  it("routes coding grep aliases through one-shot shell execution", async () => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+
+    const code = await runCli({
+      argv: [
+        "grep",
+        "shellProfile",
+        "--glob",
+        "src/**/*.ts",
+        "--context",
+        "2",
+      ],
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(code).toBe(0);
+    expect(runShellExecCommand).toHaveBeenCalledTimes(1);
+    expect(runShellExecCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        profile: "coding",
+        quietConnection: true,
+        commandText:
+          '/grep {"pattern":"shellProfile","filePatterns":["src/**/*.ts"],"contextLines":2}',
+      }),
+    );
+  });
+
+  it("routes git aliases through one-shot shell execution", async () => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+
+    const code = await runCli({
+      argv: ["git", "diff", "--staged", "--files", "src/a.ts,src/b.ts"],
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(code).toBe(0);
+    expect(runShellExecCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        profile: "coding",
+        quietConnection: true,
+        commandText:
+          '/git {"subcommand":"diff","staged":true,"filePaths":["src/a.ts","src/b.ts"]}',
+      }),
+    );
+  });
+
+  it("routes plan workflow commands through one-shot shell execution", async () => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+
+    const code = await runCli({
+      argv: [
+        "plan",
+        "enter",
+        "--objective",
+        "Ship Phase 4",
+        "--worktrees",
+        "child",
+        "--delegate",
+        "--staged",
+      ],
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(code).toBe(0);
+    expect(runShellExecCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        profile: "coding",
+        quietConnection: true,
+        commandText:
+          '/plan {"subcommand":"enter","objective":"Ship Phase 4","worktreeMode":"child","delegate":true,"staged":true}',
+      }),
+    );
+  });
+
+  it("routes session status through one-shot shell execution", async () => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+
+    const code = await runCli({
+      argv: ["session"],
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(code).toBe(0);
+    expect(runShellExecCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        profile: "general",
+        quietConnection: true,
+        commandText: "/session",
+      }),
+    );
+  });
+
+  it("routes session list through the continuity control-plane surface", async () => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+
+    const code = await runCli({
+      argv: ["session", "list", "--active-only", "--limit", "5", "--profile", "coding"],
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(code).toBe(0);
+    expect(runSessionContinuityListCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        activeOnly: true,
+        limit: 5,
+        profile: "coding",
+      }),
+    );
+  });
+
+  it("routes session inspect through the continuity control-plane surface", async () => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+
+    const code = await runCli({
+      argv: ["session", "inspect", "session-123"],
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(code).toBe(0);
+    expect(runSessionContinuityInspectCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        sessionId: "session-123",
+      }),
+    );
+  });
+
+  it("routes session history through the continuity control-plane surface", async () => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+
+    const code = await runCli({
+      argv: ["session", "history", "session-123", "--limit", "20", "--include-tools"],
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(code).toBe(0);
+    expect(runSessionContinuityHistoryCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        sessionId: "session-123",
+        limit: 20,
+        includeTools: true,
+      }),
+    );
+  });
+
+  it("routes session fork through the continuity control-plane surface", async () => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+
+    const code = await runCli({
+      argv: [
+        "session",
+        "fork",
+        "session-123",
+        "--objective",
+        "Investigate regression",
+        "--profile",
+        "research",
+      ],
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(code).toBe(0);
+    expect(runSessionContinuityForkCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        sessionId: "session-123",
+        objective: "Investigate regression",
+        profile: "research",
+      }),
+    );
+  });
+
+  it("routes resume to the interactive shell path with coding default profile", async () => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+
+    const code = await runCli({
+      argv: ["resume", "--session", "session-456"],
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(code).toBe(0);
+    expect(runShellCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        profile: "coding",
+        sessionId: "session-456",
+      }),
+    );
+  });
+
+  it("routes session resume to the interactive shell path", async () => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+
+    const code = await runCli({
+      argv: ["session", "resume", "session-789"],
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(code).toBe(0);
+    expect(runShellCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        profile: "general",
+        sessionId: "session-789",
+      }),
+    );
+  });
+
+  it("routes delegated review through one-shot shell execution", async () => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+
+    const code = await runCli({
+      argv: ["review", "--delegate", "--staged"],
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(code).toBe(0);
+    expect(runShellExecCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        profile: "coding",
+        quietConnection: true,
+        commandText: '/review {"staged":true,"delegate":true}',
+      }),
+    );
+  });
+
+  it("routes agent-role listing through one-shot shell execution", async () => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+
+    const code = await runCli({
+      argv: ["agents", "roles"],
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(code).toBe(0);
+    expect(runShellExecCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        profile: "coding",
+        quietConnection: true,
+        commandText: "/agents roles",
+      }),
+    );
+  });
+
+  it("routes agent spawning through one-shot shell execution", async () => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+
+    const code = await runCli({
+      argv: [
+        "agents",
+        "spawn",
+        "coding",
+        "--objective",
+        "Implement the task",
+        "--bundle",
+        "coding-core",
+        "--worktree",
+        "auto",
+        "--wait",
+      ],
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(code).toBe(0);
+    expect(runShellExecCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        profile: "coding",
+        quietConnection: true,
+        commandText:
+          '/agents {"subcommand":"spawn","roleId":"coding","objective":"Implement the task","toolBundle":"coding-core","worktree":"auto","wait":true}',
+      }),
+    );
+  });
+
+  it("routes skills aliases through one-shot shell execution", async () => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+
+    const code = await runCli({
+      argv: ["skills", "inspect", "local-skill"],
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+    });
+
+    expect(code).toBe(0);
+    expect(runShellExecCommand).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        profile: "general",
+        quietConnection: true,
+        commandText: "/skills inspect local-skill",
+      }),
+    );
+  });
+
+  it("keeps plugin commands on the direct CLI path instead of the shell alias", async () => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+    const previousCwd = process.cwd();
+    process.chdir(workspace);
+
+    try {
+      const code = await runCli({
+        argv: ["plugin", "list"],
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+      });
+
+      expect(code).toBe(0);
+      expect(runShellExecCommand).not.toHaveBeenCalled();
+    } finally {
+      process.chdir(previousCwd);
+    }
   });
 
   it("routes init flags through the root CLI command surface", async () => {

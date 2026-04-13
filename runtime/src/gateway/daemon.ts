@@ -20,6 +20,9 @@ import {
 import { constants } from "node:fs";
 import { basename, delimiter, dirname, join, resolve as resolvePath } from "node:path";
 import { homedir } from "node:os";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { randomUUID } from "node:crypto";
 // spawn import moved to ./daemon-command-registry.ts
 import { Gateway } from "./gateway.js";
 import { buildGatewayChannelStatus } from "./channel-status.js";
@@ -42,6 +45,7 @@ import type {
 } from "./types.js";
 import type { Logger } from "../utils/logger.js";
 import { silentLogger } from "../utils/logger.js";
+import type { SessionContinuityRecord } from "../channels/webchat/types.js";
 import {
   buildRuntimeContractVerifierTraceId,
   buildRuntimeContractWorkerTraceId,
@@ -141,6 +145,7 @@ import {
   type DiscoveredSkill,
 } from "../skills/markdown/discovery.js";
 import { MarkdownSkillInjector } from "../skills/markdown/injector.js";
+import { PluginCatalog } from "../skills/catalog.js";
 import { VoiceBridge } from "./voice-bridge.js";
 import { createSessionToolHandler } from "./tool-handler-factory.js";
 import {
@@ -175,10 +180,19 @@ import {
 } from "../telemetry/incident-diagnostics.js";
 import { computeRuntimeSloSnapshot } from "../telemetry/slo.js";
 import {
+  buildSessionRuntimeContractStatusSnapshot,
+  DEFAULT_SESSION_SHELL_PROFILE,
+  SESSION_SHELL_PROFILE_METADATA_KEY,
+  type SessionShellProfile,
+  type SessionWorkflowStage,
+  resolveSessionWorkflowState,
+  resolveSessionShellProfile,
   SessionManager,
 } from "./session.js";
 import {
-
+  getShellProfilePreferredToolNames,
+} from "./shell-profile.js";
+import {
   getDefaultWorkspacePath,
 } from "./workspace-files.js";
 import { SlashCommandRegistry } from "./commands.js";
@@ -292,7 +306,28 @@ import {
   type PersistentWorkerMailboxTraceEvent,
 } from "./persistent-worker-mailbox.js";
 import { WorktreeIsolationManager } from "./worktree-isolation.js";
+import {
+  buildShellAgentRoleCatalog,
+  resolveShellAgentRole,
+  type ShellAgentRoleDescriptor,
+  type ShellAgentRoleSource,
+  type ShellAgentToolBundleName,
+} from "./shell-agent-roles.js";
+import { runCommand } from "../utils/process.js";
+import {
+  buildDelegationExecutionContext,
+  type DelegationExecutionContext,
+} from "../utils/delegation-execution-context.js";
+import {
+  isPathWithinRoot,
+  normalizeWorkspaceRoot,
+} from "../workflow/path-normalization.js";
+import type { RuntimeExecutionLocation } from "../runtime-contract/types.js";
 import { evaluateAutonomyCanaryAdmission } from "./autonomy-rollout.js";
+import {
+  evaluateShellFeatureRollout,
+  resolveConfiguredShellProfile,
+} from "./shell-rollout.js";
 import {
   formatBackgroundRunAdmissionDenied,
   formatBackgroundRunStatus,
@@ -355,6 +390,16 @@ export {
   persistWebSessionRuntimeState,
   resolveSessionStatefulContinuation,
 } from "./daemon-session-state.js";
+import { persistWebSessionRuntimeState } from "./daemon-session-state.js";
+import {
+  coerceReviewSurfaceState,
+  coerceVerificationSurfaceState,
+  createIdleReviewSurfaceState,
+  createIdleVerificationSurfaceState,
+  formatWorkflowOwnershipSummary,
+  type WatchCockpitSnapshot,
+} from "./watch-cockpit.js";
+import { collectSessionWorkflowOwnership } from "./workflow-ownership.js";
 export type { ResolvedTraceLoggingConfig } from "./daemon-trace.js";
 export type { LLMFailureSurfaceSummary } from "./daemon-llm-failure.js";
 export {
@@ -448,6 +493,7 @@ const CURRENT_MODULE_FILE_PATH =
     : process.argv[1]
       ? resolvePath(process.argv[1])
       : resolvePath(process.cwd(), "runtime", "dist", "bin", "daemon.js");
+const execFileAsync = promisify(execFile);
 
 /**
  * Build a minimal environment for system.bash.
@@ -992,6 +1038,10 @@ export class DaemonManager {
       send: (content: string) => Promise<void>;
     }
   >();
+  private readonly _watchCockpitRepoCache = new Map<
+    string,
+    { updatedAt: number; repo: WatchCockpitSnapshot["repo"]; worktrees: WatchCockpitSnapshot["worktrees"] }
+  >();
   private _resolvedContextWindowTokens: number | undefined;
   private _hostToolingProfile: HostToolingProfile | null = null;
   private _hostWorkspacePath: string | null = null;
@@ -1006,6 +1056,7 @@ export class DaemonManager {
   private _llmProviderConfigCatalog: LLMProviderConfigCatalogEntry[] = [];
   private _primaryLlmConfig: GatewayLLMConfig | undefined = undefined;
   private _baseToolHandler: ToolHandler | null = null;
+  private _toolRegistry: ToolRegistry | null = null;
   /**
    * Cut 5.6: declarative agent definitions loaded from
    * runtime/src/gateway/agent-definitions/, ~/.agenc/agents/, and
@@ -1775,6 +1826,7 @@ export class DaemonManager {
       config,
       telemetry ?? undefined,
     );
+    this._toolRegistry = registry;
     const environment = config.desktop?.environment ?? "both";
 
     const llmTools = registry.toLLMTools();
@@ -2218,6 +2270,19 @@ export class DaemonManager {
       getBackgroundRunAvailability: () => this.getBackgroundRunAvailability(),
       inspectBackgroundRun: (sessionId) =>
         this.inspectOwnedBackgroundRun(sessionId),
+      forkBackgroundRunFromCheckpoint: async ({
+        sourceSessionId,
+        targetSessionId,
+        objective,
+      }) =>
+        (await this._backgroundRunSupervisor?.forkRunFromCheckpoint(
+          sourceSessionId,
+          {
+            targetSessionId,
+            ...(objective ? { objective } : {}),
+            reason: "Forked from session continuity workflow.",
+          },
+        )) ?? false,
       controlBackgroundRun: (params) => this.controlOwnedBackgroundRun(params),
       policyPreview: (params) =>
         this.buildPolicySimulationPreview({
@@ -2245,6 +2310,8 @@ export class DaemonManager {
         this._observabilityService
           ? this._observabilityService.getLogTail(params)
           : undefined,
+      getWatchCockpitSnapshot: async (params) =>
+        this.buildWatchCockpitSnapshot(params),
     });
     const signals = this.createWebChatSignals(webChat);
     const onMessage = this.createWebChatMessageHandler({
@@ -2319,7 +2386,7 @@ export class DaemonManager {
         incidentDiagnostics: this._incidentDiagnostics ?? undefined,
         effectLedger: this._effectLedger ?? undefined,
         faultInjector: this.faultInjector,
-        createToolHandler: ({ sessionId, runId, cycleIndex }) =>
+        createToolHandler: ({ sessionId, runId, cycleIndex, shellProfile }) =>
           this.createWebChatSessionToolHandler({
             sessionId,
             webChat,
@@ -2330,18 +2397,42 @@ export class DaemonManager {
             traceConfig: resolveTraceLoggingConfig(gateway.config.logging),
             traceId: `background:${sessionId}:${runId}:${cycleIndex}`,
             hookMetadata: { backgroundRunId: runId },
+            shellProfile,
           }),
-        buildToolRoutingDecision: (_sessionId, content, _history) =>
-          buildStaticToolRoutingDecision({
-            content,
-            availableToolNames: this.getAdvertisedToolNames(),
-          }),
+        buildToolRoutingDecision: (sessionId, content, _history, shellProfile) =>
+          {
+            const effectiveProfile = this.resolveEffectiveShellProfile({
+              sessionId,
+              metadata: sessionMgr.get(sessionId)?.metadata ?? {},
+              preferred: shellProfile,
+            });
+            return buildStaticToolRoutingDecision({
+              content,
+              availableToolNames: this.getAdvertisedToolNames(
+                undefined,
+                this.evaluateShellFeatureAdmission({
+                  sessionId,
+                  feature: "codingCommands",
+                  domain: "shell",
+                }).allowed
+                  ? effectiveProfile
+                  : DEFAULT_SESSION_SHELL_PROFILE,
+              ),
+              shellProfile: effectiveProfile,
+            });
+          },
         seedHistoryForSession: (sessionId) =>
           sessionMgr.get(sessionId)?.history ?? [],
         isSessionBusy: (sessionId) =>
           this._foregroundSessionLocks.has(sessionId),
         onStatus: (sessionId, payload) => {
-          webChat.pushToSession(sessionId, { type: "agent.status", payload });
+          webChat.pushToSession(sessionId, {
+            type: "agent.status",
+            payload: {
+              ...payload,
+              ...this.buildWorkflowStatusPayload(sessionId),
+            },
+          });
         },
         publishUpdate: async (sessionId, content) => {
           await webChat.send({ sessionId, content });
@@ -2788,6 +2879,48 @@ export class DaemonManager {
         return summary as DelegationBenchmarkSummary;
       },
     );
+  }
+
+  private evaluateShellFeatureAdmission(params: {
+    sessionId: string;
+    feature:
+      | "shellProfiles"
+      | "codingCommands"
+      | "shellExtensions"
+      | "watchCockpit"
+      | "multiAgent";
+    domain: "shell" | "extensions" | "watch";
+  }) {
+    const scope = this.resolvePolicyScopeForSession({
+      sessionId: params.sessionId,
+      channel: "webchat",
+    });
+    return evaluateShellFeatureRollout({
+      autonomy: this.gateway?.config.autonomy,
+      tenantId: scope.tenantId,
+      feature: params.feature,
+      domain: params.domain,
+      stableKey: params.sessionId,
+    });
+  }
+
+  private resolveEffectiveShellProfile(params: {
+    sessionId: string;
+    metadata?: Record<string, unknown>;
+    preferred?: unknown;
+  }): SessionShellProfile {
+    const scope = this.resolvePolicyScopeForSession({
+      sessionId: params.sessionId,
+      channel: "webchat",
+    });
+    return resolveConfiguredShellProfile({
+      autonomy: this.gateway?.config.autonomy,
+      tenantId: scope.tenantId,
+      requested:
+        params.preferred ??
+        resolveSessionShellProfile(params.metadata ?? {}),
+      stableKey: params.sessionId,
+    }).profile;
   }
 
   private evaluateBackgroundRunAdmission(params: {
@@ -3337,11 +3470,27 @@ export class DaemonManager {
         this.registerTextApprovalDispatcher(sessionId, channelName, send),
       createTextChannelSessionToolHandler: (params) =>
         this.createTextChannelSessionToolHandler(params),
-      buildToolRoutingDecision: (_sessionId, content, _history) =>
-        buildStaticToolRoutingDecision({
-          content,
-          availableToolNames: this.getAdvertisedToolNames(),
-        }),
+      buildToolRoutingDecision: (sessionId, content, _history, shellProfile) =>
+        {
+          const effectiveProfile = this.resolveEffectiveShellProfile({
+            sessionId,
+            preferred: shellProfile ?? DEFAULT_SESSION_SHELL_PROFILE,
+          });
+          return buildStaticToolRoutingDecision({
+            content,
+            availableToolNames: this.getAdvertisedToolNames(
+              undefined,
+              this.evaluateShellFeatureAdmission({
+                sessionId,
+                feature: "codingCommands",
+                domain: "shell",
+              }).allowed
+                ? effectiveProfile
+                : DEFAULT_SESSION_SHELL_PROFILE,
+            ),
+            shellProfile: effectiveProfile,
+          });
+        },
       recordToolRoutingOutcome: () => {
         /* no-op: static routing, nothing to record */
       },
@@ -3947,6 +4096,7 @@ export class DaemonManager {
         });
       },
     );
+    this._watchCockpitRepoCache.delete(webSessionId);
 
     await cleanupDesktopSession(webSessionId, {
       desktopManager: this._desktopManager,
@@ -3996,6 +4146,557 @@ export class DaemonManager {
       .map((entry) => entryToMessage(entry));
     sessionMgr.replaceHistory(historySessionId, history);
     await hydrateWebSessionRuntimeState(memoryBackend, webSessionId, session);
+  }
+
+  private listShellAgentRoles(): readonly ShellAgentRoleDescriptor[] {
+    return buildShellAgentRoleCatalog({
+      definitions: this._agentDefinitions,
+    });
+  }
+
+  private async resolveShellAgentWorkspaceRoot(
+    parentSessionId: string,
+  ): Promise<string> {
+    return (
+      (typeof this._webChatChannel?.loadSessionWorkspaceRoot === "function"
+        ? await this._webChatChannel.loadSessionWorkspaceRoot(parentSessionId)
+        : undefined) ??
+      this._hostWorkspacePath ??
+      process.cwd()
+    );
+  }
+
+  private async resolveGitRootForPath(
+    startPath: string | undefined,
+  ): Promise<string | undefined> {
+    const normalized = normalizeWorkspaceRoot(startPath);
+    if (!normalized) {
+      return undefined;
+    }
+    const result = await runCommand(
+      "git",
+      ["rev-parse", "--show-toplevel"],
+      { cwd: normalized },
+    );
+    if (result.exitCode !== 0) {
+      return undefined;
+    }
+    const gitRoot = result.stdout.trim();
+    return gitRoot.length > 0 ? resolvePath(gitRoot) : undefined;
+  }
+
+  private async resolveExistingWorktreeLocation(params: {
+    readonly worktreePath: string;
+    readonly parentGitRoot?: string;
+  }): Promise<RuntimeExecutionLocation> {
+    const worktreePath = resolvePath(params.worktreePath);
+    const gitRoot = await this.resolveGitRootForPath(worktreePath);
+    if (!gitRoot) {
+      throw new Error(`"${worktreePath}" is not inside a git worktree.`);
+    }
+    if (params.parentGitRoot && gitRoot !== params.parentGitRoot) {
+      throw new Error(
+        `Worktree "${worktreePath}" does not belong to the current session git root.`,
+      );
+    }
+    const headResult = await runCommand(
+      "git",
+      ["rev-parse", "HEAD"],
+      { cwd: worktreePath },
+    );
+    const worktreeRef =
+      headResult.exitCode === 0 && headResult.stdout.trim().length > 0
+        ? headResult.stdout.trim()
+        : undefined;
+    return {
+      mode: "worktree",
+      workspaceRoot: worktreePath,
+      workingDirectory: worktreePath,
+      gitRoot,
+      worktreePath,
+      ...(worktreeRef ? { worktreeRef } : {}),
+      lifecycle: "active",
+    };
+  }
+
+  private async resolveShellAgentScope(params: {
+    readonly parentSessionId: string;
+    readonly allowedTools?: readonly string[];
+    readonly workspaceRoot?: string;
+    readonly workingDirectory?: string;
+    readonly worktree?: "auto" | string;
+    readonly worktreeEligible: boolean;
+    readonly mutating: boolean;
+  }): Promise<{
+    workspaceRoot: string;
+    workingDirectory: string;
+    executionLocation: RuntimeExecutionLocation;
+    executionContext?: DelegationExecutionContext;
+  }> {
+    const parentWorkspaceRoot = resolvePath(
+      await this.resolveShellAgentWorkspaceRoot(params.parentSessionId),
+    );
+    const parentGitRoot = await this.resolveGitRootForPath(parentWorkspaceRoot);
+    const requestedWorkspaceRoot = params.workspaceRoot
+      ? resolvePath(parentWorkspaceRoot, params.workspaceRoot)
+      : parentWorkspaceRoot;
+    if (
+      params.workspaceRoot &&
+      !isPathWithinRoot(requestedWorkspaceRoot, parentWorkspaceRoot)
+    ) {
+      throw new Error("Explicit workspace root must stay inside the parent workspace root.");
+    }
+
+    let executionLocation: RuntimeExecutionLocation = {
+      mode: "local",
+      workspaceRoot: requestedWorkspaceRoot,
+      workingDirectory: requestedWorkspaceRoot,
+    };
+
+    if (params.worktree === "auto" && params.worktreeEligible) {
+      const worktreeManager = new WorktreeIsolationManager({
+        logger: this.logger,
+      });
+      executionLocation = await worktreeManager.prepareWorktree({
+        workerId: `shell-agent-${randomUUID().slice(0, 12)}`,
+        workspaceRoot: requestedWorkspaceRoot,
+        workingDirectory: requestedWorkspaceRoot,
+      });
+    } else if (
+      typeof params.worktree === "string" &&
+      params.worktree.trim().length > 0 &&
+      params.worktree !== "auto"
+    ) {
+      executionLocation = await this.resolveExistingWorktreeLocation({
+        worktreePath: params.worktree,
+        parentGitRoot,
+      });
+    }
+
+    const defaultWorkspaceRoot =
+      executionLocation.workspaceRoot ?? requestedWorkspaceRoot;
+    const defaultWorkingDirectory =
+      executionLocation.workingDirectory ?? defaultWorkspaceRoot;
+    const workingDirectory = params.workingDirectory
+      ? resolvePath(defaultWorkingDirectory, params.workingDirectory)
+      : defaultWorkingDirectory;
+    if (!isPathWithinRoot(workingDirectory, defaultWorkspaceRoot)) {
+      throw new Error("Child working directory must stay inside the resolved workspace scope.");
+    }
+
+    const baseExecutionContext = buildDelegationExecutionContext({
+      workspaceRoot: defaultWorkspaceRoot,
+      allowedReadRoots: [defaultWorkspaceRoot],
+      allowedWriteRoots: params.mutating ? [defaultWorkspaceRoot] : [],
+      allowedTools: params.allowedTools,
+      effectClass: params.mutating ? "filesystem_write" : "read_only",
+      verificationMode: params.mutating ? "conditional_mutation" : "grounded_read",
+      stepKind: params.mutating ? "delegated_write" : "delegated_research",
+      role: params.mutating ? "writer" : "researcher",
+    });
+    const executionContext =
+      executionLocation.mode === "worktree"
+        ? new WorktreeIsolationManager({
+            logger: this.logger,
+          }).translateExecutionContext(baseExecutionContext, executionLocation)
+        : baseExecutionContext;
+    const translatedWorkingDirectory =
+      executionLocation.mode === "worktree"
+        ? new WorktreeIsolationManager({
+            logger: this.logger,
+          }).translatePath(workingDirectory, executionLocation) ?? workingDirectory
+        : workingDirectory;
+
+    return {
+      workspaceRoot:
+        executionLocation.mode === "worktree"
+          ? executionContext?.workspaceRoot ?? defaultWorkspaceRoot
+          : defaultWorkspaceRoot,
+      workingDirectory: translatedWorkingDirectory,
+      executionLocation: {
+        ...executionLocation,
+        workspaceRoot:
+          executionLocation.mode === "worktree"
+            ? executionContext?.workspaceRoot ?? defaultWorkspaceRoot
+            : defaultWorkspaceRoot,
+        workingDirectory: translatedWorkingDirectory,
+      },
+      ...(executionContext ? { executionContext } : {}),
+    };
+  }
+
+  private async monitorShellAgentTask(params: {
+    readonly parentSessionId: string;
+    readonly taskId?: string;
+    readonly childSessionId: string;
+    readonly workingDirectory: string;
+    readonly executionLocation: RuntimeExecutionLocation;
+    readonly roleId: string;
+  }): Promise<{
+    output: string;
+    success: boolean;
+    status: string;
+  }> {
+    const subAgentManager = this._subAgentManager;
+    const taskStore = this._taskTrackerStore;
+    if (!subAgentManager) {
+      throw new Error("Sub-agent runtime is unavailable");
+    }
+    const result = await subAgentManager.waitForResult(params.childSessionId);
+    const output = result?.output ?? "";
+    const success = result?.success === true;
+    const status =
+      success
+        ? "completed"
+        : result?.stopReason ?? result?.completionState ?? "failed";
+    let finalExecutionLocation = params.executionLocation;
+    if (params.executionLocation.mode === "worktree") {
+      finalExecutionLocation =
+        (await new WorktreeIsolationManager({
+          logger: this.logger,
+        }).cleanupLocation(params.executionLocation)) ?? params.executionLocation;
+    }
+    if (taskStore && params.taskId) {
+      await taskStore.finalizeRuntimeTask({
+        listId: params.parentSessionId,
+        taskId: params.taskId,
+        status:
+          status === "cancelled"
+            ? "cancelled"
+            : success
+              ? "completed"
+              : "failed",
+        summary:
+          output.trim().length > 0
+            ? `${params.roleId} agent ${success ? "completed" : "finished with issues"}.`
+            : `${params.roleId} agent ${status}.`,
+        output,
+        usage: result?.tokenUsage as Record<string, unknown> | undefined,
+        workingDirectory:
+          finalExecutionLocation.workingDirectory ?? params.workingDirectory,
+        executionLocation: finalExecutionLocation,
+        externalRef: {
+          kind: "subagent",
+          id: params.childSessionId,
+          sessionId: params.childSessionId,
+          label: params.roleId,
+        },
+        eventData: {
+          childSessionId: params.childSessionId,
+          role: params.roleId,
+          status,
+        },
+      });
+    }
+    return {
+      output,
+      success,
+      status,
+    };
+  }
+
+  private async launchShellAgentTask(params: {
+    readonly parentSessionId: string;
+    readonly roleId: string;
+    readonly objective: string;
+    readonly prompt?: string;
+    readonly taskId?: string;
+    readonly shellProfile?: SessionShellProfile;
+    readonly toolBundle?: ShellAgentToolBundleName;
+    readonly workspaceRoot?: string;
+    readonly workingDirectory?: string;
+    readonly worktree?: "auto" | string;
+    readonly wait?: boolean;
+    readonly timeoutMs?: number;
+  }): Promise<{
+    role: ShellAgentRoleDescriptor;
+    sessionId: string;
+    taskId?: string;
+    output: string;
+    success: boolean;
+    status: string;
+    waited: boolean;
+  }> {
+    const subAgentManager = this._subAgentManager;
+    const toolRegistry = this._toolRegistry;
+    if (!subAgentManager || !toolRegistry) {
+      throw new Error("Sub-agent runtime is unavailable");
+    }
+    const resolvedRole = resolveShellAgentRole({
+      roleId: params.roleId,
+      definitions: this._agentDefinitions,
+      toolCatalog: toolRegistry.listCatalog(),
+      ...(params.toolBundle ? { toolBundleOverride: params.toolBundle } : {}),
+      ...(params.shellProfile
+        ? {
+            shellProfileOverride: this.resolveEffectiveShellProfile({
+              sessionId: params.parentSessionId,
+              preferred: params.shellProfile,
+            }),
+          }
+        : {}),
+    });
+    if (!resolvedRole) {
+      throw new Error(`Agent role "${params.roleId}" is unavailable.`);
+    }
+    const admission = this.evaluateShellFeatureAdmission({
+      sessionId: params.parentSessionId,
+      feature: "multiAgent",
+      domain: "shell",
+    });
+    if (!admission.allowed) {
+      throw new Error(admission.reason);
+    }
+
+    const scope = await this.resolveShellAgentScope({
+      parentSessionId: params.parentSessionId,
+      allowedTools: resolvedRole.toolNames,
+      workspaceRoot: params.workspaceRoot,
+      workingDirectory: params.workingDirectory,
+      worktree: params.worktree,
+      worktreeEligible: resolvedRole.descriptor.worktreeEligible,
+      mutating: resolvedRole.descriptor.mutating,
+    });
+
+    const taskStore = this._taskTrackerStore;
+    let taskId = params.taskId;
+    if (taskStore && taskId) {
+      const existingTask = await taskStore.getTask(params.parentSessionId, taskId);
+      if (!existingTask) {
+        throw new Error(`Task "${taskId}" is unavailable.`);
+      }
+      if (
+        existingTask.status === "completed" ||
+        existingTask.status === "failed" ||
+        existingTask.status === "cancelled" ||
+        existingTask.status === "deleted"
+      ) {
+        throw new Error(`Task "${taskId}" is already terminal.`);
+      }
+      await taskStore.updateTask(params.parentSessionId, taskId, {
+        status: "in_progress",
+        owner: `${resolvedRole.descriptor.displayName} agent`,
+        metadata: {
+          shellAgent: {
+            role: resolvedRole.descriptor.id,
+            roleSource: resolvedRole.descriptor.source,
+            toolBundle: resolvedRole.toolBundle,
+            shellProfile: resolvedRole.shellProfile,
+          },
+        },
+      });
+      await taskStore.recordRuntimeProgress({
+        listId: params.parentSessionId,
+        taskId,
+        status: "in_progress",
+        summary: `${resolvedRole.descriptor.displayName} agent started.`,
+        data: {
+          role: resolvedRole.descriptor.id,
+          toolBundle: resolvedRole.toolBundle,
+        },
+      });
+    } else if (taskStore) {
+      const createdTask = await taskStore.createRuntimeTask({
+        listId: params.parentSessionId,
+        kind: "subagent",
+        subject: params.objective,
+        description: params.prompt ?? params.objective,
+        activeForm: `Running ${resolvedRole.descriptor.displayName} agent`,
+        metadata: {
+          shellAgent: {
+            role: resolvedRole.descriptor.id,
+            roleSource: resolvedRole.descriptor.source,
+            toolBundle: resolvedRole.toolBundle,
+            shellProfile: resolvedRole.shellProfile,
+          },
+        },
+        summary: `${resolvedRole.descriptor.displayName} agent started.`,
+        workingDirectory: scope.workingDirectory,
+        executionLocation: scope.executionLocation,
+      });
+      taskId = createdTask.id;
+    }
+
+    const childSessionId = await subAgentManager.spawn({
+      parentSessionId: params.parentSessionId,
+      shellProfile: resolvedRole.shellProfile,
+      role: resolvedRole.descriptor.id,
+      roleSource: resolvedRole.descriptor.source,
+      toolBundle: resolvedRole.toolBundle,
+      ...(taskId ? { taskId } : {}),
+      task: params.objective,
+      prompt: params.prompt ?? params.objective,
+      ...(resolvedRole.systemPrompt ? { systemPrompt: resolvedRole.systemPrompt } : {}),
+      ...(resolvedRole.toolNames ? { tools: resolvedRole.toolNames } : {}),
+      workingDirectory: scope.workingDirectory,
+      ...(scope.workspaceRoot ? { workspaceRoot: scope.workspaceRoot } : {}),
+      executionLocation: scope.executionLocation,
+      ...(scope.executionContext
+        ? {
+            delegationSpec: {
+              task: params.objective,
+              objective: params.objective,
+              executionContext: scope.executionContext,
+              isolationReason:
+                scope.executionLocation.mode === "worktree"
+                  ? "shell_agent_worktree"
+                  : "shell_agent_scope",
+            },
+          }
+        : {}),
+      ...(params.timeoutMs ? { timeoutMs: params.timeoutMs } : {}),
+    });
+    if (taskStore && taskId) {
+      await taskStore.attachExternalRef(
+        params.parentSessionId,
+        taskId,
+        {
+          kind: "subagent",
+          id: childSessionId,
+          sessionId: childSessionId,
+          label: resolvedRole.descriptor.id,
+        },
+        `${resolvedRole.descriptor.displayName} agent started.`,
+      );
+    }
+
+    const monitorPromise = this.monitorShellAgentTask({
+      parentSessionId: params.parentSessionId,
+      taskId,
+      childSessionId,
+      workingDirectory: scope.workingDirectory,
+      executionLocation: scope.executionLocation,
+      roleId: resolvedRole.descriptor.id,
+    });
+    if (params.wait === true) {
+      const result = await monitorPromise;
+      return {
+        role: resolvedRole.descriptor,
+        sessionId: childSessionId,
+        ...(taskId ? { taskId } : {}),
+        ...result,
+        waited: true,
+      };
+    }
+
+    void monitorPromise.catch((error) => {
+      this.logger.warn("Shell agent monitor failed", {
+        parentSessionId: params.parentSessionId,
+        childSessionId,
+        error: toErrorMessage(error),
+      });
+    });
+    return {
+      role: resolvedRole.descriptor,
+      sessionId: childSessionId,
+      ...(taskId ? { taskId } : {}),
+      output: "",
+      success: false,
+      status: "running",
+      waited: false,
+    };
+  }
+
+  private async inspectShellAgentTask(
+    parentSessionId: string,
+    target: string,
+  ): Promise<{
+    sessionId?: string;
+    taskId?: string;
+    status: string;
+    task: string;
+    role?: string;
+    roleSource?: ShellAgentRoleSource;
+    toolBundle?: string;
+    shellProfile?: SessionShellProfile;
+    executionLocation?: string;
+    workspaceRoot?: string;
+    workingDirectory?: string;
+    worktreePath?: string;
+    outputPreview?: string;
+  } | undefined> {
+    const childInfo = this._subAgentManager
+      ?.listAll()
+      .find((entry) =>
+        entry.parentSessionId === parentSessionId &&
+        (entry.sessionId === target || entry.taskId === target)
+      );
+    const taskStore = this._taskTrackerStore;
+    const task = taskStore
+      ? (await taskStore.listTasks(parentSessionId)).find((entry) =>
+          entry.id === target ||
+          entry.externalRef?.id === target ||
+          entry.externalRef?.sessionId === target
+        )
+      : undefined;
+    if (!childInfo && !task) {
+      return undefined;
+    }
+    const output = task?.outputReady === true && taskStore
+      ? await taskStore.readTaskOutput(parentSessionId, task.id)
+      : undefined;
+    return {
+      ...(childInfo?.sessionId ? { sessionId: childInfo.sessionId } : {}),
+      ...(task?.id ? { taskId: task.id } : childInfo?.taskId ? { taskId: childInfo.taskId } : {}),
+      status: childInfo?.status ?? task?.status ?? "unknown",
+      task: childInfo?.task ?? task?.subject ?? "unknown",
+      ...(childInfo?.role ? { role: childInfo.role } : {}),
+      ...(childInfo?.roleSource
+        ? { roleSource: childInfo.roleSource as ShellAgentRoleSource }
+        : {}),
+      ...(childInfo?.toolBundle ? { toolBundle: childInfo.toolBundle } : {}),
+      ...(childInfo?.shellProfile ? { shellProfile: childInfo.shellProfile } : {}),
+      ...(childInfo?.executionLocation
+        ? { executionLocation: childInfo.executionLocation }
+        : task?.executionLocation?.mode
+          ? { executionLocation: task.executionLocation.mode }
+          : {}),
+      ...(childInfo?.workspaceRoot
+        ? { workspaceRoot: childInfo.workspaceRoot }
+        : task?.executionLocation?.workspaceRoot
+          ? { workspaceRoot: task.executionLocation.workspaceRoot }
+          : {}),
+      ...(childInfo?.workingDirectory
+        ? { workingDirectory: childInfo.workingDirectory }
+        : task?.workingDirectory
+          ? { workingDirectory: task.workingDirectory }
+          : task?.executionLocation?.workingDirectory
+            ? { workingDirectory: task.executionLocation.workingDirectory }
+            : {}),
+      ...(childInfo?.worktreePath
+        ? { worktreePath: childInfo.worktreePath }
+        : task?.executionLocation?.worktreePath
+          ? { worktreePath: task.executionLocation.worktreePath }
+          : {}),
+      ...(typeof output?.output === "string" && output.output.trim().length > 0
+        ? { outputPreview: output.output.trim() }
+        : typeof task?.summary === "string" && task.summary.trim().length > 0
+          ? { outputPreview: task.summary.trim() }
+          : {}),
+    };
+  }
+
+  private async stopShellAgentTask(
+    parentSessionId: string,
+    target: string,
+  ): Promise<{
+    stopped: boolean;
+    sessionId?: string;
+    taskId?: string;
+  }> {
+    const inspected = await this.inspectShellAgentTask(parentSessionId, target);
+    if (!inspected?.sessionId) {
+      return {
+        stopped: false,
+        ...(inspected?.taskId ? { taskId: inspected.taskId } : {}),
+      };
+    }
+    const stopped = this._subAgentManager?.cancel(inspected.sessionId) === true;
+    return {
+      stopped,
+      sessionId: inspected.sessionId,
+      ...(inspected.taskId ? { taskId: inspected.taskId } : {}),
+    };
   }
 
   private _buildCommandRegistryContext(): CommandRegistryDaemonContext {
@@ -4059,6 +4760,12 @@ export class DaemonManager {
       getSessionModelInfo: (sessionId) =>
         this._sessionModelInfo.get(sessionId),
       handleConfigReload: () => this.handleConfigReload(),
+      getMcpManager: () => this._mcpManager,
+      getPluginCatalog: () => new PluginCatalog(),
+      discoverShellSkills: async ({ sessionId }) =>
+        await this.discoverShellSkills(sessionId),
+      resolveShellSkillDiscoveryPaths: async ({ sessionId }) =>
+        await this.resolveShellSkillDiscoveryPaths(sessionId),
       getVoiceBridge: () => this._voiceBridge,
       getDesktopManager: () => this._desktopManager as any,
       getDesktopBridges: () => this._desktopBridges,
@@ -4139,6 +4846,35 @@ export class DaemonManager {
           started: true,
         };
       },
+      listAgentRoles: () => this.listShellAgentRoles(),
+      launchShellAgentTask: async (params) =>
+        this.launchShellAgentTask(params),
+      inspectShellAgentTask: async (parentSessionId, target) =>
+        this.inspectShellAgentTask(parentSessionId, target),
+      stopShellAgentTask: async (parentSessionId, target) =>
+        this.stopShellAgentTask(parentSessionId, target),
+      listSubAgentInfo: (parentSessionId) =>
+        this._subAgentManager
+          ?.listAll()
+          .filter((entry) => entry.parentSessionId === parentSessionId)
+          .map((entry) => ({
+            sessionId: entry.sessionId,
+            status: entry.status,
+            task: entry.task,
+            ...(entry.role ? { role: entry.role } : {}),
+            ...(entry.roleSource ? { roleSource: entry.roleSource } : {}),
+            ...(entry.toolBundle ? { toolBundle: entry.toolBundle } : {}),
+            ...(entry.taskId ? { taskId: entry.taskId } : {}),
+            ...(entry.shellProfile ? { shellProfile: entry.shellProfile } : {}),
+            ...(entry.workspaceRoot ? { workspaceRoot: entry.workspaceRoot } : {}),
+            ...(entry.workingDirectory
+              ? { workingDirectory: entry.workingDirectory }
+              : {}),
+            ...(entry.executionLocation
+              ? { executionLocation: entry.executionLocation }
+              : {}),
+            ...(entry.worktreePath ? { worktreePath: entry.worktreePath } : {}),
+          })) ?? [],
     };
   }
 
@@ -4213,6 +4949,71 @@ export class DaemonManager {
     };
     sendResponse: (response: ControlResponse) => void;
   }): Promise<boolean> {
+    if (params.message.type === "sessions") {
+      const activeBindings = new Map(
+        (this._webChatChannel?.listActiveSessions() ?? []).map((entry) => [
+          entry.sessionId,
+          entry.clientId,
+        ]),
+      );
+      const sessions = (this._webSessionManager?.listActive() ?? [])
+        .filter((session) => session.channel === "webchat")
+        .map((session) => ({
+          id: session.id,
+          channel: session.channel,
+          shellProfile: session.shellProfile,
+          workflowStage: session.workflowStage,
+          messageCount: session.messageCount,
+          createdAt: session.createdAt,
+          lastActiveAt: session.lastActiveAt,
+          connected: activeBindings.has(session.id),
+        }))
+        .sort((a, b) => b.lastActiveAt - a.lastActiveAt);
+      params.sendResponse({
+        type: "sessions",
+        payload: sessions,
+      });
+      return true;
+    }
+
+    if (params.message.type === "sessions.kill") {
+      const rawPayload =
+        typeof params.message.payload === "object" &&
+        params.message.payload !== null &&
+        !Array.isArray(params.message.payload)
+          ? (params.message.payload as { sessionId?: unknown })
+          : {};
+      const targetSessionId =
+        typeof rawPayload.sessionId === "string"
+          ? rawPayload.sessionId.trim()
+          : "";
+      if (!targetSessionId) {
+        params.sendResponse({
+          type: "sessions.kill",
+          error: "Missing sessionId in payload",
+        });
+        return true;
+      }
+      const activeBinding = (this._webChatChannel?.listActiveSessions() ?? []).find(
+        (entry) => entry.sessionId === targetSessionId,
+      );
+      if (!activeBinding) {
+        params.sendResponse({
+          type: "sessions.kill",
+          error: `Session '${targetSessionId}' not found`,
+        });
+        return true;
+      }
+      const killed = this.gateway?.disconnectClient(activeBinding.clientId) ?? false;
+      params.sendResponse({
+        type: "sessions.kill",
+        ...(killed
+          ? { payload: { killed: targetSessionId } }
+          : { error: `Session '${targetSessionId}' not found` }),
+      });
+      return true;
+    }
+
     if (params.message.type !== "init.run") {
       return false;
     }
@@ -4349,7 +5150,7 @@ export class DaemonManager {
       signalThinking: (sessionId: string): void => {
         webChat.pushToSession(sessionId, {
           type: "agent.status",
-          payload: { phase: "thinking" },
+          payload: { phase: "thinking", ...this.buildWorkflowStatusPayload(sessionId) },
         });
         webChat.pushToSession(sessionId, {
           type: "chat.typing",
@@ -4359,7 +5160,7 @@ export class DaemonManager {
       signalIdle: (sessionId: string): void => {
         webChat.pushToSession(sessionId, {
           type: "agent.status",
-          payload: { phase: "idle" },
+          payload: { phase: "idle", ...this.buildWorkflowStatusPayload(sessionId) },
         });
         webChat.pushToSession(sessionId, {
           type: "chat.typing",
@@ -4367,6 +5168,349 @@ export class DaemonManager {
         });
       },
     };
+  }
+
+  private buildWorkflowStatusPayload(sessionId: string): {
+    workflowStage?: SessionWorkflowStage;
+    workflowOwnershipSummary?: string;
+  } {
+    const session = this._webSessionManager?.get(sessionId);
+    const metadata = session?.metadata;
+    if (!metadata || typeof metadata !== "object") {
+      return {};
+    }
+    const runtimeStatusSnapshot = buildSessionRuntimeContractStatusSnapshot(
+      metadata,
+    ) as Record<string, unknown> | undefined;
+    const childInfos =
+      this._subAgentManager?.listAll().filter(
+        (entry) => entry.parentSessionId === sessionId,
+      ).map((entry) => ({
+        sessionId: entry.sessionId,
+        status: entry.status,
+        task: entry.task,
+        shellProfile: entry.shellProfile,
+      })) ?? [];
+    const ownership = collectSessionWorkflowOwnership({
+      runtimeStatusSnapshot,
+      taskResult: { tasks: [] },
+      childInfos,
+    });
+    return {
+      workflowStage: resolveSessionWorkflowState(metadata).stage,
+      workflowOwnershipSummary: formatWorkflowOwnershipSummary(ownership),
+    };
+  }
+
+  private async buildWatchCockpitSnapshot(params: {
+    readonly sessionId: string;
+    readonly actorId: string;
+    readonly channel: "webchat";
+    readonly continuity: SessionContinuityRecord;
+    readonly redactionProfile: "watch_cockpit";
+  }): Promise<WatchCockpitSnapshot | undefined> {
+    const admission = this.evaluateShellFeatureAdmission({
+      sessionId: params.sessionId,
+      feature: "watchCockpit",
+      domain: "watch",
+    });
+    if (!admission.allowed) {
+      return {
+        session: {
+          sessionId: params.continuity.sessionId,
+          shellProfile: this.resolveEffectiveShellProfile({
+            sessionId: params.sessionId,
+            preferred: params.continuity.shellProfile,
+          }),
+          workflowStage: params.continuity.workflowStage,
+          resumabilityState: params.continuity.resumabilityState,
+          ...(params.continuity.preview ? { preview: params.continuity.preview } : {}),
+          messageCount: params.continuity.messageCount,
+          lastActiveAt: params.continuity.lastActiveAt,
+        },
+        repo: {
+          available: false,
+          unavailableReason: `watch cockpit held back: ${admission.reason}`,
+        },
+        worktrees: {
+          available: false,
+          entries: [],
+          unavailableReason: `watch cockpit held back: ${admission.reason}`,
+        },
+        review: createIdleReviewSurfaceState(),
+        verification: createIdleVerificationSurfaceState(),
+        approvals: { count: 0, entries: [] },
+        ownership: [],
+      };
+    }
+    const session = this._webSessionManager?.get(params.sessionId);
+    const metadata =
+      session?.metadata && typeof session.metadata === "object"
+        ? session.metadata
+        : {};
+    const runtimeStatusSnapshot = buildSessionRuntimeContractStatusSnapshot(
+      metadata,
+    ) as Record<string, unknown> | undefined;
+    const taskResult = this._taskTrackerStore
+      ? {
+          tasks: await this._taskTrackerStore.listTasks(params.sessionId),
+        }
+      : { tasks: [] };
+    const childInfos =
+      this._subAgentManager?.listAll().filter(
+        (entry) => entry.parentSessionId === params.sessionId,
+      ).map((entry) => ({
+        sessionId: entry.sessionId,
+        status: entry.status,
+        task: entry.task,
+        shellProfile: entry.shellProfile,
+      })) ?? [];
+    const ownership = collectSessionWorkflowOwnership({
+      runtimeStatusSnapshot,
+      taskResult,
+      childInfos,
+    });
+    const { repo, worktrees } = await this.getWatchCockpitRepoSections(
+      params.continuity,
+      ownership,
+    );
+    const approvals = this.buildWatchCockpitApprovals(params.sessionId);
+    const review =
+      coerceReviewSurfaceState(metadata.reviewSurfaceState) ??
+      createIdleReviewSurfaceState();
+    const verification =
+      coerceVerificationSurfaceState(metadata.verificationSurfaceState) ??
+      createIdleVerificationSurfaceState();
+    return {
+      session: {
+        sessionId: params.continuity.sessionId,
+        shellProfile: this.resolveEffectiveShellProfile({
+          sessionId: params.sessionId,
+          metadata,
+          preferred: params.continuity.shellProfile,
+        }),
+        workflowStage: params.continuity.workflowStage,
+        resumabilityState: params.continuity.resumabilityState,
+        ...(params.continuity.preview ? { preview: params.continuity.preview } : {}),
+        ...(resolveSessionWorkflowState(metadata).objective
+          ? { objective: resolveSessionWorkflowState(metadata).objective }
+          : {}),
+        messageCount: params.continuity.messageCount,
+        lastActiveAt: params.continuity.lastActiveAt,
+      },
+      repo,
+      worktrees,
+      review,
+      verification,
+      approvals,
+      ownership,
+    };
+  }
+
+  private buildWatchCockpitApprovals(sessionId: string): WatchCockpitSnapshot["approvals"] {
+    const pending =
+      this._approvalEngine?.getPending().filter(
+        (request) => request.sessionId === sessionId,
+      ) ?? [];
+    return {
+      count: pending.length,
+      entries: pending.slice(0, 8).map((request) => ({
+        requestId: request.id,
+        toolName: request.toolName,
+        state: "pending",
+        ...(typeof request.deadlineAt === "number" ? { deadlineAt: request.deadlineAt } : {}),
+        ...(Array.isArray(request.requiredApproverRoles) &&
+        request.requiredApproverRoles.length > 0
+          ? { approverRoles: request.requiredApproverRoles }
+          : {}),
+        ...(typeof request.message === "string" && request.message.trim().length > 0
+          ? {
+              preview:
+                request.message.trim().length > 160
+                  ? `${request.message.trim().slice(0, 157)}...`
+                  : request.message.trim(),
+            }
+          : {}),
+      })),
+    };
+  }
+
+  private async getWatchCockpitRepoSections(
+    continuity: SessionContinuityRecord,
+    ownership: readonly WatchCockpitSnapshot["ownership"][number][],
+  ): Promise<{
+    repo: WatchCockpitSnapshot["repo"];
+    worktrees: WatchCockpitSnapshot["worktrees"];
+  }> {
+    const workspaceRoot =
+      typeof continuity.workspaceRoot === "string" &&
+      continuity.workspaceRoot.trim().length > 0
+        ? continuity.workspaceRoot.trim()
+        : undefined;
+    if (!workspaceRoot) {
+      return {
+        repo: { available: false, unavailableReason: "workspace unavailable" },
+        worktrees: {
+          available: false,
+          entries: [],
+          unavailableReason: "workspace unavailable",
+        },
+      };
+    }
+    const cacheKey = continuity.sessionId;
+    const cached = this._watchCockpitRepoCache.get(cacheKey);
+    if (cached && Date.now() - cached.updatedAt < 5_000) {
+      return {
+        repo: { ...cached.repo, cached: true },
+        worktrees: { ...cached.worktrees, cached: true },
+      };
+    }
+    try {
+      const cwd = resolvePath(workspaceRoot);
+      const [
+        { stdout: repoRootStdout },
+        { stdout: branchStdout },
+        { stdout: headStdout },
+        { stdout: statusStdout },
+        worktreeResult,
+      ] = await Promise.all([
+        execFileAsync("git", ["rev-parse", "--show-toplevel"], { cwd }),
+        execFileAsync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd }),
+        execFileAsync("git", ["rev-parse", "HEAD"], { cwd }),
+        execFileAsync("git", ["status", "--porcelain=v1"], { cwd }),
+        execFileAsync("git", ["worktree", "list", "--porcelain"], { cwd }).catch(
+          () => ({ stdout: "" }),
+        ),
+      ]);
+      const repoRoot = repoRootStdout.trim();
+      const statusLines = statusStdout
+        .split(/\r?\n/g)
+        .map((line) => line.trimEnd())
+        .filter(Boolean);
+      const dirtyCounts = { staged: 0, unstaged: 0, untracked: 0, conflicted: 0 };
+      const changedFiles: string[] = [];
+      for (const line of statusLines) {
+        const xy = line.slice(0, 2);
+        const filePath = line.slice(3).trim();
+        if (xy === "??") {
+          dirtyCounts.untracked += 1;
+        } else {
+          if (xy[0] && xy[0] !== " ") dirtyCounts.staged += 1;
+          if (xy[1] && xy[1] !== " ") dirtyCounts.unstaged += 1;
+          if (xy.includes("U")) dirtyCounts.conflicted += 1;
+        }
+        if (filePath && changedFiles.length < 8) {
+          changedFiles.push(this.redactCockpitPath(filePath, repoRoot, workspaceRoot));
+        }
+      }
+      const repo: WatchCockpitSnapshot["repo"] = {
+        available: true,
+        workspaceRoot: this.redactCockpitPath(workspaceRoot, repoRoot, workspaceRoot),
+        repoRoot: this.redactCockpitPath(repoRoot, repoRoot, workspaceRoot),
+        branch:
+          branchStdout.trim() && branchStdout.trim() !== "HEAD"
+            ? branchStdout.trim()
+            : undefined,
+        head: headStdout.trim() || undefined,
+        dirtyCounts,
+        changedFiles,
+      };
+      const worktrees = this.parseGitWorktreeList(
+        worktreeResult.stdout,
+        repoRoot,
+        workspaceRoot,
+        ownership,
+      );
+      this._watchCockpitRepoCache.set(cacheKey, {
+        updatedAt: Date.now(),
+        repo,
+        worktrees,
+      });
+      return { repo, worktrees };
+    } catch {
+      const repo = {
+        available: false,
+        workspaceRoot,
+        unavailableReason: "git repo unavailable",
+      } satisfies WatchCockpitSnapshot["repo"];
+      const worktrees = {
+        available: false,
+        entries: [],
+        unavailableReason: "git repo unavailable",
+      } satisfies WatchCockpitSnapshot["worktrees"];
+      this._watchCockpitRepoCache.set(cacheKey, {
+        updatedAt: Date.now(),
+        repo,
+        worktrees,
+      });
+      return { repo, worktrees };
+    }
+  }
+
+  private parseGitWorktreeList(
+    stdout: string,
+    repoRoot: string,
+    workspaceRoot: string,
+    ownership: readonly WatchCockpitSnapshot["ownership"][number][],
+  ): WatchCockpitSnapshot["worktrees"] {
+    const ownershipByPath = new Map(
+      ownership
+        .filter((entry) => typeof entry.worktreePath === "string")
+        .map((entry) => [resolvePath(entry.worktreePath as string), entry]),
+    );
+    const blocks = stdout.split(/\n\n+/g).map((block) => block.trim()).filter(Boolean);
+    const entries = blocks.map((block) => {
+      const lines = block.split(/\r?\n/g);
+      const pathLine = lines.find((line) => line.startsWith("worktree "));
+      const headLine = lines.find((line) => line.startsWith("HEAD "));
+      const branchLine = lines.find((line) => line.startsWith("branch "));
+      const prunable = lines.some((line) => line.startsWith("prunable"));
+      const detached = lines.some((line) => line === "detached");
+      const absolutePath = pathLine ? pathLine.slice("worktree ".length).trim() : "";
+      const owner = ownershipByPath.get(resolvePath(absolutePath));
+      return {
+        path: this.redactCockpitPath(absolutePath, repoRoot, workspaceRoot),
+        ...(branchLine ? { branch: branchLine.slice("branch ".length).trim().replace("refs/heads/", "") } : {}),
+        ...(headLine ? { head: headLine.slice("HEAD ".length).trim() } : {}),
+        clean: !prunable,
+        ...(owner ? { ownedByRuntime: true, ownerRole: owner.role } : {}),
+        ...(owner?.childSessionId ? { ownerSessionId: owner.childSessionId } : {}),
+        ...(owner?.workerId ? { ownerWorkerId: owner.workerId } : {}),
+        ...(detached && !branchLine ? { branch: "detached" } : {}),
+      };
+    }).filter((entry) => entry.path);
+    return {
+      available: true,
+      entries,
+    };
+  }
+
+  private redactCockpitPath(
+    rawPath: string,
+    repoRoot?: string,
+    workspaceRoot?: string,
+  ): string {
+    const normalized = String(rawPath ?? "").trim();
+    if (!normalized) {
+      return normalized;
+    }
+    const repo = typeof repoRoot === "string" && repoRoot.trim().length > 0
+      ? resolvePath(repoRoot)
+      : undefined;
+    const workspace =
+      typeof workspaceRoot === "string" && workspaceRoot.trim().length > 0
+        ? resolvePath(workspaceRoot)
+        : undefined;
+    const candidate = resolvePath(normalized);
+    if (repo && candidate.startsWith(repo)) {
+      const relative = candidate.slice(repo.length).replace(/^\/+/, "");
+      return relative.length > 0 ? relative : ".";
+    }
+    if (workspace && candidate.startsWith(workspace)) {
+      const relative = candidate.slice(workspace.length).replace(/^\/+/, "");
+      return relative.length > 0 ? relative : ".";
+    }
+    return basename(candidate);
   }
 
   private async appendGovernanceAuditEvent(params: {
@@ -4524,6 +5668,10 @@ export class DaemonManager {
       args,
       params.sessionId,
       {
+        shellProfile: this.resolveEffectiveShellProfile({
+          sessionId: params.sessionId,
+          metadata: this._webSessionManager?.get(params.sessionId)?.metadata ?? {},
+        }),
         message: `Policy simulation preview for ${params.toolName}`,
       },
     ) ?? {
@@ -4970,13 +6118,21 @@ export class DaemonManager {
     toolNames: readonly string[] = this._llmTools.map(
       (tool) => tool.function.name,
     ),
+    shellProfile: SessionShellProfile = DEFAULT_SESSION_SHELL_PROFILE,
   ): readonly string[] {
-    return Array.from(
-      new Set([
-        ...toolNames,
-        ...getProviderNativeAdvertisedToolNames(this._primaryLlmConfig),
-      ]),
-    );
+    const providerNative = getProviderNativeAdvertisedToolNames(this._primaryLlmConfig);
+    const merged = Array.from(new Set([...toolNames, ...providerNative]));
+    if (shellProfile === DEFAULT_SESSION_SHELL_PROFILE) {
+      return merged;
+    }
+    const preferred = getShellProfilePreferredToolNames({
+      profile: shellProfile,
+      availableToolNames: merged,
+    });
+    if (!preferred.includes("system.searchTools") && merged.includes("system.searchTools")) {
+      return [...preferred, "system.searchTools"];
+    }
+    return preferred;
   }
 
   private relaySubAgentLifecycleEvent(
@@ -5357,6 +6513,7 @@ export class DaemonManager {
       toolName: string,
       args: Record<string, unknown>,
     ) => string | undefined;
+    shellProfile?: SessionShellProfile;
     onToolEnd?: (
       toolName: string,
       args: Record<string, unknown>,
@@ -5377,16 +6534,33 @@ export class DaemonManager {
       normalizeArgs,
       hookMetadata,
       beforeHandle,
+      shellProfile,
       onToolEnd,
     } = params;
     const inFlightToolArgs = new Map<string, Record<string, unknown>>();
+    const effectiveShellProfile = this.resolveEffectiveShellProfile({
+      sessionId,
+      metadata: this._webSessionManager?.get(sessionId)?.metadata ?? {},
+      preferred: shellProfile,
+    });
+    const advertisedShellProfile = this.evaluateShellFeatureAdmission({
+      sessionId,
+      feature: "codingCommands",
+      domain: "shell",
+    }).allowed
+      ? effectiveShellProfile
+      : DEFAULT_SESSION_SHELL_PROFILE;
 
     const baseSessionHandler = createSessionToolHandler({
       sessionId,
+      shellProfile: effectiveShellProfile,
       baseHandler: baseToolHandler,
       taskStore: this._taskTrackerStore,
       runtimeContractFlags: resolveRuntimeContractFlags(this.gateway?.config.llm),
-      availableToolNames: this.getAdvertisedToolNames(),
+      availableToolNames: this.getAdvertisedToolNames(
+        undefined,
+        advertisedShellProfile,
+      ),
       defaultWorkingDirectory: this._hostWorkspacePath ?? undefined,
       workspaceAliasRoot: this._hostWorkspacePath ?? undefined,
       scopedFilesystemRoot: this._hostWorkspacePath ?? undefined,
@@ -5437,7 +6611,11 @@ export class DaemonManager {
         inFlightToolArgs.set(toolCallId, args);
         webChat.pushToSession(sessionId, {
           type: "agent.status",
-          payload: { phase: "tool_call", detail: `Calling ${name}` },
+          payload: {
+            phase: "tool_call",
+            detail: `Calling ${name}`,
+            ...this.buildWorkflowStatusPayload(sessionId),
+          },
         });
       },
       onToolEnd: (toolName, result, durationMs, toolCallId) => {
@@ -5450,7 +6628,10 @@ export class DaemonManager {
         });
         webChat.pushToSession(sessionId, {
           type: "agent.status",
-          payload: { phase: "generating" },
+          payload: {
+            phase: "generating",
+            ...this.buildWorkflowStatusPayload(sessionId),
+          },
         });
         onToolEnd?.(toolName, completedArgs, result, durationMs, toolCallId);
       },
@@ -5473,15 +6654,38 @@ export class DaemonManager {
     send: (content: string) => Promise<void>;
     traceConfig: ResolvedTraceLoggingConfig;
     traceId: string;
+    shellProfile?: SessionShellProfile;
   }): ToolHandler {
-    const { sessionId, channelName, send, traceConfig, traceId } = params;
+    const {
+      sessionId,
+      channelName,
+      send,
+      traceConfig,
+      traceId,
+      shellProfile,
+    } = params;
+    const effectiveShellProfile = this.resolveEffectiveShellProfile({
+      sessionId,
+      preferred: shellProfile ?? DEFAULT_SESSION_SHELL_PROFILE,
+    });
+    const advertisedShellProfile = this.evaluateShellFeatureAdmission({
+      sessionId,
+      feature: "codingCommands",
+      domain: "shell",
+    }).allowed
+      ? effectiveShellProfile
+      : DEFAULT_SESSION_SHELL_PROFILE;
 
     const baseSessionHandler = createSessionToolHandler({
       sessionId,
+      shellProfile: effectiveShellProfile,
       baseHandler: this._baseToolHandler!,
       taskStore: this._taskTrackerStore,
       runtimeContractFlags: resolveRuntimeContractFlags(this.gateway?.config.llm),
-      availableToolNames: this.getAdvertisedToolNames(),
+      availableToolNames: this.getAdvertisedToolNames(
+        undefined,
+        advertisedShellProfile,
+      ),
       defaultWorkingDirectory: this._hostWorkspacePath ?? undefined,
       workspaceAliasRoot: this._hostWorkspacePath ?? undefined,
       desktopRouterFactory: this._desktopRouterFactory ?? undefined,
@@ -5548,7 +6752,21 @@ export class DaemonManager {
       senderId: msg.sessionId,
       scope: "dm",
       workspaceId: "default",
+    }, {
+      shellProfile:
+        msg.metadata?.[SESSION_SHELL_PROFILE_METADATA_KEY],
     });
+    const effectiveShellProfile = this.resolveEffectiveShellProfile({
+      sessionId: msg.sessionId,
+      metadata: session.metadata,
+      preferred:
+        msg.metadata?.[SESSION_SHELL_PROFILE_METADATA_KEY] ??
+        resolveSessionShellProfile(session.metadata),
+    });
+    if (resolveSessionShellProfile(session.metadata) !== effectiveShellProfile) {
+      session.metadata[SESSION_SHELL_PROFILE_METADATA_KEY] = effectiveShellProfile;
+      await persistWebSessionRuntimeState(memoryBackend, msg.sessionId, session);
+    }
     this.applyWebSessionPolicyContext(session, msg);
 
     const traceConfig = resolveTraceLoggingConfig(getLoggingConfig());
@@ -5875,10 +7093,26 @@ export class DaemonManager {
         contextWindowTokens,
         traceConfig,
         turnTraceId,
-        buildToolRoutingDecision: (_sessionId, content, _history) =>
+        buildToolRoutingDecision: (sessionId, content, _history) =>
           buildStaticToolRoutingDecision({
             content,
-            availableToolNames: this.getAdvertisedToolNames(),
+            availableToolNames: this.getAdvertisedToolNames(
+              undefined,
+              this.evaluateShellFeatureAdmission({
+                sessionId,
+                feature: "codingCommands",
+                domain: "shell",
+              }).allowed
+                ? this.resolveEffectiveShellProfile({
+                    sessionId,
+                    metadata: sessionMgr.get(sessionId)?.metadata ?? {},
+                  })
+                : DEFAULT_SESSION_SHELL_PROFILE,
+            ),
+            shellProfile: this.resolveEffectiveShellProfile({
+              sessionId,
+              metadata: sessionMgr.get(sessionId)?.metadata ?? {},
+            }),
           }),
         recordToolRoutingOutcome: () => {
           /* no-op */
@@ -6007,6 +7241,41 @@ export class DaemonManager {
       return [];
     }
   }
+
+  private async resolveShellSkillDiscoveryPaths(
+    sessionId: string,
+  ): Promise<DiscoveryPaths> {
+    const runtimeDiscovery = resolveRuntimeSkillDiscoveryPaths();
+    const sessionWorkspaceRoot =
+      (typeof this._webChatChannel?.loadSessionWorkspaceRoot === "function"
+        ? await this._webChatChannel.loadSessionWorkspaceRoot(sessionId)
+        : undefined) ??
+      this._hostWorkspacePath ??
+      process.cwd();
+
+    return {
+      builtinSkills: runtimeDiscovery.builtinSkills,
+      userSkills: join(homedir(), ".agenc", "skills"),
+      ...(sessionWorkspaceRoot
+        ? { projectSkills: join(sessionWorkspaceRoot, "skills") }
+        : {}),
+    };
+  }
+
+  private async discoverShellSkills(
+    sessionId: string,
+  ): Promise<DiscoveredSkill[]> {
+    try {
+      const discovery = new SkillDiscovery(
+        await this.resolveShellSkillDiscoveryPaths(sessionId),
+      );
+      return await discovery.discoverAll();
+    } catch (err) {
+      this.logger.warn?.("Shell skill discovery failed:", err);
+      return [];
+    }
+  }
+
   private stopRecurringWorkForShutdown(): void {
     if (this._heartbeatScheduler !== null) {
       this._heartbeatScheduler.stop();
@@ -6122,6 +7391,7 @@ export class DaemonManager {
       if (this._taskTrackerStore !== null) {
         this._taskTrackerStore = null;
       }
+      this._toolRegistry = null;
       if (this._memoryBackend !== null) {
         await this._memoryBackend.close();
         this._memoryBackend = null;

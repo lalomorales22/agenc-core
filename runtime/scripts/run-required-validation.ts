@@ -65,6 +65,12 @@ const VALIDATION_STEPS: readonly ValidationStep[] = [
     timeoutMs: 60_000,
   },
   {
+    name: "runtime shell rollout readiness artifact",
+    command: "npm",
+    args: ["run", "shell:rollout:ci"],
+    timeoutMs: 120_000,
+  },
+  {
     name: "runtime autonomy rollout gates",
     command: "npm",
     args: ["run", "autonomy:rollout:gates"],

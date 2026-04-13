@@ -1,6 +1,6 @@
 {
   "name": "@tetsuo-ai/runtime",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Agent runtime infrastructure for AgenC coordination on Solana",
   "main": "dist/index.js",
@@ -56,7 +56,8 @@
     "benchmark:background-runs": "npx tsx scripts/run-background-run-quality.ts",
     "benchmark:background-runs:ci": "npx tsx scripts/run-background-run-quality.ts --output benchmarks/artifacts/background-run-quality.ci.json",
     "benchmark:background-runs:gates": "npx tsx scripts/check-background-run-gates.ts",
-    "autonomy:rollout:gates": "npx tsx scripts/check-autonomy-rollout-gates.ts --mode limited --config benchmarks/autonomy-gateway.ci.json --artifact benchmarks/artifacts/background-run-quality.ci.json --delegation-artifact benchmarks/artifacts/delegation-quality.ci.json --manifest ../docs/autonomy-runtime-rollout.manifest.json",
+    "shell:rollout:ci": "npx tsx scripts/run-shell-rollout-readiness.ts --output benchmarks/artifacts/shell-rollout-readiness.ci.json",
+    "autonomy:rollout:gates": "npx tsx scripts/check-autonomy-rollout-gates.ts --mode limited --config benchmarks/autonomy-gateway.ci.json --artifact benchmarks/artifacts/background-run-quality.ci.json --delegation-artifact benchmarks/artifacts/delegation-quality.ci.json --shell-artifact benchmarks/artifacts/shell-rollout-readiness.ci.json --manifest ../docs/autonomy-runtime-rollout.manifest.json",
     "benchmark:delegation": "npx tsx scripts/run-delegation-benchmarks.ts --output benchmarks/artifacts/delegation-benchmark.latest.json",
     "benchmark:delegation:ci": "npx tsx scripts/run-pipeline-quality.ts --output benchmarks/artifacts/delegation-quality.ci.json --desktop-runs 0 --delegation-k 2",
     "benchmark:delegation:gates": "npx tsx scripts/check-pipeline-gates.ts --artifact benchmarks/artifacts/delegation-quality.ci.json",
@@ -114,9 +115,9 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@tetsuo-ai/desktop-tool-contracts": "0.1.0",
-    "@tetsuo-ai/plugin-kit": "0.1.1",
-    "@tetsuo-ai/protocol": "0.1.1",
-    "@tetsuo-ai/sdk": "1.3.1",
+    "@tetsuo-ai/plugin-kit": "0.2.0",
+    "@tetsuo-ai/protocol": "0.2.0",
+    "@tetsuo-ai/sdk": "1.4.0",
     "bn.js": "^5.2.3",
     "undici": "^7.22.0"
   },
