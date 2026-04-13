@@ -2469,6 +2469,7 @@ watchTransportController = createWatchTransportController({
     formatLogPayload,
     formatStatusPayload,
     statusFeedFingerprint,
+    cockpitFeedFingerprint,
     handlePlannerTraceEvent,
     handleSubagentLifecycleMessage,
     hydratePlannerDagFromTraceArtifacts,
