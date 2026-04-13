@@ -19,8 +19,13 @@ interface SlashCommandOption {
   name: string;
   description: string;
   args?: string;
+  category?: string;
+  aliases?: readonly string[];
+  deprecatedAliases?: readonly string[];
   available?: boolean;
   availabilityReason?: string;
+  effectiveProfile?: string;
+  heldBackBy?: string;
 }
 
 function getSlashQuery(value: string): string | null {
@@ -55,15 +60,29 @@ export function ChatInput({
         name: cmd.name,
         description: cmd.description,
         ...(cmd.args ? { args: cmd.args } : {}),
+        ...(cmd.category ? { category: cmd.category } : {}),
+        ...(Array.isArray(cmd.aliases) && cmd.aliases.length > 0 ? { aliases: cmd.aliases } : {}),
+        ...(Array.isArray(cmd.deprecatedAliases) && cmd.deprecatedAliases.length > 0
+          ? { deprecatedAliases: cmd.deprecatedAliases }
+          : {}),
         ...(typeof cmd.available === 'boolean' ? { available: cmd.available } : {}),
         ...(cmd.availabilityReason ? { availabilityReason: cmd.availabilityReason } : {}),
+        ...(cmd.effectiveProfile ? { effectiveProfile: cmd.effectiveProfile } : {}),
+        ...(cmd.heldBackBy ? { heldBackBy: cmd.heldBackBy } : {}),
       })),
     [commands],
   );
   const visibleCommands = useMemo(() => {
     if (slashQuery === null) return [];
     if (!slashQuery) return availableCommands;
-    return availableCommands.filter((cmd) => cmd.name.startsWith(slashQuery));
+    return availableCommands.filter((cmd) => {
+      if (cmd.name.startsWith(slashQuery)) {
+        return true;
+      }
+      return [...(cmd.aliases ?? []), ...(cmd.deprecatedAliases ?? [])].some((alias) =>
+        alias.startsWith(slashQuery),
+      );
+    });
   }, [availableCommands, slashQuery]);
   const showCommandMenu = visibleCommands.length > 0;
 
@@ -245,6 +264,11 @@ export function ChatInput({
                   <div className="flex items-center gap-2">
                     <span className="text-bbs-purple font-mono">{'>'} /{cmd.name}</span>
                     {cmd.args && <span className="text-bbs-gray font-mono">{cmd.args}</span>}
+                    {cmd.category && (
+                      <span className="border border-bbs-border px-1 py-0 text-[10px] uppercase tracking-wide text-bbs-cyan">
+                        {cmd.category}
+                      </span>
+                    )}
                   </div>
                   <div className="mt-0.5 text-bbs-gray">
                     {cmd.description}
@@ -252,6 +276,22 @@ export function ChatInput({
                       ? ` - ${cmd.availabilityReason}`
                       : ''}
                   </div>
+                  {cmd.aliases && cmd.aliases.length > 0 && (
+                    <div className="mt-1 text-[11px] text-bbs-gray">
+                      aliases: {cmd.aliases.map((alias) => `/${alias}`).join(', ')}
+                    </div>
+                  )}
+                  {(cmd.deprecatedAliases && cmd.deprecatedAliases.length > 0) && (
+                    <div className="mt-1 text-[11px] text-bbs-gray">
+                      deprecated: {cmd.deprecatedAliases.map((alias) => `/${alias}`).join(', ')}
+                    </div>
+                  )}
+                  {(cmd.effectiveProfile || cmd.heldBackBy) && (
+                    <div className="mt-1 text-[11px] text-bbs-gray">
+                      {cmd.effectiveProfile ? `profile: ${cmd.effectiveProfile}` : 'profile: default'}
+                      {cmd.heldBackBy ? ` - held by ${cmd.heldBackBy}` : ''}
+                    </div>
+                  )}
                 </button>
               ))}
             </div>

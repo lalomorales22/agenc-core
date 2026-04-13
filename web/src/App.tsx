@@ -350,10 +350,12 @@ export default function App() {
               chatSessions={chat.sessions}
               selectedSessionDetail={chat.selectedSessionDetail}
               commandResult={chat.lastCommandResult}
+              cockpit={chat.cockpit}
               commands={chat.commands}
               activeSessionId={chat.sessionId}
               onSelectSession={chat.resumeSession}
               onInspectSession={chat.inspectSession}
+              onLoadSessionHistory={chat.loadSessionHistory}
               onForkSession={chat.forkSession}
               onNewChat={chat.startNewChat}
               desktopUrl={sessionDesktopUrl}

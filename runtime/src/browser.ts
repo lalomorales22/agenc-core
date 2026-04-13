@@ -8,6 +8,7 @@ export {
   WS_CHAT_OWNER,
   WS_CHAT_NEW,
   WS_CHAT_RESUMED,
+  WS_CHAT_SESSION_RESUMED,
   WS_CHAT_SESSIONS,
   WS_CHAT_SESSION_RESUME,
   WS_CHAT_SESSION_LIST,
@@ -132,10 +133,14 @@ export type {
 export type {
   SessionContinuityRecord,
   SessionContinuityDetail,
-  SessionResumabilityState,
+  SessionForkResult,
+  SessionResumePayload,
 } from "./channels/webchat/types.js";
-export type { WatchCockpitSnapshot } from "./gateway/watch-cockpit.js";
-export type { WorkflowOwnershipEntry } from "./gateway/watch-cockpit.js";
+export type {
+  SessionResumabilityState,
+  WatchCockpitSnapshot,
+  WorkflowOwnershipEntry,
+} from "./gateway/watch-cockpit.js";
 export type { SessionShellProfile } from "./gateway/shell-profile.js";
 export type { SessionWorkflowState } from "./gateway/workflow-state.js";
 export type {

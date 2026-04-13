@@ -221,6 +221,7 @@ function handleSessionSurfaceEvent(surfaceEvent, state, api) {
       }
       return true;
     case "chat.resumed":
+    case "chat.session.resumed":
       return handleSessionResumeResult(payload, { resumed: { sessionId: payload.sessionId } }, state, api);
     case "chat.sessions":
     case "chat.session.list": {
@@ -234,11 +235,7 @@ function handleSessionSurfaceEvent(surfaceEvent, state, api) {
       return true;
     case "chat.history": {
       const history = surfaceEvent.payloadList ?? [];
-      if (state.manualHistoryRequestPending) {
-        state.manualHistoryRequestPending = false;
-        api.eventStore.pushEvent("history", "Chat History", api.formatHistoryPayload(history), "slate");
-        api.setTransientStatus(`history loaded: ${history.length} item(s)`);
-      } else if (state.pendingResumeHistoryRestore && state.sessionId) {
+      if (state.pendingResumeHistoryRestore && state.sessionId) {
         state.pendingResumeHistoryRestore = false;
         api.eventStore.restoreTranscriptFromHistory(history);
         api.setTransientStatus(`history restored: ${history.length} item(s)`);
@@ -983,10 +980,8 @@ function handleStatusSurfaceEvent(surfaceEvent, state, api) {
   }
   const fingerprint = api.statusFeedFingerprint(payload);
   const shouldEmit =
-    state.manualStatusRequestPending ||
     state.lastStatusFeedFingerprint === null ||
     fingerprint !== state.lastStatusFeedFingerprint;
-  state.manualStatusRequestPending = false;
   state.lastStatusFeedFingerprint = fingerprint;
   api.requestCockpit("status poll");
   if (shouldEmit) {
@@ -1048,10 +1043,8 @@ function handleErrorSurfaceEvent(surfaceEvent, rawMessage, state, api) {
     return false;
   }
   state.runInspectPending = false;
-  state.manualStatusRequestPending = false;
   state.manualSessionsRequestPending = false;
   state.manualSessionsQuery = null;
-  state.manualHistoryRequestPending = false;
   state.pendingResumeHistoryRestore = false;
   if (api.isExpectedMissingRunInspect(errorMessage, errorPayload)) {
     state.runDetail = null;

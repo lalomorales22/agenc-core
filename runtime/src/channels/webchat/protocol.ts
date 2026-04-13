@@ -11,10 +11,13 @@ import type { SlashCommandViewKind } from "../../gateway/commands.js";
 import type {
   SessionContinuityDetail,
   SessionContinuityRecord,
+  SessionForkResult,
   SessionHistoryItem,
+  SessionResumePayload,
 } from "./types.js";
 import type { SessionShellProfile } from "../../gateway/shell-profile.js";
 import type { SessionWorkflowState } from "../../gateway/workflow-state.js";
+import type { WorkflowOwnershipEntry } from "../../gateway/watch-cockpit.js";
 
 // ============================================================================
 // Shared constants
@@ -34,6 +37,7 @@ export const WS_CHAT_SESSION = "chat.session" as const;
 export const WS_CHAT_OWNER = "chat.owner" as const;
 export const WS_CHAT_NEW = "chat.new" as const;
 export const WS_CHAT_RESUMED = "chat.resumed" as const;
+export const WS_CHAT_SESSION_RESUMED = "chat.session.resumed" as const;
 export const WS_CHAT_SESSIONS = "chat.sessions" as const;
 export const WS_CHAT_SESSION_RESUME = "chat.session.resume" as const;
 export const WS_CHAT_SESSION_LIST = "chat.session.list" as const;
@@ -180,7 +184,7 @@ export interface SessionCommandCurrentSessionData {
   readonly workspaceRoot: string;
   readonly historyMessages: number;
   readonly model?: string;
-  readonly ownership?: readonly Record<string, unknown>[];
+  readonly ownership?: readonly WorkflowOwnershipEntry[];
 }
 
 export interface SessionCommandData {
@@ -191,14 +195,14 @@ export interface SessionCommandData {
   readonly detail?: SessionContinuityDetail;
   readonly history?: readonly SessionHistoryItem[];
   readonly resumed?: {
-    readonly sessionId: string;
-    readonly messageCount: number;
-    readonly workspaceRoot?: string;
+    readonly sessionId: SessionResumePayload["sessionId"];
+    readonly messageCount: SessionResumePayload["messageCount"];
+    readonly workspaceRoot?: SessionResumePayload["workspaceRoot"];
   };
   readonly forked?: {
-    readonly sourceSessionId: string;
-    readonly targetSessionId: string;
-    readonly forkSource?: string;
+    readonly sourceSessionId: SessionForkResult["sourceSessionId"];
+    readonly targetSessionId: SessionForkResult["targetSessionId"];
+    readonly forkSource?: SessionForkResult["forkSource"];
     readonly session?: SessionContinuityRecord;
   };
 }
@@ -213,7 +217,7 @@ export interface WorkflowCommandData {
   readonly branchInfo?: Record<string, unknown>;
   readonly changeSummary?: Record<string, unknown>;
   readonly tasks?: Record<string, unknown>;
-  readonly ownership?: readonly Record<string, unknown>[];
+  readonly ownership?: readonly WorkflowOwnershipEntry[];
   readonly delegated?: {
     readonly sessionId: string;
     readonly status: string;

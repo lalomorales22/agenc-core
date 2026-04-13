@@ -56,7 +56,7 @@ binary remains `agenc`.
 - `agenc shell [profile]` opens a line-oriented terminal shell over the daemon's WebChat/control-plane path
 - `agenc resume [--profile <name>]` reopens the shell session for the current workspace/profile
 - `agenc session list|inspect|history|resume|fork` is the continuity surface for active and resumable daemon-backed sessions
-- `agenc console` opens the explicit operator console compatibility surface
+- `agenc console` opens the explicit shared TUI/cockpit surface
 - `agenc ui` opens or prints the local dashboard URL on `/ui/`
 
 Shared daemon-backed shell surfaces:

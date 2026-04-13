@@ -232,7 +232,6 @@ export function createWatchTransportController(dependencies = {}) {
     watchState.pendingResumeHistoryRestore = false;
     watchState.runInspectPending = false;
     watchState.manualSessionsRequestPending = false;
-    watchState.manualHistoryRequestPending = false;
     transportState.connectionState = "reconnecting";
     clearBootstrapTimer();
     clearStatusPollTimer();

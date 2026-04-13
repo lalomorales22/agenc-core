@@ -48,7 +48,9 @@ import type {
   WebChatChannelConfig,
   SessionContinuityRecord,
   SessionContinuityDetail,
+  SessionForkResult,
   SessionHistoryItem,
+  SessionResumePayload,
   SessionResumabilityState,
 } from "./types.js";
 import type {
@@ -432,7 +434,7 @@ export class WebChatChannel
     }
 
     if (type === "chat.resume" || type === "chat.session.resume") {
-      this.handleChatResume(clientId, payload, id, tracedSend);
+      this.handleChatResume(clientId, payload, id, tracedSend, type);
       return;
     }
 
@@ -885,8 +887,9 @@ export class WebChatChannel
     payload: Record<string, unknown> | undefined,
     id: string | undefined,
     send: SendFn,
+    responseType = "chat.session.resumed",
   ): void {
-    void this.handleChatResumeAsync(clientId, payload, id, send).catch((error) => {
+    void this.handleChatResumeAsync(clientId, payload, id, send, responseType).catch((error) => {
       send({
         type: "error",
         error: `Failed to resume chat session: ${(error as Error).message}`,
@@ -1000,6 +1003,7 @@ export class WebChatChannel
     payload: Record<string, unknown> | undefined,
     id: string | undefined,
     send: SendFn,
+    responseType: string,
   ): Promise<void> {
     const targetSessionId = payload?.sessionId;
     if (!targetSessionId || typeof targetSessionId !== "string") {
@@ -1034,7 +1038,7 @@ export class WebChatChannel
       requestedWorkspaceRoot,
     );
     send({
-      type: "chat.resumed",
+      type: responseType === "chat.resume" ? "chat.resumed" : "chat.session.resumed",
       payload: resumed,
       id,
     });
@@ -1048,73 +1052,18 @@ export class WebChatChannel
     responseType: string,
   ): Promise<void> {
     const ownerKey = await this.resolveDurableOwner(clientId, payload, send);
-    if (responseType === "chat.session.list") {
-      const activeOnly = payload?.activeOnly === true;
-      const limit =
-        typeof payload?.limit === "number" && payload.limit > 0
-          ? payload.limit
-          : undefined;
-      const profile = this.parseShellProfile(payload);
-      const records = await this.listContinuitySessionsForOwner(ownerKey, {
-        activeOnly,
-        limit,
-        shellProfile: profile,
-      });
-      send({ type: responseType, payload: records, id });
-      return;
-    }
-    if (this.sessionStore && this.isDurableOwnerKey(ownerKey)) {
-      const persistedSessions = await this.sessionStore.listSessionsForOwner(ownerKey);
-      const sessions = persistedSessions
-        .filter((session) => session.messageCount > 0)
-        .map((session) => {
-          this.sessionOwners.set(session.sessionId, session.ownerKey);
-          this.rememberPersistedSessionMetadata(session.sessionId, session);
-          return {
-            sessionId: session.sessionId,
-            label: session.label,
-            messageCount: session.messageCount,
-            lastActiveAt: session.lastActiveAt,
-            ...(session.metadata?.workspaceRoot
-              ? { workspaceRoot: session.metadata.workspaceRoot }
-              : {}),
-          };
-        })
-        .sort((a, b) => b.lastActiveAt - a.lastActiveAt);
-      send({ type: responseType, payload: sessions, id });
-      return;
-    }
-
-    const sessions: Array<{
-      sessionId: string;
-      label: string;
-      messageCount: number;
-      lastActiveAt: number;
-    }> = [];
-
-    for (const [sessionId, history] of this.sessionHistory) {
-      if (history.length === 0) continue;
-      // Security: Only show sessions owned by this client
-      const owner = this.sessionOwners.get(sessionId);
-      if (owner && owner !== ownerKey) continue;
-      const firstUserMsg = history.find((m) => m.sender === "user");
-      const label = firstUserMsg
-        ? firstUserMsg.content.slice(0, 80)
-        : "New conversation";
-      const lastEntry = history[history.length - 1];
-      sessions.push({
-        sessionId,
-        label,
-        messageCount: history.length,
-        lastActiveAt: lastEntry.timestamp,
-        ...(this.sessionWorkspaceRoots.get(sessionId)
-          ? { workspaceRoot: this.sessionWorkspaceRoots.get(sessionId) }
-          : {}),
-      });
-    }
-
-    sessions.sort((a, b) => b.lastActiveAt - a.lastActiveAt);
-    send({ type: responseType, payload: sessions, id });
+    const activeOnly = payload?.activeOnly === true;
+    const limit =
+      typeof payload?.limit === "number" && payload.limit > 0
+        ? payload.limit
+        : undefined;
+    const profile = this.parseShellProfile(payload);
+    const records = await this.listContinuitySessionsForOwner(ownerKey, {
+      activeOnly,
+      limit,
+      shellProfile: profile,
+    });
+    send({ type: responseType, payload: records, id });
   }
 
   private async handleChatInspectAsync(
@@ -1562,7 +1511,7 @@ export class WebChatChannel
   async resumeOwnedSession(
     requesterSessionId: string,
     targetSessionId: string,
-  ): Promise<{ sessionId: string; messageCount: number; workspaceRoot?: string } | undefined> {
+  ): Promise<SessionResumePayload | undefined> {
     const clientId = this.sessionClients.get(requesterSessionId);
     if (!clientId) {
       return undefined;
@@ -1589,7 +1538,7 @@ export class WebChatChannel
       shellProfile?: SessionShellProfile;
       objective?: string;
     },
-  ): Promise<Record<string, unknown> | undefined> {
+  ): Promise<SessionForkResult | undefined> {
     const clientId = this.sessionClients.get(requesterSessionId);
     const ownerKey = await this.resolveOwnerKeyForSession(requesterSessionId);
     if (!clientId || !ownerKey) {
@@ -2465,7 +2414,7 @@ export class WebChatChannel
       shellProfile?: SessionShellProfile;
       objective?: string;
     },
-  ): Promise<Record<string, unknown>> {
+  ): Promise<SessionForkResult> {
     const sourceSession = await this.sessionStore?.loadSession(sourceSessionId);
     if (!sourceSession || sourceSession.ownerKey !== ownerKey) {
       throw new Error(`Session "${sourceSessionId}" not found`);
@@ -2587,10 +2536,7 @@ export class WebChatChannel
       sourceSessionId,
       targetSessionId,
       forkSource,
-      resumed: false,
       ...(continuity ? { session: continuity } : {}),
-      ...(params?.objective ? { objective: params.objective } : {}),
-      ...(params?.shellProfile ? { shellProfile: params.shellProfile } : {}),
     };
   }
 

@@ -20,7 +20,7 @@ function buildAgencHelp() {
     "",
     "Default behavior:",
     "  agenc opens the general shell over the local daemon.",
-    "  agenc console opens the explicit operator console compatibility surface.",
+    "  agenc console opens the explicit shared TUI/cockpit surface.",
     "",
     "Primary entrypoints:",
     "  agenc",

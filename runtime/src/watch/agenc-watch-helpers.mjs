@@ -51,19 +51,9 @@ const CORE_WATCH_COMMANDS = Object.freeze([
     description: "Generate an AGENC.md contributor guide for this repo.",
   }),
   Object.freeze({
-    name: "/sessions",
-    usage: "/sessions [query]",
-    description: "Compatibility alias for /session list.",
-  }),
-  Object.freeze({
     name: "/session",
     usage: "/session [status|list|inspect|history|resume|fork]",
     description: "Inspect, list, resume, or fork daemon-backed sessions.",
-  }),
-  Object.freeze({
-    name: "/history",
-    usage: "/history [limit]",
-    description: "Show recent chat history for the active session.",
   }),
   Object.freeze({
     name: "/runs",
@@ -160,23 +150,7 @@ const CORE_WATCH_COMMANDS = Object.freeze([
   }),
 ]);
 
-const REVIEW_MODE_COMMANDS = Object.freeze([
-  Object.freeze({
-    name: "/review",
-    usage: "/review [scope]",
-    description: "Run the canonical review surface for the current changes.",
-  }),
-  Object.freeze({
-    name: "/security-review",
-    usage: "/security-review [scope]",
-    description: "Compatibility alias for /review --mode security.",
-  }),
-  Object.freeze({
-    name: "/pr-comments",
-    usage: "/pr-comments [scope]",
-    description: "Compatibility alias for /review --mode pr-comments.",
-  }),
-]);
+const REVIEW_MODE_COMMANDS = Object.freeze([]);
 
 const CHECKPOINT_COMMANDS = Object.freeze([
   Object.freeze({
@@ -200,8 +174,13 @@ const CHECKPOINT_COMMANDS = Object.freeze([
 const DIFF_REVIEW_COMMANDS = Object.freeze([
   Object.freeze({
     name: "/diff",
-    usage: "/diff [open|next|prev|close]",
-    description: "Open the newest diff, move between hunks, or close diff detail mode.",
+    usage: "/diff [--staged|--from <ref>|--to <ref>|--files <a,b>]",
+    description: "Use the shared daemon-backed diff surface.",
+  }),
+  Object.freeze({
+    name: "/diff-view",
+    usage: "/diff-view [open|next|prev|close]",
+    description: "Open the newest diff detail, move between hunks, or close diff detail mode.",
   }),
 ]);
 
@@ -216,7 +195,6 @@ const COMPACTION_COMMANDS = Object.freeze([
 const PERMISSIONS_COMMANDS = Object.freeze([
   Object.freeze({
     name: "/permissions",
-    aliases: ["/policy"],
     usage: "/permissions [status|simulate <toolName> [jsonArgs]|credentials|revoke-credentials [credentialId]|allow <toolPattern>|deny <toolPattern>|clear <toolPattern>|reset]",
     description: "Inspect policy state or simulate approval/policy decisions.",
   }),
@@ -367,11 +345,6 @@ const EXTENSIBILITY_COMMANDS = Object.freeze([
     description: "Use the shared local-skill surface.",
   }),
   Object.freeze({
-    name: "/plugins",
-    usage: "/plugins [list|inspect <pluginId>|enable <pluginId>|disable <pluginId>|reload <pluginId>]",
-    description: "Compatibility alias for the shared /plugin catalog surface.",
-  }),
-  Object.freeze({
     name: "/mcp",
     usage: "/mcp [status|list|inspect <server>|tools [server]|validate [server]|reconnect <server>|enable <server>|disable <server>]",
     description: "Use the shared daemon-backed MCP surface.",
@@ -461,10 +434,10 @@ export const WATCH_COMMANDS = buildWatchCommands();
 
 export function mergeWatchCommandCatalog(localCommands = WATCH_COMMANDS, sharedCatalog = []) {
   const merged = [...localCommands];
-  const seen = new Set(
+  const seen = new Map(
     localCommands
-      .map((command) => String(command?.name ?? "").trim().toLowerCase())
-      .filter(Boolean),
+      .map((command, index) => [String(command?.name ?? "").trim().toLowerCase(), index])
+      .filter(([name]) => Boolean(name)),
   );
   for (const entry of sharedCatalog) {
     if (!entry || typeof entry !== "object") {
@@ -475,10 +448,10 @@ export function mergeWatchCommandCatalog(localCommands = WATCH_COMMANDS, sharedC
       continue;
     }
     const name = typeof entry.name === "string" ? `/${entry.name.trim()}` : "";
-    if (!name || seen.has(name.toLowerCase())) {
+    if (!name) {
       continue;
     }
-    seen.add(name.toLowerCase());
+    const normalizedName = name.toLowerCase();
     const aliases = [
       ...(Array.isArray(entry.aliases) ? entry.aliases : []),
       ...(Array.isArray(entry.deprecatedAliases) ? entry.deprecatedAliases : []),
@@ -488,17 +461,22 @@ export function mergeWatchCommandCatalog(localCommands = WATCH_COMMANDS, sharedC
     const args = typeof entry.args === "string" && entry.args.trim().length > 0
       ? ` ${entry.args.trim()}`
       : "";
-    merged.push(
-      Object.freeze({
-        name,
-        aliases: Object.freeze(aliases),
-        usage: `${name}${args}`,
-        description:
-          typeof entry.description === "string" && entry.description.trim().length > 0
-            ? entry.description.trim()
-            : "Runtime command",
-      }),
-    );
+    const nextEntry = Object.freeze({
+      name,
+      aliases: Object.freeze(aliases),
+      usage: `${name}${args}`,
+      description:
+        typeof entry.description === "string" && entry.description.trim().length > 0
+          ? entry.description.trim()
+          : "Runtime command",
+    });
+    const existingIndex = seen.get(normalizedName);
+    if (existingIndex !== undefined) {
+      merged[existingIndex] = nextEntry;
+      continue;
+    }
+    seen.set(normalizedName, merged.length);
+    merged.push(nextEntry);
   }
   return Object.freeze(merged);
 }

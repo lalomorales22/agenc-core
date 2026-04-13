@@ -1086,6 +1086,17 @@ function updateVerificationSurfaceState(
   return next;
 }
 
+async function persistSurfaceStateForSession(
+  memoryBackend: MemoryBackend,
+  webSessionId: string,
+  session: Session | undefined,
+): Promise<void> {
+  if (!session) {
+    return;
+  }
+  await persistWebSessionRuntimeState(memoryBackend, webSessionId, session);
+}
+
 function formatContinuitySessionInspect(detail: SessionContinuityDetail): string {
   const lines = [
     "Session detail:",
@@ -1235,6 +1246,58 @@ type ShellAgentLaunchResult = Awaited<
   ReturnType<CommandRegistryDaemonContext["launchShellAgentTask"]>
 >;
 
+async function launchDelegatedSurfaceTask<
+  TSurfaceState extends ReviewSurfaceState | VerificationSurfaceState,
+>(params: {
+  readonly ctx: CommandRegistryDaemonContext;
+  readonly session: Session | undefined;
+  readonly webSessionId: string;
+  readonly resolvedSessionId: string;
+  readonly memoryBackend: MemoryBackend;
+  readonly shellProfile: SessionShellProfile;
+  readonly roleId: "review" | "verify";
+  readonly objective: string;
+  readonly prompt: string;
+  readonly startSurfaceState: Partial<TSurfaceState> &
+    Pick<TSurfaceState, "status" | "source">;
+  readonly finishSurfaceState: (
+    delegated: ShellAgentLaunchResult,
+  ) => Partial<TSurfaceState> & Pick<TSurfaceState, "status" | "source">;
+  readonly updateSurfaceState: (
+    session: Session,
+    state: Partial<TSurfaceState> & Pick<TSurfaceState, "status" | "source">,
+  ) => TSurfaceState;
+}): Promise<ShellAgentLaunchResult> {
+  if (params.session) {
+    params.updateSurfaceState(params.session, params.startSurfaceState);
+    await persistSurfaceStateForSession(
+      params.memoryBackend,
+      params.webSessionId,
+      params.session,
+    );
+  }
+  const delegated = await params.ctx.launchShellAgentTask({
+    parentSessionId: params.resolvedSessionId,
+    roleId: params.roleId,
+    objective: params.objective,
+    prompt: params.prompt,
+    shellProfile: params.shellProfile,
+    wait: true,
+  });
+  if (params.session) {
+    params.updateSurfaceState(
+      params.session,
+      params.finishSurfaceState(delegated),
+    );
+    await persistSurfaceStateForSession(
+      params.memoryBackend,
+      params.webSessionId,
+      params.session,
+    );
+  }
+  return delegated;
+}
+
 async function launchDelegatedReviewTask(params: {
   readonly ctx: CommandRegistryDaemonContext;
   readonly session: Session | undefined;
@@ -1247,19 +1310,13 @@ async function launchDelegatedReviewTask(params: {
   readonly diff: Record<string, unknown>;
   readonly mode: "default" | "security" | "pr-comments";
 }): Promise<ShellAgentLaunchResult> {
-  if (params.session) {
-    updateReviewSurfaceState(params.session, {
-      status: "running",
-      source: "delegated",
-    });
-    await persistWebSessionRuntimeState(
-      params.memoryBackend,
-      params.webSessionId,
-      params.session,
-    );
-  }
-  const delegated = await params.ctx.launchShellAgentTask({
-    parentSessionId: params.resolvedSessionId,
+  return launchDelegatedSurfaceTask({
+    ctx: params.ctx,
+    session: params.session,
+    webSessionId: params.webSessionId,
+    resolvedSessionId: params.resolvedSessionId,
+    memoryBackend: params.memoryBackend,
+    shellProfile: params.shellProfile,
     roleId: "review",
     objective:
       params.mode === "security"
@@ -1275,23 +1332,18 @@ async function launchDelegatedReviewTask(params: {
           ? formatGitDiffReply(params.diff)
           : "No diff content to review.",
     }),
-    shellProfile: params.shellProfile,
-    wait: true,
-  });
-  if (params.session) {
-    updateReviewSurfaceState(params.session, {
+    startSurfaceState: {
+      status: "running",
+      source: "delegated",
+    },
+    finishSurfaceState: (delegated) => ({
       status: delegated.success === true ? "completed" : "failed",
       source: "delegated",
       delegatedSessionId: delegated.sessionId,
       summaryPreview: delegated.output,
-    });
-    await persistWebSessionRuntimeState(
-      params.memoryBackend,
-      params.webSessionId,
-      params.session,
-    );
-  }
-  return delegated;
+    }),
+    updateSurfaceState: updateReviewSurfaceState,
+  });
 }
 
 async function launchDelegatedVerifyTask(params: {
@@ -1306,20 +1358,13 @@ async function launchDelegatedVerifyTask(params: {
   readonly tasks: Record<string, unknown>;
   readonly runtimeStatusSnapshot?: Record<string, unknown>;
 }): Promise<ShellAgentLaunchResult> {
-  if (params.session) {
-    updateVerificationSurfaceState(params.session, {
-      status: "running",
-      source: "delegated",
-      verdict: "unknown",
-    });
-    await persistWebSessionRuntimeState(
-      params.memoryBackend,
-      params.webSessionId,
-      params.session,
-    );
-  }
-  const delegated = await params.ctx.launchShellAgentTask({
-    parentSessionId: params.resolvedSessionId,
+  return launchDelegatedSurfaceTask({
+    ctx: params.ctx,
+    session: params.session,
+    webSessionId: params.webSessionId,
+    resolvedSessionId: params.resolvedSessionId,
+    memoryBackend: params.memoryBackend,
+    shellProfile: params.shellProfile,
     roleId: "verify",
     objective: "Verify the current implementation state and return a verdict.",
     prompt: buildVerifyDelegatePrompt({
@@ -1328,24 +1373,21 @@ async function launchDelegatedVerifyTask(params: {
       taskReply: formatTaskListReply(params.tasks),
       runtimeStatusSnapshot: params.runtimeStatusSnapshot,
     }),
-    shellProfile: params.shellProfile,
-    wait: true,
-  });
-  if (params.session) {
-    updateVerificationSurfaceState(params.session, {
+    startSurfaceState: {
+      status: "running",
+      source: "delegated",
+      verdict: "unknown",
+    },
+    finishSurfaceState: (delegated) => ({
       status: delegated.success === true ? "completed" : "failed",
       source: "delegated",
       delegatedSessionId: delegated.sessionId,
       summaryPreview: delegated.output,
-      verdict: delegated.success === true ? "pass" : "fail",
-    });
-    await persistWebSessionRuntimeState(
-      params.memoryBackend,
-      params.webSessionId,
-      params.session,
-    );
-  }
-  return delegated;
+      verdict:
+        (delegated.success === true ? "pass" : "fail") as VerificationSurfaceState["verdict"],
+    }),
+    updateSurfaceState: updateVerificationSurfaceState,
+  });
 }
 
 function summarizeStoredResponse(response: LLMStoredResponse): string {
@@ -3599,7 +3641,7 @@ export function createDaemonCommandRegistry(
   });
   commandRegistry.register({
     name: "verify",
-    description: "Show verification state or run the restricted verifier child",
+    description: "Show verifier state or run the restricted verifier child",
     args: "[--delegate]",
     global: true,
     metadata: {

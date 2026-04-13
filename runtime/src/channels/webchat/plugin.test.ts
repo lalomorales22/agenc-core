@@ -1462,7 +1462,7 @@ describe("WebChatChannel", () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
 
       expect(
-        findResponse(send2, "chat.resumed", "req-canonical-resume")?.payload,
+        findResponse(send2, "chat.session.resumed", "req-canonical-resume")?.payload,
       ).toEqual(expect.objectContaining({ sessionId }));
     });
 

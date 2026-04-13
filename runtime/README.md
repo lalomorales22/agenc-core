@@ -60,8 +60,8 @@ Current shell entrypoint:
 - `agenc shell [profile]`
 - `agenc resume [--profile <name>]`
 - `agenc session list|inspect|history|resume|fork`
-- `agenc-runtime shell [profile]` as the compatibility alias
-- `agenc console` for the explicit operator-console compatibility path
+- `agenc-runtime shell [profile]` as the runtime CLI alias
+- `agenc console` for the explicit shared TUI/cockpit path
 
 Shared daemon-backed shell surfaces:
 

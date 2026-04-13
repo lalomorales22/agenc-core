@@ -91,6 +91,9 @@ function SessionResultView({
             value={data.currentSession.workflowState.objective}
           />
         )}
+        {data.currentSession.ownership && data.currentSession.ownership.length > 0 && (
+          <JsonBlock value={data.currentSession.ownership} />
+        )}
       </Section>
     );
   }
@@ -123,9 +126,18 @@ function SessionResultView({
         <InlineStat label="Profile" value={data.detail.shellProfile} />
         <InlineStat label="Stage" value={data.detail.workflowStage} />
         <InlineStat label="State" value={data.detail.resumabilityState} />
+        <InlineStat label="Messages" value={data.detail.messageCount} />
+        <InlineStat label="Children" value={data.detail.childSessionCount} />
+        <InlineStat label="Worktrees" value={data.detail.worktreeCount} />
         {data.detail.branch && <InlineStat label="Branch" value={data.detail.branch} />}
         {data.detail.workspaceRoot && (
           <InlineStat label="Workspace" value={data.detail.workspaceRoot} />
+        )}
+        {data.detail.repoRoot && (
+          <InlineStat label="Repo" value={data.detail.repoRoot} />
+        )}
+        {data.detail.lastAssistantOutputPreview && (
+          <TextBlock content={data.detail.lastAssistantOutputPreview} />
         )}
         {data.detail.preview && <TextBlock content={data.detail.preview} />}
       </Section>

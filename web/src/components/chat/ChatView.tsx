@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   ChatMessage,
+  CockpitSnapshot,
   CommandCatalogEntry,
   ContinuityDetail,
   ContinuityRecord,
@@ -15,6 +16,7 @@ import { ChatInput } from './ChatInput';
 import { VoiceOverlay } from './VoiceOverlay';
 import { DesktopPanel } from './DesktopPanel';
 import { CommandResultPanel } from './CommandResultPanel';
+import { CockpitPanel, SessionInspectPanel } from './SessionPanels';
 
 interface ChatViewProps {
   messages: ChatMessage[];
@@ -37,8 +39,10 @@ interface ChatViewProps {
   activeSessionId?: string | null;
   selectedSessionDetail?: ContinuityDetail | null;
   commandResult?: SessionCommandResult | null;
+  cockpit?: CockpitSnapshot | null;
   onSelectSession?: (sessionId: string) => void;
   onInspectSession?: (sessionId: string) => void;
+  onLoadSessionHistory?: (sessionId?: string, options?: { limit?: number; includeTools?: boolean }) => void;
   onForkSession?: (sessionId: string) => void;
   onNewChat?: () => void;
   desktopUrl?: string | null;
@@ -67,8 +71,10 @@ export function ChatView({
   activeSessionId,
   selectedSessionDetail = null,
   commandResult = null,
+  cockpit = null,
   onSelectSession,
   onInspectSession,
+  onLoadSessionHistory,
   onForkSession,
   onNewChat,
   desktopUrl,
@@ -80,6 +86,7 @@ export function ChatView({
   const [searchQuery, setSearchQuery] = useState('');
   const [sessionsOpen, setSessionsOpen] = useState(false);
   const [contextPanelOpen, setContextPanelOpen] = useState(false);
+  const [activeSidePanel, setActiveSidePanel] = useState<'desktop' | 'command' | 'session' | 'cockpit'>('cockpit');
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   const toggleSearch = useCallback(() => {
@@ -182,7 +189,30 @@ export function ChatView({
 
     return { total: bySession.size, running, failed, completed };
   }, [messages]);
-  const rightPanelOpen = Boolean(commandResult) || (desktopOpen && desktopUrl);
+  const availableSidePanels = useMemo(() => {
+    const panels: Array<'desktop' | 'command' | 'session' | 'cockpit'> = [];
+    if (desktopOpen && desktopUrl) panels.push('desktop');
+    if (commandResult) panels.push('command');
+    if (selectedSessionDetail) panels.push('session');
+    if (cockpit) panels.push('cockpit');
+    return panels;
+  }, [cockpit, commandResult, desktopOpen, desktopUrl, selectedSessionDetail]);
+  const rightPanelOpen = availableSidePanels.length > 0;
+
+  useEffect(() => {
+    const preferred =
+      (desktopOpen && desktopUrl && 'desktop') ||
+      (commandResult && 'command') ||
+      (selectedSessionDetail && 'session') ||
+      (cockpit && 'cockpit') ||
+      null;
+    if (!preferred) {
+      return;
+    }
+    setActiveSidePanel((current) =>
+      availableSidePanels.includes(current) ? current : preferred,
+    );
+  }, [availableSidePanels, cockpit, commandResult, desktopOpen, desktopUrl, selectedSessionDetail]);
 
   // ── Welcome / splash state ──
   if (isEmpty) {
@@ -380,10 +410,36 @@ export function ChatView({
         <MessageList messages={messages} isTyping={isTyping} theme={theme} searchQuery={searchQuery} />
         {rightPanelOpen && (
           <div className="hidden md:block w-[55%] min-w-[480px] h-full shrink-0">
-            {desktopOpen && desktopUrl ? (
+            {availableSidePanels.length > 1 && (
+              <div className="flex items-center gap-3 border-l border-bbs-border border-b border-bbs-border bg-bbs-surface px-3 py-2 text-xs">
+                {availableSidePanels.map((panel) => (
+                  <button
+                    key={panel}
+                    onClick={() => setActiveSidePanel(panel)}
+                    className={
+                      activeSidePanel === panel
+                        ? 'text-bbs-purple'
+                        : 'text-bbs-gray hover:text-bbs-white'
+                    }
+                  >
+                    [{panel.toUpperCase()}]
+                  </button>
+                ))}
+              </div>
+            )}
+            {activeSidePanel === 'desktop' && desktopOpen && desktopUrl ? (
               <DesktopPanel vncUrl={desktopUrl} onClose={onToggleDesktop!} />
-            ) : commandResult ? (
+            ) : activeSidePanel === 'command' && commandResult ? (
               <CommandResultPanel result={commandResult} />
+            ) : activeSidePanel === 'session' && selectedSessionDetail ? (
+              <SessionInspectPanel
+                detail={selectedSessionDetail}
+                onResume={onSelectSession}
+                onFork={onForkSession}
+                onLoadHistory={onLoadSessionHistory}
+              />
+            ) : cockpit ? (
+              <CockpitPanel cockpit={cockpit} />
             ) : null}
           </div>
         )}
@@ -536,6 +592,21 @@ export function ChatView({
                             [FORK]
                           </button>
                         )}
+                        {onLoadSessionHistory && (
+                          <button
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              onLoadSessionHistory(session.sessionId, {
+                                limit: 20,
+                                includeTools: true,
+                              });
+                              setSessionsOpen(false);
+                            }}
+                            className="text-bbs-yellow hover:text-bbs-white"
+                          >
+                            [HISTORY]
+                          </button>
+                        )}
                       </div>
                     </button>
                   );
@@ -549,6 +620,18 @@ export function ChatView({
                   {selectedSessionDetail.shellProfile} - {selectedSessionDetail.workflowStage}
                 </div>
                 <div className="mt-2 break-words">{selectedSessionDetail.preview}</div>
+                {selectedSessionDetail.recentHistory && selectedSessionDetail.recentHistory.length > 0 && (
+                  <div className="mt-3 space-y-2">
+                    {selectedSessionDetail.recentHistory.slice(0, 3).map((entry, index) => (
+                      <div key={`${entry.timestamp}-${index}`} className="border border-bbs-border bg-bbs-surface p-2">
+                        <div className="mb-1 text-[11px] uppercase tracking-wide text-bbs-purple">
+                          {entry.sender}
+                        </div>
+                        <div className="whitespace-pre-wrap break-words">{entry.content}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
           </div>

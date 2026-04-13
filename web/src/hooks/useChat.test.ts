@@ -318,6 +318,17 @@ describe("useChat session lifecycle", () => {
     expect(send).toHaveBeenCalledWith(
       expect.objectContaining({
         type: "chat.history",
+        payload: expect.objectContaining({
+          sessionId: "session-target",
+        }),
+      }),
+    );
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "watch.cockpit.get",
+        payload: expect.objectContaining({
+          sessionId: "session-target",
+        }),
       }),
     );
   });
@@ -358,6 +369,40 @@ describe("useChat session lifecycle", () => {
       sessionId: "session-2",
       workflowStage: "review",
     });
+  });
+
+  it("refreshes history and cockpit against the resumed session id from the session channel", () => {
+    const send = vi.fn();
+    const { result } = renderHook(() => useChat({ send, connected: true }));
+
+    send.mockClear();
+    act(() => {
+      result.current.handleMessage({
+        type: "chat.session.resumed",
+        payload: {
+          sessionId: "session-42",
+          messageCount: 4,
+        },
+      } as WSMessage);
+    });
+
+    expect(result.current.sessionId).toBe("session-42");
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "chat.history",
+        payload: expect.objectContaining({
+          sessionId: "session-42",
+        }),
+      }),
+    );
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "watch.cockpit.get",
+        payload: expect.objectContaining({
+          sessionId: "session-42",
+        }),
+      }),
+    );
   });
 
   it("persists a server-issued owner token and reuses it in later requests", () => {

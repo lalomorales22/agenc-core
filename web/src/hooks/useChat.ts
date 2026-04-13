@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
   ChatMessage,
   ChatMessageAttachment,
+  CockpitSnapshot,
   CommandCatalogEntry,
   ContinuityDetail,
   ContinuityRecord,
@@ -27,6 +28,7 @@ import {
   WS_CHAT_CANCELLED,
   WS_CHAT_CANCEL,
   WS_CHAT_USAGE,
+  WS_WATCH_COCKPIT,
   WS_EVENTS_EVENT,
   WS_SUBAGENT_LIFECYCLE_TYPES,
   WS_SUBAGENTS_CANCELLED,
@@ -42,6 +44,9 @@ import {
   WS_TOOLS_EXECUTING,
   WS_TOOLS_RESULT,
 } from '../constants';
+
+const WS_CHAT_SESSION_RESUMED = 'chat.session.resumed';
+const WS_WATCH_COCKPIT_GET = 'watch.cockpit.get';
 
 export interface ChatAttachment {
   filename: string;
@@ -63,11 +68,14 @@ export interface UseChatReturn {
   sessions: ContinuityRecord[];
   selectedSessionDetail: ContinuityDetail | null;
   lastCommandResult: SessionCommandResult | null;
+  cockpit: CockpitSnapshot | null;
   commands: CommandCatalogEntry[];
   refreshCommandCatalog: () => void;
   refreshSessions: () => void;
+  refreshCockpit: () => void;
   resumeSession: (sessionId: string) => void;
   inspectSession: (sessionId: string) => void;
+  loadSessionHistory: (sessionId?: string, options?: { limit?: number; includeTools?: boolean }) => void;
   forkSession: (sessionId: string, options?: { objective?: string; profile?: string }) => void;
   startNewChat: () => void;
   /** Cumulative token usage for the current session. */
@@ -283,6 +291,7 @@ export function useChat({ send, connected }: UseChatOptions): UseChatReturn {
     useState<ContinuityDetail | null>(null);
   const [lastCommandResult, setLastCommandResult] =
     useState<SessionCommandResult | null>(null);
+  const [cockpit, setCockpit] = useState<CockpitSnapshot | null>(null);
   const [commands, setCommands] = useState<CommandCatalogEntry[]>([]);
   const [tokenUsage, setTokenUsage] = useState<TokenUsage | null>(null);
   // Tracks the placeholder message ID for the current response round
@@ -316,19 +325,39 @@ export function useChat({ send, connected }: UseChatOptions): UseChatReturn {
   const refreshSessions = useCallback(() => {
     send({
       type: WS_CHAT_SESSION_LIST,
-      payload: authPayload({ continuity: true }),
+      payload: authPayload(),
     });
   }, [authPayload, send]);
 
-  const refreshCommandCatalog = useCallback(() => {
+  const refreshCockpit = useCallback((targetSessionId?: string | null) => {
+    const effectiveSessionId = targetSessionId ?? sessionId;
+    send({
+      type: WS_WATCH_COCKPIT_GET,
+      payload: authPayload({
+        ...(effectiveSessionId ? { sessionId: effectiveSessionId } : {}),
+      }),
+    });
+  }, [authPayload, send, sessionId]);
+
+  const refreshCommandCatalog = useCallback((targetSessionId?: string | null) => {
+    const effectiveSessionId = targetSessionId ?? sessionId;
     send({
       type: 'session.command.catalog.get',
       payload: authPayload({
         client: 'web',
-        ...(sessionId ? { sessionId } : {}),
+        ...(effectiveSessionId ? { sessionId: effectiveSessionId } : {}),
       }),
     });
   }, [authPayload, send, sessionId]);
+
+  const requestChatHistory = useCallback((targetSessionId?: string | null) => {
+    send({
+      type: WS_CHAT_HISTORY,
+      payload: authPayload({
+        ...(targetSessionId ? { sessionId: targetSessionId } : {}),
+      }),
+    });
+  }, [authPayload, send]);
 
   // Fetch sessions when connected
   useEffect(() => {
@@ -337,6 +366,13 @@ export function useChat({ send, connected }: UseChatOptions): UseChatReturn {
       refreshCommandCatalog();
     }
   }, [connected, refreshCommandCatalog, refreshSessions]);
+
+  useEffect(() => {
+    if (connected && sessionId) {
+      refreshCockpit();
+      refreshCommandCatalog();
+    }
+  }, [connected, refreshCockpit, refreshCommandCatalog, sessionId]);
 
   const resumeSession = useCallback((targetSessionId: string) => {
     send({
@@ -357,6 +393,34 @@ export function useChat({ send, connected }: UseChatOptions): UseChatReturn {
       payload: authPayload({ sessionId: targetSessionId }),
     });
   }, [authPayload, nextRequestId, send]);
+
+  const loadSessionHistory = useCallback(
+    (
+      targetSessionId?: string,
+      options?: { limit?: number; includeTools?: boolean },
+    ) => {
+      const fragments = ['/session history'];
+      if (targetSessionId && targetSessionId.trim().length > 0) {
+        fragments.push(targetSessionId.trim());
+      }
+      if (Number.isFinite(options?.limit) && Number(options?.limit) > 0) {
+        fragments.push(`--limit ${Math.floor(Number(options?.limit))}`);
+      }
+      if (options?.includeTools) {
+        fragments.push('--include-tools');
+      }
+      send({
+        type: 'session.command.execute',
+        id: nextRequestId('cmd_history'),
+        payload: authPayload({
+          content: fragments.join(' '),
+          client: 'web',
+          ...(sessionId ? { sessionId } : {}),
+        }),
+      });
+    },
+    [authPayload, nextRequestId, send, sessionId],
+  );
 
   const forkSession = useCallback(
     (
@@ -383,6 +447,7 @@ export function useChat({ send, connected }: UseChatOptions): UseChatReturn {
     setTokenUsage(null);
     setSelectedSessionDetail(null);
     setLastCommandResult(null);
+    setCockpit(null);
     pendingMsgIdRef.current = null;
     send({
       type: WS_CHAT_NEW,
@@ -768,7 +833,10 @@ export function useChat({ send, connected }: UseChatOptions): UseChatReturn {
       case WS_CHAT_SESSION: {
         const payload = (msg.payload ?? msg) as Record<string, unknown>;
         const id = (payload.sessionId as string) ?? null;
-        if (id) setSessionId(id);
+        if (id) {
+          setSessionId(id);
+          refreshCockpit(id);
+        }
         break;
       }
 
@@ -787,6 +855,19 @@ export function useChat({ send, connected }: UseChatOptions): UseChatReturn {
         const payload = msg.payload as ContinuityRecord[];
         if (Array.isArray(payload)) {
           setSessions(payload);
+        }
+        break;
+      }
+
+      case WS_CHAT_SESSION_RESUMED: {
+        const payload = (msg.payload ?? msg) as Record<string, unknown>;
+        const id = (payload.sessionId as string) ?? null;
+        if (id) {
+          setSessionId(id);
+          requestChatHistory(id);
+          refreshSessions();
+          refreshCommandCatalog(id);
+          refreshCockpit(id);
         }
         break;
       }
@@ -818,6 +899,14 @@ export function useChat({ send, connected }: UseChatOptions): UseChatReturn {
         break;
       }
 
+      case WS_WATCH_COCKPIT: {
+        const payload = msg.payload as CockpitSnapshot | undefined;
+        if (payload && typeof payload.session?.sessionId === 'string') {
+          setCockpit(payload);
+        }
+        break;
+      }
+
       case 'session.command.result': {
         const payload = (msg.payload ?? msg) as SessionCommandResult;
         const resultContent = asString(payload.content);
@@ -839,13 +928,12 @@ export function useChat({ send, connected }: UseChatOptions): UseChatReturn {
             setSelectedSessionDetail(resultData.detail);
           }
           if (resultData.subcommand === 'resume' && resultData.resumed?.sessionId) {
-            setSessionId(resultData.resumed.sessionId);
-            send({
-              type: WS_CHAT_HISTORY,
-              payload: authPayload(),
-            });
+            const resumedSessionId = resultData.resumed.sessionId;
+            setSessionId(resumedSessionId);
+            requestChatHistory(resumedSessionId);
             refreshSessions();
-            refreshCommandCatalog();
+            refreshCommandCatalog(resumedSessionId);
+            refreshCockpit(resumedSessionId);
           }
           if (resultData.subcommand === 'fork' && resultData.forked?.targetSessionId) {
             refreshSessions();
@@ -854,9 +942,20 @@ export function useChat({ send, connected }: UseChatOptions): UseChatReturn {
         if (
           payload.commandName === 'profile' ||
           payload.commandName === 'plan' ||
-          payload.commandName === 'new'
+          payload.commandName === 'new' ||
+          payload.commandName === 'permissions'
         ) {
           refreshCommandCatalog();
+        }
+        if (
+          payload.commandName === 'session' ||
+          payload.commandName === 'plan' ||
+          payload.commandName === 'review' ||
+          payload.commandName === 'verify' ||
+          payload.commandName === 'diff' ||
+          payload.commandName === 'git'
+        ) {
+          refreshCockpit();
         }
         if (resultContent && !resultData) {
           injectMessage(resultContent, 'agent');
@@ -997,11 +1096,11 @@ export function useChat({ send, connected }: UseChatOptions): UseChatReturn {
         break;
       }
     }
-  }, [authPayload, injectMessage, inspectSession, refreshSessions, send]);
+  }, [injectMessage, inspectSession, refreshCockpit, refreshCommandCatalog, refreshSessions, requestChatHistory, send]);
 
   return {
     messages, sendMessage, stopGeneration, injectMessage, replaceLastUserMessage, isTyping, sessionId,
-    sessions, selectedSessionDetail, lastCommandResult, commands, refreshCommandCatalog, refreshSessions, resumeSession, inspectSession, forkSession, startNewChat, tokenUsage,
+    sessions, selectedSessionDetail, lastCommandResult, cockpit, commands, refreshCommandCatalog, refreshSessions, refreshCockpit, resumeSession, inspectSession, loadSessionHistory, forkSession, startNewChat, tokenUsage,
     handleMessage,
   };
 }

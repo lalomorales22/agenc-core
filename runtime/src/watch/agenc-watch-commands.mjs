@@ -42,78 +42,6 @@ function formatCheckpointList(summaries = []) {
     .join("\n\n");
 }
 
-function buildPermissionsCommand(parsedSlash) {
-  const args = Array.isArray(parsedSlash?.args) ? parsedSlash.args : [];
-  const subcommand = (args[0] ?? "status").trim().toLowerCase();
-  if (!subcommand || subcommand === "status") {
-    return {
-      content: "/policy status",
-      title: "Permissions",
-      body: "Requested policy and approval state for the active runtime.",
-    };
-  }
-  if (subcommand === "credentials") {
-    return {
-      content: "/policy credentials",
-      title: "Permission Credentials",
-      body: "Requested active session credential leases.",
-    };
-  }
-  if (subcommand === "revoke-credentials") {
-    const credentialId = args.slice(1).join(" ").trim();
-    return {
-      content: credentialId
-        ? `/policy revoke-credentials ${credentialId}`
-        : "/policy revoke-credentials",
-      title: "Revoke Credentials",
-      body: credentialId
-        ? `Requested credential revocation for ${credentialId}.`
-        : "Requested revocation of active session credential leases.",
-    };
-  }
-  if (subcommand === "simulate") {
-    const toolName = (args[1] ?? "").trim();
-    if (!toolName) {
-      return {
-        error:
-          "Usage: /permissions simulate <toolName> [jsonArgs]",
-      };
-    }
-    const argText = args.slice(2).join(" ").trim();
-    return {
-      content: argText
-        ? `/policy simulate ${toolName} ${argText}`
-        : `/policy simulate ${toolName}`,
-      title: "Permission Simulation",
-      body: `Requested a policy/approval simulation for ${toolName}.`,
-    };
-  }
-  if (["allow", "deny", "clear", "reset"].includes(subcommand)) {
-    const pattern = args.slice(1).join(" ").trim();
-    if (subcommand !== "reset" && !pattern) {
-      return {
-        error:
-          "Usage: /permissions [status|simulate <toolName> [jsonArgs]|credentials|revoke-credentials [credentialId]|allow <toolPattern>|deny <toolPattern>|clear <toolPattern>|reset]",
-      };
-    }
-    return {
-      content:
-        subcommand === "reset"
-          ? "/policy update reset"
-          : `/policy update ${subcommand} ${pattern}`,
-      title: "Policy Update",
-      body:
-        subcommand === "reset"
-          ? "Requested a reset of all session policy allow/deny overrides."
-          : `Requested a session policy ${subcommand} override for ${pattern}.`,
-    };
-  }
-  return {
-    error:
-      "Usage: /permissions [status|simulate <toolName> [jsonArgs]|credentials|revoke-credentials [credentialId]|allow <toolPattern>|deny <toolPattern>|clear <toolPattern>|reset]",
-  };
-}
-
 function buildApprovalsCommand(parsedSlash) {
   const args = Array.isArray(parsedSlash?.args) ? parsedSlash.args : [];
   const rawToken = String(parsedSlash?.commandToken ?? "").trim().toLowerCase();
@@ -1139,7 +1067,7 @@ function buildInputPreferenceCommand(parsedSlash, {
   };
 }
 
-function buildDiffCommand(
+function buildDiffViewCommand(
   parsedSlash,
   {
     openLatestDiffDetail,
@@ -1240,7 +1168,7 @@ function buildDiffCommand(
   }
   return {
     errorTitle: "Usage Error",
-    errorBody: "Usage: /diff [open|next|prev|close]",
+    errorBody: "Usage: /diff-view [open|next|prev|close]",
   };
 }
 
@@ -1355,7 +1283,7 @@ export function createWatchCommandController(dependencies = {}) {
     assertFunction("openMarketTaskBrowser", openMarketTaskBrowser);
     assertFunction("dismissMarketTaskBrowser", dismissMarketTaskBrowser);
   }
-  if (commandNames.has("/diff")) {
+  if (commandNames.has("/diff-view")) {
     assertFunction("openLatestDiffDetail", openLatestDiffDetail);
     assertFunction("currentDiffNavigationState", currentDiffNavigationState);
     assertFunction("jumpCurrentDiffHunk", jumpCurrentDiffHunk);
@@ -1476,15 +1404,6 @@ export function createWatchCommandController(dependencies = {}) {
     );
     return true;
   }
-
-  const KNOWN_SESSION_SUBCOMMANDS = new Set([
-    "status",
-    "list",
-    "inspect",
-    "history",
-    "resume",
-    "fork",
-  ]);
 
   function printHelp() {
     const helpEvent = pushEvent(
@@ -2073,14 +1992,80 @@ export function createWatchCommandController(dependencies = {}) {
       }
 
       if (canonicalName === "/permissions") {
-        const action = buildPermissionsCommand(parsedSlash);
-        if (action.error) {
-          pushEvent("error", "Usage Error", action.error, "red");
-          return true;
+        return dispatchSessionCommand(
+          parsedSlash.args.length > 0
+            ? `/permissions ${parsedSlash.args.join(" ")}`
+            : "/permissions",
+          {
+            title: "Permissions",
+            body:
+              parsedSlash.args.length > 0
+                ? `Requested permissions command: ${parsedSlash.args.join(" ")}.`
+                : "Requested policy and approval state for the active runtime.",
+            allowBootstrapQueue: false,
+          },
+        );
+      }
+
+      if (canonicalName === "/sessions") {
+        const query = parsedSlash.args.join(" ").trim();
+        watchState.manualSessionsRequestPending = true;
+        watchState.manualSessionsQuery = query.length > 0 ? query : null;
+        return dispatchSessionCommand(
+          query.length > 0 ? `/session list ${query}` : "/session list",
+          {
+            title: "Session List",
+            body:
+              query.length > 0
+                ? `Requested resumable sessions matching: ${query}`
+                : "Requested resumable sessions.",
+          },
+        );
+      }
+
+      if (canonicalName === "/session") {
+        const args = parsedSlash.args.map((arg) => String(arg ?? "").trim()).filter(Boolean);
+        if ((args[0] ?? "").toLowerCase() === "list") {
+          const query = args.slice(1).join(" ").trim();
+          watchState.manualSessionsRequestPending = true;
+          watchState.manualSessionsQuery = query.length > 0 ? query : null;
         }
-        return dispatchSessionCommand(action.content, {
-          title: action.title,
-          body: action.body,
+        return dispatchSessionCommand(
+          args.length > 0 ? `/session ${args.join(" ")}` : "/session status",
+          {
+            title: "Session",
+            body:
+              args.length > 0
+                ? `Requested session command: ${args.join(" ")}.`
+                : "Requested current session status.",
+          },
+        );
+      }
+
+      if (canonicalName === "/history") {
+        const limit = Number(firstArg);
+        return dispatchSessionCommand(
+          Number.isFinite(limit) && limit > 0
+            ? `/session history --limit ${Math.floor(limit)}`
+            : "/session history",
+          {
+            title: "Session History",
+            body:
+              Number.isFinite(limit) && limit > 0
+                ? `Requested recent session history (limit ${Math.floor(limit)}).`
+                : "Requested recent session history.",
+          },
+        );
+      }
+
+      if (canonicalName === "/diff") {
+        const content =
+          parsedSlash.args.length > 0 ? `/diff ${parsedSlash.args.join(" ")}` : "/diff";
+        return dispatchSessionCommand(content, {
+          title: "Diff",
+          body: parsedSlash.args.length > 0
+            ? `Requested diff command: ${parsedSlash.args.join(" ")}.`
+            : "Requested the canonical diff surface.",
           allowBootstrapQueue: false,
         });
       }
@@ -2098,8 +2083,8 @@ export function createWatchCommandController(dependencies = {}) {
         });
       }
 
-      if (canonicalName === "/diff") {
-        const action = buildDiffCommand(parsedSlash, {
+      if (canonicalName === "/diff-view") {
+        const action = buildDiffViewCommand(parsedSlash, {
           openLatestDiffDetail,
           currentDiffNavigationState,
           jumpCurrentDiffHunk,
@@ -2223,18 +2208,20 @@ export function createWatchCommandController(dependencies = {}) {
       }
 
       if (canonicalName === "/memory") {
-        if (shouldQueueOperatorInput()) {
-          return maybeQueue("session bootstrap not complete");
-        }
-        const query = (firstArg ?? "").trim();
-        if (query) {
-          pushEvent("operator", "Memory Search", `Searching memory for: ${query}`, "teal");
-          send("memory.search", authPayload({ query }));
-        } else {
-          pushEvent("operator", "Memory Sessions", "Fetching memory sessions.", "teal");
-          send("memory.sessions", authPayload({ limit: 20 }));
-        }
-        return true;
+        const args = parsedSlash.args.join(" ").trim();
+        const content =
+          args.length > 0 && !/^(search|stats|health|recent|forget|pin|export)(\s|$)/i.test(args)
+            ? `/memory search ${args}`
+            : args.length > 0
+              ? `/memory ${args}`
+              : "/memory recent";
+        return dispatchSessionCommand(content, {
+          title: "Memory",
+          body:
+            args.length > 0
+              ? `Requested memory command: ${content.slice("/memory ".length)}.`
+              : "Requested recent memory entries.",
+        });
       }
 
       if (canonicalName === "/new") {
@@ -2264,48 +2251,6 @@ export function createWatchCommandController(dependencies = {}) {
         );
         send("chat.new", authPayload());
         return true;
-      }
-
-      if (canonicalName === "/sessions") {
-        const query = parsedSlash.args.join(" ").trim();
-        watchState.manualSessionsRequestPending = true;
-        watchState.manualSessionsQuery = query.length > 0 ? query : null;
-        return dispatchSessionCommand(
-          query.length > 0 ? `/session list ${query}` : "/session list",
-          {
-            title: "Session List",
-            body:
-              query.length > 0
-                ? `Requested resumable sessions matching: ${query}`
-                : "Requested resumable sessions.",
-          },
-        );
-      }
-
-      if (canonicalName === "/session") {
-        const args = parsedSlash.args.map((arg) => String(arg ?? "").trim()).filter(Boolean);
-        if (args.length === 0) {
-          return dispatchSessionCommand("/session status", {
-            title: "Session Status",
-            body: "Requested current session status.",
-          });
-        }
-        const firstSubcommand = args[0].toLowerCase();
-        if (KNOWN_SESSION_SUBCOMMANDS.has(firstSubcommand)) {
-          if (firstSubcommand === "list") {
-            const query = args.slice(1).join(" ").trim();
-            watchState.manualSessionsRequestPending = true;
-            watchState.manualSessionsQuery = query.length > 0 ? query : null;
-          }
-          return dispatchSessionCommand(`/session ${args.join(" ")}`, {
-            title: "Session",
-            body: `Requested session command: ${args.join(" ")}.`,
-          });
-        }
-        return dispatchSessionCommand(`/session resume ${args[0]}`, {
-          title: "Session Resume",
-          body: `Resuming ${args[0]}.`,
-        });
       }
 
       if (canonicalName === "/session-label") {
@@ -2367,17 +2312,6 @@ export function createWatchCommandController(dependencies = {}) {
         return true;
       }
 
-      if (canonicalName === "/history") {
-        watchState.manualHistoryRequestPending = true;
-        const limit = Number(firstArg);
-        const payload = Number.isFinite(limit) && limit > 0
-          ? authPayload({ limit: Math.floor(limit) })
-          : authPayload();
-        pushEvent("operator", "History Query", "Requested recent chat history.", "teal");
-        send("chat.history", payload);
-        return true;
-      }
-
       if (canonicalName === "/runs") {
         pushEvent("operator", "Run List", "Requested active runs for this session.", "teal");
         send("runs.list", watchState.sessionId ? { sessionId: watchState.sessionId } : {});
@@ -2427,10 +2361,10 @@ export function createWatchCommandController(dependencies = {}) {
       }
 
       if (canonicalName === "/status") {
-        watchState.manualStatusRequestPending = true;
-        pushEvent("operator", "Gateway Status", "Requested daemon status.", "teal");
-        send("status.get", {});
-        return true;
+        return dispatchSessionCommand("/status", {
+          title: "Gateway Status",
+          body: "Requested daemon status.",
+        });
       }
 
       if (canonicalName === "/cancel") {

@@ -9,6 +9,7 @@
 
 // Re-export the canonical WebChatHandler from gateway/types to avoid duplication
 export type { WebChatHandler } from "../../gateway/types.js";
+export type { SessionResumabilityState } from "../../gateway/watch-cockpit.js";
 import type { GatewayStatus } from "../../gateway/types.js";
 import type {
   HookDispatcher,
@@ -33,6 +34,12 @@ import type {
   ObservabilityTraceSummary,
 } from "../../observability/types.js";
 import type { WatchCockpitSnapshot } from "../../gateway/watch-cockpit.js";
+import type {
+  ReviewSurfaceState,
+  SessionResumabilityState,
+  VerificationSurfaceState,
+  VerificationVerdict,
+} from "../../gateway/watch-cockpit.js";
 import type { SessionShellProfile } from "../../gateway/shell-profile.js";
 import type { SessionWorkflowState } from "../../gateway/workflow-state.js";
 import type { SlashCommandRegistry } from "../../gateway/commands.js";
@@ -68,12 +75,6 @@ export interface WebChatHookListEntry {
   target?: string;
   supported: boolean;
 }
-
-export type SessionResumabilityState =
-  | "active"
-  | "disconnected-resumable"
-  | "missing-workspace"
-  | "non-resumable";
 
 export interface SessionContinuityRecord {
   readonly sessionId: string;
@@ -114,18 +115,32 @@ export interface SessionContinuityDetail extends SessionContinuityRecord {
   readonly workflowState: SessionWorkflowState;
   readonly runtimeState?: {
     readonly activeTaskContext?: ActiveTaskContext;
-    readonly reviewStatus?: string;
-    readonly verificationStatus?: string;
-    readonly verificationVerdict?: string;
+    readonly reviewStatus?: ReviewSurfaceState["status"];
+    readonly verificationStatus?: VerificationSurfaceState["status"];
+    readonly verificationVerdict?: VerificationVerdict;
   };
   readonly recentHistory?: readonly SessionHistoryItem[];
   readonly backgroundRun?: {
     readonly runId: string;
-    readonly state: string;
-    readonly currentPhase?: string;
+    readonly state: BackgroundRunOperatorSummary["state"];
+    readonly currentPhase?: BackgroundRunOperatorSummary["currentPhase"];
     readonly objective?: string;
     readonly checkpointAvailable?: boolean;
   };
+}
+
+export interface SessionResumePayload {
+  readonly sessionId: string;
+  readonly messageCount: number;
+  readonly workspaceRoot?: string;
+  readonly shellProfile?: SessionShellProfile;
+}
+
+export interface SessionForkResult {
+  readonly sourceSessionId: string;
+  readonly targetSessionId: string;
+  readonly forkSource?: string;
+  readonly session?: SessionContinuityRecord;
 }
 
 export interface WebChatDeps {
