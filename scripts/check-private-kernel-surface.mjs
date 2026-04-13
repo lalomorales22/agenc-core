@@ -6,6 +6,12 @@ import process from 'node:process';
 
 const repoRoot = process.cwd();
 const failures = [];
+const runtimeVersion = readJson('runtime/package.json').version;
+const mcpVersion = readJson('mcp/package.json').version;
+
+function escapeRegexLiteral(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 function readJson(relPath) {
   return JSON.parse(readFileSync(path.join(repoRoot, relPath), 'utf8'));
@@ -70,8 +76,14 @@ const requiredDocPatterns = {
     /PRIVATE_KERNEL_DISTRIBUTION\.md/u,
   ],
   'docs/VERSION_DOCS_MAP.md': [
-    /## @tetsuo-ai\/runtime v0\.1\.0[\s\S]*Classification: Transitional private-kernel artifact; not a supported public builder target[\s\S]*Distribution policy: `docs\/PRIVATE_KERNEL_DISTRIBUTION\.md`/u,
-    /## @tetsuo-ai\/mcp v0\.1\.0[\s\S]*Classification: Transitional private-kernel artifact; not a supported public extension target[\s\S]*Distribution policy: `docs\/PRIVATE_KERNEL_DISTRIBUTION\.md`/u,
+    new RegExp(
+      `## @tetsuo-ai/runtime v${escapeRegexLiteral(runtimeVersion)}[\\s\\S]*Classification: Transitional private-kernel artifact; not a supported public builder target[\\s\\S]*Distribution policy: \`docs/PRIVATE_KERNEL_DISTRIBUTION\\.md\``,
+      'u',
+    ),
+    new RegExp(
+      `## @tetsuo-ai/mcp v${escapeRegexLiteral(mcpVersion)}[\\s\\S]*Classification: Transitional private-kernel artifact; not a supported public extension target[\\s\\S]*Distribution policy: \`docs/PRIVATE_KERNEL_DISTRIBUTION\\.md\``,
+      'u',
+    ),
   ],
   'runtime/README.md': [
     /^Implementation runtime package for AgenC\.$/mu,
