@@ -1617,6 +1617,56 @@ describe("WebChatChannel", () => {
       ]);
     });
 
+    it("revalidates persisted ownership when the in-memory owner cache is stale", async () => {
+      const memoryBackend = new InMemoryBackend();
+      deps = createDeps({ memoryBackend });
+      context = createContext();
+      channel = new WebChatChannel(deps);
+      await channel.initialize(context);
+      await channel.start();
+
+      const send1 = vi.fn<(response: ControlResponse) => void>();
+      channel.handleMessage(
+        "client_1",
+        "chat.message",
+        msg("chat.message", { content: "Hello" }),
+        send1,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const ownerToken = requireOwnerToken(send1);
+      const sessionId = vi.mocked(context.onMessage).mock.calls[0][0].sessionId;
+
+      await channel.stop();
+
+      const send2 = vi.fn<(response: ControlResponse) => void>();
+      const hydrateSessionContext = vi.fn().mockResolvedValue(undefined);
+      const channel2 = new WebChatChannel(
+        createDeps({ memoryBackend, hydrateSessionContext }),
+      );
+      const context2 = createContext();
+      await channel2.initialize(context2);
+      await channel2.start();
+
+      (channel2 as unknown as { sessionOwners: Map<string, string> }).sessionOwners.set(
+        sessionId,
+        "owner:stale-cache",
+      );
+
+      channel2.handleMessage(
+        "client_2",
+        "chat.session.resume",
+        msg("chat.session.resume", { sessionId, ownerToken }, "req-resume"),
+        send2,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(hydrateSessionContext).toHaveBeenCalledWith(sessionId);
+      expect(findResponse(send2, "chat.session.resumed", "req-resume")?.payload).toEqual(
+        expect.objectContaining({ sessionId }),
+      );
+    });
+
     it("persists workspace roots and keeps session affinity when later requests arrive from another project", async () => {
       const workspaceRootA = createWorkspaceRoot("agenc-webchat-root-a-");
       const workspaceRootB = createWorkspaceRoot("agenc-webchat-root-b-");

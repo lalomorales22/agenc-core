@@ -1670,11 +1670,17 @@ test("command controller forwards canonical /session subcommands without watch-l
   const payloads = calls
     .filter((entry) => entry.type === "send" && entry.frameType === "session.command.execute")
     .map((entry) => entry.payload?.content ?? "");
+  const resumeFrames = calls.filter(
+    (entry) => entry.type === "send" && entry.frameType === "chat.session.resume",
+  );
 
   assert.ok(payloads.includes("/session status"));
   assert.ok(payloads.includes("/session list"));
-  assert.ok(payloads.includes("/session resume sess-2"));
   assert.ok(payloads.includes("/session sess-3"));
+  assert.deepEqual(
+    resumeFrames.map((entry) => entry.payload?.sessionId),
+    ["sess-2"],
+  );
   assert.equal(calls.some((entry) => entry.type === "send"), true);
 });
 

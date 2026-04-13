@@ -1394,12 +1394,23 @@ export function createWatchCommandController(dependencies = {}) {
       return maybeQueue("session bootstrap not complete");
     }
     pushEvent("operator", title, body, tone);
+    const trimmedContent = String(content ?? "").trim();
+    const sessionResumeMatch = trimmedContent.match(/^\/session\s+resume\s+(\S+)\s*$/i);
+    if (sessionResumeMatch?.[1]) {
+      send(
+        "chat.session.resume",
+        authPayload({
+          sessionId: sessionResumeMatch[1],
+        }),
+      );
+      return true;
+    }
     send(
       "session.command.execute",
       authPayload({
         ...(watchState.sessionId ? { sessionId: watchState.sessionId } : {}),
         client: "console",
-        content,
+        content: trimmedContent,
       }),
     );
     return true;

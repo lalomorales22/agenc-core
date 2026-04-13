@@ -2028,13 +2028,16 @@ export class WebChatChannel
   ): Promise<boolean> {
     const cachedOwner = this.sessionOwners.get(sessionId);
     if (cachedOwner) {
-      return cachedOwner === ownerKey || cachedOwner === `volatile:${clientId}`;
+      if (cachedOwner === ownerKey || cachedOwner === `volatile:${clientId}`) {
+        return true;
+      }
     }
     const persisted = await this.sessionStore?.loadSession(sessionId);
     if (!persisted) {
       return false;
     }
     this.sessionOwners.set(sessionId, persisted.ownerKey);
+    this.rememberPersistedSessionMetadata(sessionId, persisted);
     return persisted.ownerKey === ownerKey;
   }
 
