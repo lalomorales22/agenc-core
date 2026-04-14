@@ -991,6 +991,75 @@ const TASK_JOB_SPEC_INSTRUCTIONS = [
       { name: "job_spec_uri", type: "string" },
     ],
   },
+  {
+    name: "claim_task_with_job_spec",
+    docs: ["Claim a task only when its verified marketplace job spec metadata exists."],
+    discriminator: [230, 40, 107, 109, 208, 228, 175, 31],
+    accounts: [
+      {
+        name: "task",
+        writable: true,
+        pda: {
+          seeds: [
+            { kind: "const", value: [116, 97, 115, 107] },
+            { kind: "account", path: "task.creator", account: "Task" },
+            { kind: "account", path: "task.task_id", account: "Task" },
+          ],
+        },
+      },
+      {
+        name: "task_job_spec",
+        pda: {
+          seeds: [
+            {
+              kind: "const",
+              value: [
+                116, 97, 115, 107, 95, 106, 111, 98, 95, 115, 112, 101, 99,
+              ],
+            },
+            { kind: "account", path: "task" },
+          ],
+        },
+      },
+      {
+        name: "claim",
+        writable: true,
+        pda: {
+          seeds: [
+            { kind: "const", value: [99, 108, 97, 105, 109] },
+            { kind: "account", path: "task" },
+            { kind: "account", path: "worker" },
+          ],
+        },
+      },
+      {
+        name: "protocol_config",
+        pda: {
+          seeds: [{ kind: "const", value: [112, 114, 111, 116, 111, 99, 111, 108] }],
+        },
+      },
+      {
+        name: "worker",
+        writable: true,
+        pda: {
+          seeds: [
+            { kind: "const", value: [97, 103, 101, 110, 116] },
+            {
+              kind: "account",
+              path: "worker.agent_id",
+              account: "AgentRegistration",
+            },
+          ],
+        },
+      },
+      { name: "authority", writable: true, signer: true },
+      {
+        name: "system_program",
+        address: "11111111111111111111111111111111",
+      },
+    ],
+    args: [],
+  },
 ] as const;
 
 const TASK_VALIDATION_V2_ACCOUNTS = [

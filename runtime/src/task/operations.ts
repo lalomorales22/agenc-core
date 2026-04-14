@@ -55,6 +55,14 @@ import { parseAgentState } from "../agent/types.js";
 import { fetchTreasury } from "../utils/treasury.js";
 import { buildCompleteTaskTokenAccounts } from "../utils/token.js";
 import {
+  type MarketplaceJobSpecStoreOptions,
+  resolveMarketplaceJobSpecReference,
+} from "../marketplace/job-spec-store.js";
+import {
+  fetchTaskJobSpecPointer,
+  type OnChainTaskJobSpecPointer,
+} from "../marketplace/task-job-spec.js";
+import {
   isAnchorError,
   parseAnchorError,
   TaskNotClaimableError,
@@ -104,6 +112,19 @@ export interface TaskOpsConfig {
   agentId: Uint8Array;
   /** Logger instance (defaults to silent logger) */
   logger?: Logger;
+  /** Root directory for marketplace job spec objects and task links */
+  jobSpecStoreDir?: string;
+  /** Allow claim-time verification to fetch remote https job specs. Defaults to false. */
+  allowRemoteJobSpecResolution?: boolean;
+  /**
+   * Claim-time job spec verification policy.
+   *
+   * - "when-present" (default): verify marketplace job specs when the on-chain
+   *   task_job_spec pointer exists, while preserving legacy raw task claiming.
+   * - "required": require every task to have a verified job spec before claim.
+   * - "disabled": do not perform off-chain job spec verification before claim.
+   */
+  claimJobSpecVerification?: "when-present" | "required" | "disabled";
 }
 
 // ============================================================================
@@ -135,6 +156,11 @@ export class TaskOperations {
   private readonly program: Program<AgencCoordination>;
   private readonly agentId: Uint8Array;
   private readonly logger: Logger;
+  private readonly jobSpecStoreOptions: MarketplaceJobSpecStoreOptions;
+  private readonly claimJobSpecVerification:
+    | "when-present"
+    | "required"
+    | "disabled";
 
   // Cached PDAs
   private cachedAgentPda: PublicKey | null = null;
@@ -144,6 +170,12 @@ export class TaskOperations {
     this.program = config.program;
     this.agentId = new Uint8Array(config.agentId);
     this.logger = config.logger ?? silentLogger;
+    this.jobSpecStoreOptions = {
+      ...(config.jobSpecStoreDir ? { rootDir: config.jobSpecStoreDir } : {}),
+      allowRemote: config.allowRemoteJobSpecResolution ?? false,
+    };
+    this.claimJobSpecVerification =
+      config.claimJobSpecVerification ?? "when-present";
   }
 
   // ==========================================================================
@@ -383,6 +415,9 @@ export class TaskOperations {
    * @returns Claim result with signature and claim PDA
    */
   async claimTask(taskPda: PublicKey, task: OnChainTask): Promise<ClaimResult> {
+    const verifiedJobSpecPointer =
+      await this.assertClaimJobSpecVerified(taskPda);
+
     const workerPda = this.getAgentPda();
     const { address: claimPda } = deriveClaimPda(
       taskPda,
@@ -394,17 +429,28 @@ export class TaskOperations {
     this.logger.info(`Claiming task ${taskPda.toBase58()}`);
 
     try {
-      const signature = await this.program.methods
-        .claimTask()
-        .accountsPartial({
-          task: taskPda,
-          claim: claimPda,
-          protocolConfig: protocolPda,
-          worker: workerPda,
-          authority: this.program.provider.publicKey,
-          systemProgram: SystemProgram.programId,
-        })
-        .rpc();
+      const baseAccounts = {
+        task: taskPda,
+        claim: claimPda,
+        protocolConfig: protocolPda,
+        worker: workerPda,
+        authority: this.program.provider.publicKey,
+        systemProgram: SystemProgram.programId,
+      };
+      const signature = verifiedJobSpecPointer
+        ? await (this.program.methods as any)
+            .claimTaskWithJobSpec()
+            .accountsPartial({
+              ...baseAccounts,
+              taskJobSpec: new PublicKey(
+                verifiedJobSpecPointer.taskJobSpecPda,
+              ),
+            })
+            .rpc()
+        : await this.program.methods
+            .claimTask()
+            .accountsPartial(baseAccounts)
+            .rpc();
 
       this.logger.info(`Task claimed: ${signature}`);
 
@@ -472,6 +518,50 @@ export class TaskOperations {
       this.logger.error(`Failed to claim task ${taskPda.toBase58()}: ${err}`);
       throw err;
     }
+  }
+
+  /**
+   * Fail closed for marketplace tasks whose on-chain job spec metadata exists
+   * but cannot be resolved and integrity-verified locally/remotely.
+   */
+  private async assertClaimJobSpecVerified(
+    taskPda: PublicKey,
+  ): Promise<OnChainTaskJobSpecPointer | null> {
+    if (this.claimJobSpecVerification === "disabled") return null;
+
+    let pointer: Awaited<ReturnType<typeof fetchTaskJobSpecPointer>>;
+    try {
+      pointer = await fetchTaskJobSpecPointer(this.program, taskPda);
+    } catch (err) {
+      throw new TaskNotClaimableError(
+        taskPda,
+        `Unable to verify task job spec metadata before claim: ${formatUnknownError(err)}`,
+      );
+    }
+
+    if (!pointer) {
+      if (this.claimJobSpecVerification === "required") {
+        throw new TaskNotClaimableError(
+          taskPda,
+          "No verified task job spec metadata found before claim",
+        );
+      }
+      return null;
+    }
+
+    try {
+      await resolveMarketplaceJobSpecReference(
+        pointer,
+        this.jobSpecStoreOptions,
+      );
+    } catch (err) {
+      throw new TaskNotClaimableError(
+        taskPda,
+        `Task job spec could not be verified before claim: ${formatUnknownError(err)}`,
+      );
+    }
+
+    return pointer;
   }
 
   /**
@@ -1445,4 +1535,8 @@ function isAccountNotFoundError(err: unknown): boolean {
     (err.message.includes("Account does not exist") ||
       err.message.includes("could not find"))
   );
+}
+
+function formatUnknownError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }

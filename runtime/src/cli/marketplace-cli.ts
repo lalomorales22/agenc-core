@@ -1234,7 +1234,16 @@ export async function runMarketTaskClaimCommand(
 
   try {
     const { program } = await createSignerProgramContext(options);
-    const tool = createClaimTaskTool(program, silentLogger);
+    const tool = createClaimTaskTool(
+      program,
+      silentLogger,
+      options.jobSpecStoreDir
+        ? {
+            jobSpecStoreDir: options.jobSpecStoreDir,
+            claimJobSpecVerification: "required",
+          }
+        : {},
+    );
     const result = await tool.execute({
       taskPda: options.taskPda,
       workerAgentPda: options.workerAgentPda,
