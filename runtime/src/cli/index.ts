@@ -672,7 +672,7 @@ const MARKET_COMMAND_OPTIONS: Record<MarketCommand, Set<string>> = {
   ]),
   "tasks.detail": new Set(["job-spec-store-dir"]),
   "tasks.cancel": new Set(),
-  "tasks.claim": new Set(["worker-agent-pda"]),
+  "tasks.claim": new Set(["worker-agent-pda", "job-spec-store-dir"]),
   "tasks.complete": new Set(["proof-hash", "result-data", "worker-agent-pda"]),
   "tasks.dispute": new Set([
     "evidence",
@@ -2954,6 +2954,9 @@ function normalizeAndValidateMarketCommand(
         ...base,
         taskPda,
         workerAgentPda: parseOptionalStringFlag(parsed.flags["worker-agent-pda"]),
+        jobSpecStoreDir: parseOptionalStringFlag(
+          parsed.flags["job-spec-store-dir"],
+        ),
       } as MarketTaskClaimOptions;
       break;
     }

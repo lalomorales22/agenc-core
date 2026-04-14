@@ -1073,9 +1073,10 @@ export async function runMarketTaskCreateCommand(
 
   try {
     const { program } = await createSignerProgramContext(options);
-    const createTaskOptions = options.jobSpecStoreDir
-      ? { jobSpecStoreDir: options.jobSpecStoreDir }
-      : undefined;
+    const createTaskOptions = {
+      ...(options.jobSpecStoreDir ? { jobSpecStoreDir: options.jobSpecStoreDir } : {}),
+      allowRawTaskCreation: true,
+    };
     const tool = createCreateTaskTool(program, silentLogger, createTaskOptions);
     const result = await tool.execute({
       description: options.description,
@@ -1233,7 +1234,16 @@ export async function runMarketTaskClaimCommand(
 
   try {
     const { program } = await createSignerProgramContext(options);
-    const tool = createClaimTaskTool(program, silentLogger);
+    const tool = createClaimTaskTool(
+      program,
+      silentLogger,
+      options.jobSpecStoreDir
+        ? {
+            jobSpecStoreDir: options.jobSpecStoreDir,
+            claimJobSpecVerification: "required",
+          }
+        : {},
+    );
     const result = await tool.execute({
       taskPda: options.taskPda,
       workerAgentPda: options.workerAgentPda,

@@ -571,6 +571,10 @@ async function resolveUniqueWorkerClaimForTask(
 export function createClaimTaskTool(
   program: Program<AgencCoordination>,
   logger: Logger,
+  options: {
+    jobSpecStoreDir?: string;
+    claimJobSpecVerification?: "when-present" | "required" | "disabled";
+  } = {},
 ): Tool {
   return {
     name: 'agenc.claimTask',
@@ -605,6 +609,12 @@ export function createClaimTaskTool(
           program,
           agentId: signerAgent.agentId,
           logger,
+          ...(options.jobSpecStoreDir
+            ? { jobSpecStoreDir: options.jobSpecStoreDir }
+            : {}),
+          ...(options.claimJobSpecVerification
+            ? { claimJobSpecVerification: options.claimJobSpecVerification }
+            : {}),
         });
         const task = await ops.fetchTask(taskPda);
         if (!task) return errorResult(`Task not found: ${taskPda.toBase58()}`);

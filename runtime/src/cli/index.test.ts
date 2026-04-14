@@ -783,6 +783,8 @@ describe("runtime root CLI", () => {
         "Task111111111111111111111111111111111111111",
         "--worker-agent-pda",
         "Agent11111111111111111111111111111111111111",
+        "--job-spec-store-dir",
+        "/tmp/agenc-job-specs",
         "--output",
         "json",
       ],
@@ -797,6 +799,7 @@ describe("runtime root CLI", () => {
       expect.objectContaining({
         taskPda: "Task111111111111111111111111111111111111111",
         workerAgentPda: "Agent11111111111111111111111111111111111111",
+        jobSpecStoreDir: "/tmp/agenc-job-specs",
       }),
     );
   });

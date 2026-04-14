@@ -1,4 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PublicKey, Keypair, SystemProgram } from "@solana/web3.js";
 import { utils } from "@coral-xyz/anchor";
 import {
@@ -20,6 +23,7 @@ import {
   AnchorErrorCodes,
 } from "../types/errors.js";
 import { silentLogger } from "../utils/logger.js";
+import { persistMarketplaceJobSpec } from "../marketplace/job-spec-store.js";
 import {
   PROGRAM_ID,
   HASH_SIZE,
@@ -237,6 +241,9 @@ function createMockProgram() {
 
   const taskFetch = vi.fn();
   const taskAll = vi.fn().mockResolvedValue([]);
+  const taskJobSpecFetch = vi
+    .fn()
+    .mockRejectedValue(new Error("Account does not exist"));
   const taskClaimFetch = vi.fn();
   const taskClaimAll = vi.fn().mockResolvedValue([]);
   const protocolConfigFetch = vi.fn().mockResolvedValue({
@@ -247,6 +254,9 @@ function createMockProgram() {
     .mockResolvedValue(createMockRawAgentRegistration(providerPublicKey));
 
   const claimTaskRpc = vi.fn().mockResolvedValue("claim-sig");
+  const claimTaskWithJobSpecRpc = vi
+    .fn()
+    .mockResolvedValue("claim-with-job-spec-sig");
   const completeTaskRpc = vi.fn().mockResolvedValue("complete-sig");
   const completeTaskPrivateRpc = vi.fn().mockResolvedValue("private-sig");
   const configureTaskValidationRpc = vi.fn().mockResolvedValue("configure-sig");
@@ -259,6 +269,10 @@ function createMockProgram() {
   const claimTaskBuilder = {
     accountsPartial: vi.fn().mockReturnThis(),
     rpc: claimTaskRpc,
+  };
+  const claimTaskWithJobSpecBuilder = {
+    accountsPartial: vi.fn().mockReturnThis(),
+    rpc: claimTaskWithJobSpecRpc,
   };
 
   const completeTaskBuilder = {
@@ -331,12 +345,14 @@ function createMockProgram() {
     },
     account: {
       task: { fetch: taskFetch, all: taskAll },
+      taskJobSpec: { fetch: taskJobSpecFetch },
       taskClaim: { fetch: taskClaimFetch, all: taskClaimAll },
       protocolConfig: { fetch: protocolConfigFetch },
       agentRegistration: { fetch: agentRegistrationFetch },
     },
     methods: {
       claimTask: vi.fn().mockReturnValue(claimTaskBuilder),
+      claimTaskWithJobSpec: vi.fn().mockReturnValue(claimTaskWithJobSpecBuilder),
       completeTask: vi.fn().mockReturnValue(completeTaskBuilder),
       completeTaskPrivate: completeTaskPrivateMethod,
       configureTaskValidation: configureTaskValidationMethod,
@@ -353,6 +369,7 @@ function createMockProgram() {
     mocks: {
       taskFetch,
       taskAll,
+      taskJobSpecFetch,
       taskClaimFetch,
       taskClaimAll,
       protocolConfigFetch,
@@ -362,6 +379,7 @@ function createMockProgram() {
       getTokenAccountBalance,
       coderAccountsMemcmp,
       claimTaskRpc,
+      claimTaskWithJobSpecRpc,
       completeTaskRpc,
       completeTaskPrivateRpc,
       configureTaskValidationRpc,
@@ -378,6 +396,7 @@ function createMockProgram() {
       autoAcceptTaskResultMethod,
       validateTaskResultMethod,
       claimTaskBuilder,
+      claimTaskWithJobSpecBuilder,
       completeTaskBuilder,
       completeTaskPrivateBuilder,
       configureTaskValidationBuilder,
@@ -405,6 +424,10 @@ describe("TaskOperations", () => {
       agentId,
       logger: silentLogger,
     });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   describe("constructor", () => {
@@ -729,6 +752,98 @@ describe("TaskOperations", () => {
           systemProgram: SystemProgram.programId,
         }),
       );
+    });
+
+    it("uses claimTaskWithJobSpec when verified job spec metadata exists", async () => {
+      const taskPda = Keypair.generate().publicKey;
+      const task = createParsedTask();
+      const storeDir = await mkdtemp(join(tmpdir(), "agenc-job-spec-"));
+      const stored = await persistMarketplaceJobSpec(
+        {
+          description: "Verified marketplace task",
+          acceptanceCriteria: ["Do the verified work"],
+          deliverables: ["A short report"],
+        },
+        { rootDir: storeDir },
+      );
+      const jobSpecHashBytes = Uint8Array.from(Buffer.from(stored.hash, "hex"));
+      const opsWithStore = new TaskOperations({
+        program: mockProgram,
+        agentId,
+        logger: silentLogger,
+        jobSpecStoreDir: storeDir,
+      });
+
+      mocks.taskJobSpecFetch.mockResolvedValue({
+        task: taskPda,
+        creator: Keypair.generate().publicKey,
+        jobSpecHash: Array.from(jobSpecHashBytes),
+        jobSpecUri: stored.uri,
+        createdAt: { toNumber: () => 1700000000 },
+        updatedAt: { toNumber: () => 1700000000 },
+        bump: 255,
+      });
+
+      const result = await opsWithStore.claimTask(taskPda, task);
+
+      expect(result.transactionSignature).toBe("claim-with-job-spec-sig");
+      expect(mocks.claimTaskRpc).not.toHaveBeenCalled();
+      expect(mocks.claimTaskWithJobSpecRpc).toHaveBeenCalledOnce();
+      expect(
+        mocks.claimTaskWithJobSpecBuilder.accountsPartial,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({
+          task: taskPda,
+          taskJobSpec: expect.any(PublicKey),
+          systemProgram: SystemProgram.programId,
+        }),
+      );
+    });
+
+    it("rejects marketplace claims when on-chain jobSpec metadata cannot be verified", async () => {
+      const taskPda = Keypair.generate().publicKey;
+      const task = createParsedTask();
+      const jobSpecHashBytes = new Uint8Array(32).fill(0xab);
+      const jobSpecHash = Buffer.from(jobSpecHashBytes).toString("hex");
+
+      mocks.taskJobSpecFetch.mockResolvedValue({
+        task: taskPda,
+        creator: Keypair.generate().publicKey,
+        jobSpecHash: Array.from(jobSpecHashBytes),
+        jobSpecUri: `agenc://job-spec/sha256/${jobSpecHash}`,
+        createdAt: { toNumber: () => 1700000000 },
+        updatedAt: { toNumber: () => 1700000000 },
+        bump: 255,
+      });
+
+      await expect(ops.claimTask(taskPda, task)).rejects.toThrow(
+        /Task job spec could not be verified before claim/,
+      );
+      expect(mocks.claimTaskBuilder.rpc).not.toHaveBeenCalled();
+    });
+
+    it("does not fetch remote jobSpec URIs during claim-time verification", async () => {
+      const taskPda = Keypair.generate().publicKey;
+      const task = createParsedTask();
+      const jobSpecHashBytes = new Uint8Array(32).fill(0xcd);
+      const fetchSpy = vi.fn();
+      vi.stubGlobal("fetch", fetchSpy);
+
+      mocks.taskJobSpecFetch.mockResolvedValue({
+        task: taskPda,
+        creator: Keypair.generate().publicKey,
+        jobSpecHash: Array.from(jobSpecHashBytes),
+        jobSpecUri: "https://metadata.attacker.invalid/job-spec.json",
+        createdAt: { toNumber: () => 1700000000 },
+        updatedAt: { toNumber: () => 1700000000 },
+        bump: 255,
+      });
+
+      await expect(ops.claimTask(taskPda, task)).rejects.toThrow(
+        /remote marketplace jobSpec URI resolution is disabled/,
+      );
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(mocks.claimTaskBuilder.rpc).not.toHaveBeenCalled();
     });
 
     it("throws TaskNotClaimableError on TaskFullyClaimed", async () => {

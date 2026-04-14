@@ -15,6 +15,19 @@ The goal of this roadmap is to make the program correct, predictable, and
 ready for an on-chain audit before mainnet deployment or SDK integration.
 
 
+## Current hardening delta
+
+The marketplace job specification flow is part of the active hardening scope.
+Runtime claims for marketplace tasks must verify the content-addressed job spec
+before signing a claim transaction, and the coordination program exposes a
+`claim_task_with_job_spec` path that requires the matching `task_job_spec` PDA.
+
+This is an allowed freeze-period change because it narrows the execution surface:
+workers should not claim marketplace work from prompt text or remote payloads
+that have not been matched to the on-chain job spec hash and URI. Protocol,
+SDK, and runtime changes for this surface must be validated together.
+
+
 ## Guiding principle
 
 No new features are added until correctness is proven. This phase is about reducing risk, not increasing surface area. The program should become boring to read and impossible to surprise.

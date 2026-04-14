@@ -80,6 +80,7 @@ export interface MarketplaceJobSpecInput {
 
 export interface MarketplaceJobSpecStoreOptions {
   readonly rootDir?: string;
+  readonly allowRemote?: boolean;
 }
 
 export class MarketplaceJobSpecNotFoundError extends Error {
@@ -313,6 +314,9 @@ export async function resolveMarketplaceJobSpecReference(
   );
   const expectedUri = canonicalJobSpecUri(reference.jobSpecHash);
   const isRemote = isRemoteJobSpecUri(jobSpecUri);
+  if (isRemote && options.allowRemote === false) {
+    throw new Error("remote marketplace jobSpec URI resolution is disabled");
+  }
 
   const rootDir = options.rootDir ?? getDefaultMarketplaceJobSpecStoreDir();
   const jobSpecPath = isRemote
