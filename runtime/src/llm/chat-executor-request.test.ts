@@ -11,6 +11,9 @@ import type {
 } from "./types.js";
 import type { GatewayMessage } from "../gateway/message.js";
 import type { ArtifactCompactionState } from "../memory/artifact-store.js";
+import * as hooks from "./hooks/index.js";
+import { HookRegistry } from "./hooks/index.js";
+import { LLMProviderError } from "./errors.js";
 
 // ============================================================================
 // Shared helpers
@@ -188,7 +191,7 @@ describe("ChatExecutor request assembly", () => {
   });
 
   describe("stateful session wiring and result assembly", () => {
-    it("injects the request milestone contract before the first model call", async () => {
+    it("does not inject a request milestone contract before the first model call", async () => {
       const provider = createMockProvider("primary", {
         chat: vi.fn().mockResolvedValue(mockResponse({ content: "ok" })),
       });
@@ -222,10 +225,7 @@ describe("ChatExecutor request assembly", () => {
           message.content.includes("Request milestone contract:"),
       );
 
-      expect(instruction).toBeDefined();
-      expect(String(instruction?.content)).toContain("phase_1: Finish phase 1");
-      expect(String(instruction?.content)).toContain("metadata._runtime.milestoneIds");
-      expect(String(instruction?.content)).toContain("metadata._runtime.verification");
+      expect(instruction).toBeUndefined();
     });
 
     it("passes stateful session options through provider calls", async () => {
@@ -577,6 +577,57 @@ describe("ChatExecutor request assembly", () => {
       expect(result.statefulSummary).toBeDefined();
       expect(result.statefulSummary?.fallbackReasons.store_disabled).toBe(1);
       expect(result.statefulSummary?.attemptedCalls).toBe(0);
+    });
+
+    it("dispatches StopFailure with api error context before rethrowing", async () => {
+      const dispatchHooksSpy = vi
+        .spyOn(hooks, "dispatchHooks")
+        .mockResolvedValue({ action: "noop", outcomes: [] });
+
+      try {
+        const provider = createMockProvider("primary", {
+          chat: vi
+            .fn()
+            .mockRejectedValue(
+              new LLMProviderError("primary", "Bad request", 400),
+            ),
+        });
+        const executor = new ChatExecutor({
+          providers: [provider],
+          hookRegistry: new HookRegistry([
+            {
+              event: "StopFailure",
+              kind: "http",
+              target: "https://example.invalid/stop-failure",
+            },
+          ]),
+        });
+
+        const caught = await executor.execute(createParams()).catch((error) => error);
+        expect(caught).toBeInstanceOf(LLMProviderError);
+        const stopFailureCalls = dispatchHooksSpy.mock.calls.filter(
+          ([input]) => input.event === "StopFailure",
+        );
+        expect(stopFailureCalls).toHaveLength(1);
+        expect(stopFailureCalls[0]?.[0]).toMatchObject({
+          event: "StopFailure",
+          matchKey: "session-1",
+          context: expect.objectContaining({
+            event: "StopFailure",
+            sessionId: "session-1",
+            stopReason: "provider_error",
+            stopReasonDetail: expect.stringContaining("provider_error"),
+            failure: expect.objectContaining({
+              name: "LLMProviderError",
+              message: expect.stringContaining("Bad request"),
+              providerName: "primary",
+              statusCode: 400,
+            }),
+          }),
+        });
+      } finally {
+        dispatchHooksSpy.mockRestore();
+      }
     });
   });
 });
