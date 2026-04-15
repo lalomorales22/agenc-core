@@ -36,11 +36,11 @@ import {
   type BackgroundRunCarryForwardState,
   type BackgroundRunCompactionState,
   type BackgroundRunContract,
+  type BackgroundRunLastWakeReason,
   type BackgroundRunObservedTarget,
   type BackgroundRunRecentSnapshot,
   type BackgroundRunSignal,
   type BackgroundRunState,
-  type BackgroundRunWakeReason,
   type BackgroundRunWatchRegistration,
   type BackgroundRunWorkerPool,
   type PersistedBackgroundRun,
@@ -67,7 +67,7 @@ export interface BackgroundRunStatusSnapshot {
   readonly nextCheckAt?: number;
   readonly nextHeartbeatAt?: number;
   readonly lastUserUpdate?: string;
-  readonly lastWakeReason?: BackgroundRunWakeReason;
+  readonly lastWakeReason?: BackgroundRunLastWakeReason;
   readonly pendingSignals: number;
   readonly carryForwardSummary?: string;
   readonly blockerSummary?: string;
@@ -121,7 +121,7 @@ export interface ActiveBackgroundRun {
   lastUserUpdate?: string;
   lastToolEvidence?: string;
   lastHeartbeatContent?: string;
-  lastWakeReason?: BackgroundRunWakeReason;
+  lastWakeReason?: BackgroundRunLastWakeReason;
   completionProgress?: WorkflowProgressSnapshot;
   carryForward?: BackgroundRunCarryForwardState;
   blocker?: BackgroundRunBlockerState;

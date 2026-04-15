@@ -2,7 +2,10 @@ import { createHash } from "node:crypto";
 
 import type { LLMMessage } from "./types.js";
 import { extractToolFailureTextFromResult } from "./chat-executor-tool-utils.js";
-import { findToolTurnValidationIssue } from "./tool-turn-validator.js";
+import {
+  findToolTurnValidationIssue,
+  repairToolTurnSequence,
+} from "./tool-turn-validator.js";
 import { collectPreservedMessages } from "./compact/attachments.js";
 import type {
   ArtifactCompactionState,
@@ -420,7 +423,19 @@ function findSafeRetainedTailStartIndex(
   );
 
   while (startIndex > 0) {
-    const issue = findToolTurnValidationIssue(history.slice(startIndex));
+    const candidate = history.slice(startIndex).map((message) =>
+      message.role === "tool" &&
+      (!message.toolCallId || message.toolCallId.trim().length === 0)
+        ? {
+            role: "assistant" as const,
+            content: extractText(message),
+            ...(message.phase ? { phase: message.phase } : {}),
+          }
+        : message,
+    );
+    const issue = findToolTurnValidationIssue(
+      repairToolTurnSequence(candidate),
+    );
     if (!issue) {
       return startIndex;
     }
