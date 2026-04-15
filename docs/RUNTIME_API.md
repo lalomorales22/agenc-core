@@ -376,7 +376,7 @@ catalog: the server's `GET /v1/models` response is the authoritative source of t
 ```
 
 **Notes:**
-- `contextWindowTokens` is required — local servers do not expose context window size via API. Set this to match the model's actual context window (e.g. 32768 for Gemma 4 26B).
+- `contextWindowTokens` is required — local servers do not expose context window size via API. The AgenC system prompt alone requires more than 14K tokens, so 32768 is the recommended minimum. Values below 16384 will likely cause failures before the user sends a single message.
 - `apiKey` is passed in the `Authorization` header but is not validated by local servers. Any non-empty string works.
 - When running untrusted models, set `workspace.hostPath` to a neutral directory to prevent autonomous file access during initial context loading.
 - LM Studio: set the context window in the model settings to match `contextWindowTokens`. The LM Studio default of 4096 is too small for most system prompts.

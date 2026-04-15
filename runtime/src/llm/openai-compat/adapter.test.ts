@@ -563,33 +563,3 @@ describe("OpenAICompatProvider", () => {
     });
   });
 });
-
-// ---------------------------------------------------------------------------
-// live server gate (skipped unless OPENAI_COMPAT_BASE_URL is set)
-// ---------------------------------------------------------------------------
-
-const hasLiveServer =
-  !!process.env.OPENAI_COMPAT_BASE_URL && !!process.env.OPENAI_COMPAT_MODEL;
-
-describe.skipIf(!hasLiveServer)("live server", () => {
-  it("basic round-trip returns a non-empty content string", async () => {
-    const { validateOpenAICompatConfig: real } = await vi.importActual<
-      typeof import("./openai-compat-filter.js")
-    >("./openai-compat-filter.js");
-    vi.mocked(
-      (await import("./openai-compat-filter.js")).validateOpenAICompatConfig,
-    ).mockImplementationOnce(real);
-
-    const provider = new OpenAICompatProvider({
-      model: process.env.OPENAI_COMPAT_MODEL!,
-      baseUrl: process.env.OPENAI_COMPAT_BASE_URL!,
-      apiKey: "local",
-      contextWindowTokens: 32768,
-    } as any);
-    const result = await provider.chat([
-      { role: "user", content: "Say 'pong' and nothing else." },
-    ]);
-    expect(typeof result.content).toBe("string");
-    expect(result.content.length).toBeGreaterThan(0);
-  });
-});

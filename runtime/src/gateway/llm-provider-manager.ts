@@ -408,7 +408,7 @@ export async function createSingleLLMProvider(
         model: model ?? "local-model",
         contextWindowTokens: normalizeOptionalPositiveInt(
           llmConfig.contextWindowTokens,
-        ) ?? 4096,
+        ) ?? 32768, // AgenC system prompt requires >14K tokens; 4096 is too small
         timeoutMs,
         maxTokens: normalizeOptionalPositiveInt(maxTokens),
         tools,
