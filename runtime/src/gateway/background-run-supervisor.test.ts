@@ -1830,6 +1830,9 @@ describe("background-run-supervisor", () => {
     expect(execute).toHaveBeenCalledTimes(1);
 
     await supervisor.resumeRun("session-pause-resume");
+    expect(
+      supervisor.getStatusSnapshot("session-pause-resume")?.lastWakeReason,
+    ).toBe("resume");
     await vi.advanceTimersByTimeAsync(0);
 
     expect(execute).toHaveBeenCalledTimes(2);

@@ -106,6 +106,11 @@ import {
   createChatExecutor,
   buildPermissionRulesFromAllowDeny,
 } from "./chat-executor-factory.js";
+import {
+  ToolPermissionEvaluator,
+  evaluatorToCanUseTool,
+} from "../policy/tool-permission-evaluator.js";
+import { BudgetStateService } from "../policy/budget-state.js";
 import { resolveRuntimeContractFlags } from "../runtime-contract/flags.js";
 import {
   normalizeToolCallArguments,
@@ -169,8 +174,8 @@ import { createMemoryRetrievers } from "./memory-retriever-factory.js";
 import { createMemoryBackend } from "./memory-backend-factory.js";
 import {
   deleteTranscript,
-  historyFromTranscript,
   loadTranscript,
+  recoverTranscriptHistory,
 } from "./session-transcript.js";
 // loadWallet moved to ./daemon-tool-registry.ts and ./daemon-feature-wiring.ts
 import {
@@ -1518,6 +1523,19 @@ export class DaemonManager {
       logger: this.logger,
     });
     this._sessionIsolationManager = isolationManager;
+    const subAgentPermissionRules = buildPermissionRulesFromAllowDeny({
+      toolAllowList: config.policy?.toolAllowList,
+      toolDenyList: config.policy?.toolDenyList,
+    });
+    const subAgentCanUseTool =
+      subAgentPermissionRules.length > 0
+        ? evaluatorToCanUseTool(
+            new ToolPermissionEvaluator({
+              rules: subAgentPermissionRules,
+              budgetState: new BudgetStateService(),
+            }),
+          )
+        : undefined;
 
     this._subAgentManager = new SubAgentManager({
       createContext: async (sessionIdentity: SubAgentSessionIdentity) => {
@@ -1552,6 +1570,8 @@ export class DaemonManager {
       sessionCompactionThreshold: subAgentSessionCompactionThreshold,
       economicsMode: config.llm?.economicsMode ?? "enforce",
       onCompaction: this.handleCompaction,
+      ...(this._memoryBackend ? { memoryBackend: this._memoryBackend } : {}),
+      ...(subAgentCanUseTool ? { canUseTool: subAgentCanUseTool } : {}),
       resolveExecutionBudget: async ({ selectedProvider }) =>
         this.resolveProviderExecutionBudget(selectedProvider),
       resolveDefaultMaxToolRounds: () => this._defaultForegroundMaxToolRounds,
@@ -4148,7 +4168,7 @@ export class DaemonManager {
         return undefined;
       },
     );
-    const transcriptHistory = historyFromTranscript(transcript);
+    const transcriptHistory = recoverTranscriptHistory(transcript);
     const replayContext =
       transcriptHistory.length > 0
         ? undefined

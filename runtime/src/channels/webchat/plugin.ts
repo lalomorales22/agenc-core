@@ -46,8 +46,8 @@ import { safeStringify } from "../../tools/types.js";
 import { summarizeTracePayloadForPreview } from "../../utils/trace-payload-serialization.js";
 import {
   forkTranscript,
-  historyFromTranscript,
   loadTranscript,
+  recoverTranscriptHistory,
 } from "../../gateway/session-transcript.js";
 import type {
   WebChatHandler,
@@ -2650,8 +2650,8 @@ export class WebChatChannel
         () => undefined,
       );
       const transcriptHistory = transcript
-        ? transcriptMessagesToHistoryItems(
-            historyFromTranscript(transcript),
+          ? transcriptMessagesToHistoryItems(
+            recoverTranscriptHistory(transcript),
             options,
           )
         : [];

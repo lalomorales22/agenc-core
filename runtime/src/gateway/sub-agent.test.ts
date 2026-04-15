@@ -8,6 +8,7 @@ import {
 } from "./sub-agent.js";
 import { SubAgentSpawnError } from "./errors.js";
 import { ChatExecutor } from "../llm/chat-executor.js";
+import { InMemoryBackend } from "../memory/in-memory/backend.js";
 import type {
   IsolatedSessionContext,
   SubAgentSessionIdentity,
@@ -2225,6 +2226,89 @@ describe("SubAgentManager", () => {
           history: [
             { role: "user", content: "Store the token for later recall" },
             { role: "assistant", content: "CHILD-STORED-S1" },
+          ],
+        });
+      } finally {
+        executeSpy.mockRestore();
+      }
+    });
+
+    it("reuses a persisted terminal child session after manager restart", async () => {
+      const executeSpy = vi
+        .spyOn(ChatExecutor.prototype, "execute")
+        .mockResolvedValueOnce({
+          content: "STORED-CHILD-RESULT",
+          provider: "mock-llm",
+          usedFallback: false,
+          toolCalls: [],
+          tokenUsage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+          callUsage: [],
+          durationMs: 10,
+          compacted: false,
+          stopReason: "completed",
+          completionState: "completed",
+          completionProgress: {
+            completionState: "completed",
+            stopReason: "completed",
+            requiredRequirements: [],
+            satisfiedRequirements: [],
+            remainingRequirements: [],
+            reusableEvidence: [],
+            updatedAt: 1_700_000_000_000,
+          },
+        } as any)
+        .mockResolvedValueOnce({
+          content: "RECALLED-RESULT",
+          provider: "mock-llm",
+          usedFallback: false,
+          toolCalls: [],
+          tokenUsage: { promptTokens: 12, completionTokens: 4, totalTokens: 16 },
+          callUsage: [],
+          durationMs: 12,
+          compacted: false,
+          stopReason: "completed",
+          completionState: "completed",
+          completionProgress: {
+            completionState: "completed",
+            stopReason: "completed",
+            requiredRequirements: [],
+            satisfiedRequirements: [],
+            remainingRequirements: [],
+            reusableEvidence: [],
+            updatedAt: 1_700_000_000_001,
+          },
+        } as any);
+      const memoryBackend = new InMemoryBackend();
+      const firstManager = new SubAgentManager(
+        makeManagerConfig({ memoryBackend }),
+      );
+
+      try {
+        const firstSessionId = await firstManager.spawn({
+          parentSessionId: "parent-1",
+          task: "Store the token for later recall",
+          prompt: "Store the token for later recall",
+        });
+        await settle();
+
+        const secondManager = new SubAgentManager(
+          makeManagerConfig({ memoryBackend }),
+        );
+        const secondSessionId = await secondManager.spawn({
+          parentSessionId: "parent-1",
+          task: "Recall the token",
+          prompt: "Recall the token",
+          continuationSessionId: firstSessionId,
+        });
+        await settle();
+
+        expect(secondSessionId).toBe(firstSessionId);
+        expect(executeSpy).toHaveBeenCalledTimes(2);
+        expect(executeSpy.mock.calls[1]?.[0]).toMatchObject({
+          sessionId: firstSessionId,
+          history: [
+            { role: "user", content: "Store the token for later recall" },
+            { role: "assistant", content: "STORED-CHILD-RESULT" },
           ],
         });
       } finally {

@@ -1716,6 +1716,7 @@ export class BackgroundRunSupervisor {
     }
     await this.cancelRun(params.sessionId, "Replaced by a new background run.");
     await this.runStore.deleteCheckpoint(params.sessionId);
+    await this.runStore.resetConversationHistory(params.sessionId);
     if (params.options?.lineage) {
       assertValidBackgroundRunLineage(params.options.lineage);
     }
@@ -1777,6 +1778,10 @@ export class BackgroundRunSupervisor {
       abortController: null,
     };
     run.policyScope = this.resolveRunPolicyScope(run);
+    await this.runStore.seedConversationHistory(
+      params.sessionId,
+      run.internalHistory,
+    );
 
     await this.persistRun(run, {
       type: "run_started",
@@ -2039,7 +2044,7 @@ export class BackgroundRunSupervisor {
       assertAgentRunStateTransition(persistedRun.state, "working", "resumeRun persisted");
       persistedRun.state = "working";
       persistedRun.updatedAt = this.now();
-      persistedRun.lastWakeReason = "user_input";
+      persistedRun.lastWakeReason = "resume";
       persistedRun.lastUserUpdate = truncate(reason, MAX_USER_UPDATE_CHARS);
       persistedRun.lastHeartbeatContent = undefined;
       persistedRun.preferredWorkerId = this.instanceId;
@@ -2070,7 +2075,7 @@ export class BackgroundRunSupervisor {
     assertAgentRunStateTransition(run.state, "working", "resumeRun");
     run.state = "working";
     run.updatedAt = this.now();
-    run.lastWakeReason = "user_input";
+    run.lastWakeReason = "resume";
     run.lastUserUpdate = truncate(reason, MAX_USER_UPDATE_CHARS);
     run.lastHeartbeatContent = undefined;
     clearRunBlockers(run);
@@ -2771,6 +2776,7 @@ export class BackgroundRunSupervisor {
       summary: truncate(`Background run retried: ${reason}`, 200),
       timestamp: now,
     });
+    await this.runStore.seedConversationHistory(sessionId, run.internalHistory);
     await this.runStore.saveCheckpoint(toPersistedRun(run));
     await this.publishUpdate(sessionId, run.lastUserUpdate);
     await this.enqueueDispatchForSession({
@@ -2951,6 +2957,7 @@ export class BackgroundRunSupervisor {
         sourceRunId: source.id,
       },
     });
+    await this.runStore.forkConversationHistory(sessionId, targetSessionId);
     await this.runStore.saveCheckpoint(toPersistedRun(run));
     await this.publishUpdate(targetSessionId, run.lastUserUpdate);
     await this.enqueueDispatchForSession({
@@ -3671,6 +3678,10 @@ export class BackgroundRunSupervisor {
 
         run.internalHistory = trimHistory([
           ...run.internalHistory,
+          { role: "user", content: actorPrompt },
+          { role: "assistant", content: actorResult.content, phase: "commentary" },
+        ]);
+        await this.runStore.appendConversationTurn(sessionId, [
           { role: "user", content: actorPrompt },
           { role: "assistant", content: actorResult.content, phase: "commentary" },
         ]);

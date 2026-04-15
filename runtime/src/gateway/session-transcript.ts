@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { LLMMessage } from "../llm/types.js";
+import { repairToolTurnSequence } from "../llm/tool-turn-validator.js";
 import type {
   MemoryBackend,
   TranscriptCapableMemoryBackend,
@@ -11,6 +12,8 @@ import type {
 } from "../memory/types.js";
 
 const TRANSCRIPT_KV_PREFIX = "transcript:v1:";
+const SUBAGENT_TRANSCRIPT_PREFIX = "subagent-session:";
+const BACKGROUND_RUN_TRANSCRIPT_PREFIX = "background-run-session:";
 
 export type SessionTranscriptEvent =
   | SessionTranscriptMessageEvent
@@ -74,6 +77,98 @@ function cloneEvent(event: SessionTranscriptEvent): SessionTranscriptEvent {
 
 function cloneUnknown<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function isWhitespaceOnlyMessage(message: LLMMessage): boolean {
+  if (typeof message.content === "string") {
+    return message.content.trim().length === 0;
+  }
+  if (!Array.isArray(message.content)) {
+    return false;
+  }
+  return message.content.every((part) =>
+    part.type === "text" ? part.text.trim().length === 0 : false
+  );
+}
+
+function dropWhitespaceOnlyAssistantMessages(
+  history: readonly LLMMessage[],
+): readonly LLMMessage[] {
+  if (history.length === 0) return history;
+  const filtered = history.filter((message, index) => {
+    if (message.role !== "assistant") return true;
+    if (message.toolCalls && message.toolCalls.length > 0) return true;
+    const isLast = index === history.length - 1;
+    if (isLast) return true;
+    return !isWhitespaceOnlyMessage(message);
+  });
+  return filtered.length === history.length ? history : filtered;
+}
+
+function dropUnresolvedToolTurns(
+  history: readonly LLMMessage[],
+): readonly LLMMessage[] {
+  const issued = new Set<string>();
+  const resolved = new Set<string>();
+  for (const message of history) {
+    if (message.role === "assistant" && message.toolCalls) {
+      for (const toolCall of message.toolCalls) {
+        const id = toolCall.id?.trim();
+        if (id) issued.add(id);
+      }
+    }
+    if (message.role === "tool") {
+      const id = message.toolCallId?.trim();
+      if (id) resolved.add(id);
+    }
+  }
+  if (issued.size === resolved.size) {
+    let allResolved = true;
+    for (const id of issued) {
+      if (!resolved.has(id)) {
+        allResolved = false;
+        break;
+      }
+    }
+    if (allResolved) {
+      return history;
+    }
+  }
+
+  const next: LLMMessage[] = [];
+  for (const message of history) {
+    if (
+      message.role === "assistant" &&
+      message.toolCalls &&
+      message.toolCalls.length > 0
+    ) {
+      const unresolvedCalls = message.toolCalls.filter((toolCall) => {
+        const id = toolCall.id?.trim();
+        return id ? !resolved.has(id) : true;
+      });
+      if (unresolvedCalls.length === message.toolCalls.length) {
+        continue;
+      }
+      if (unresolvedCalls.length > 0) {
+        next.push({
+          ...cloneMessage(message),
+          toolCalls: message.toolCalls.filter((toolCall) => {
+            const id = toolCall.id?.trim();
+            return id ? resolved.has(id) : false;
+          }),
+        });
+        continue;
+      }
+    }
+    if (message.role === "tool") {
+      const id = message.toolCallId?.trim();
+      if (id && !issued.has(id)) {
+        continue;
+      }
+    }
+    next.push(cloneMessage(message));
+  }
+  return next;
 }
 
 function normalizeSurface(
@@ -395,6 +490,14 @@ export async function listTranscriptStreams(
   return keys.map((key) => key.slice(TRANSCRIPT_KV_PREFIX.length));
 }
 
+export function subAgentTranscriptStreamId(sessionId: string): string {
+  return `${SUBAGENT_TRANSCRIPT_PREFIX}${sessionId}`;
+}
+
+export function backgroundRunTranscriptStreamId(sessionId: string): string {
+  return `${BACKGROUND_RUN_TRANSCRIPT_PREFIX}${sessionId}`;
+}
+
 export function historyFromTranscript(
   document: SessionTranscriptDocument | undefined,
 ): readonly LLMMessage[] {
@@ -410,6 +513,15 @@ export function historyFromTranscript(
     }
   }
   return history;
+}
+
+export function recoverTranscriptHistory(
+  document: SessionTranscriptDocument | undefined,
+): readonly LLMMessage[] {
+  const history = historyFromTranscript(document);
+  const withoutWhitespace = dropWhitespaceOnlyAssistantMessages(history);
+  const withoutUnresolved = dropUnresolvedToolTurns(withoutWhitespace);
+  return repairToolTurnSequence(withoutUnresolved);
 }
 
 export function createTranscriptMessageEvent(params: {
