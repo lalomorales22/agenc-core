@@ -73,9 +73,19 @@ export class MemoryArtifactStore {
   }
 
   async persistSnapshot(snapshot: PersistedArtifactSnapshot): Promise<void> {
-    await this.backend.set(snapshotKey(snapshot.state.sessionId), snapshot.state);
+    const existing =
+      await this.backend.get<ArtifactCompactionState>(snapshotKey(snapshot.state.sessionId));
+    const nextArtifactIds = new Set(snapshot.state.artifactRefs.map((ref) => ref.id));
     for (const record of snapshot.records) {
       await this.backend.set(recordKey(record.sessionId, record.id), record);
+    }
+    await this.backend.set(snapshotKey(snapshot.state.sessionId), snapshot.state);
+    if (existing?.artifactRefs?.length) {
+      for (const artifactRef of existing.artifactRefs) {
+        if (!nextArtifactIds.has(artifactRef.id)) {
+          await this.backend.delete(recordKey(snapshot.state.sessionId, artifactRef.id));
+        }
+      }
     }
   }
 

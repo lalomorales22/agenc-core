@@ -220,8 +220,8 @@ test("buildWatchSurfaceSummary derives route, alerts, and recent tool timeline",
   assert.equal(summary.routeState, "fallback");
   assert.equal(summary.routeLabel, "grok-4 via grok");
   assert.equal(summary.attention.approvalAlertCount, 1);
-  assert.equal(summary.attention.errorAlertCount, 1);
-  assert.equal(summary.attention.items[0].title, "Command failed");
+  assert.equal(summary.attention.errorAlertCount, 0);
+  assert.equal(summary.attention.items[0].title, "Resolver needed");
   assert.equal(summary.recentTools[0].title, "Command failed");
   assert.equal(summary.recentTools[0].state, "error");
   assert.equal(summary.overview.sessionToken, "12345678");
@@ -238,13 +238,13 @@ test("buildWatchSurfaceSummary derives route, alerts, and recent tool timeline",
   assert.equal(summary.overview.voiceCurrentTask, "Trace the fallback path");
   assert.equal(summary.providerLabel, "grok");
   assert.equal(summary.overview.fallbackState, "active");
-  assert.equal(summary.overview.runtimeState, "degraded");
+  assert.equal(summary.overview.runtimeState, "limited");
   assert.match(summary.runtimeLabel, /live/);
   assert.equal(summary.chips.find((chip) => chip.label === "ROUTE")?.value, "fallback");
   assert.equal(summary.chips.find((chip) => chip.label === "GUARD")?.label, "GUARD");
   assert.equal(summary.chips.find((chip) => chip.label === "PROVIDER")?.value, "grok");
   assert.equal(summary.chips.find((chip) => chip.label === "FAILOVER")?.value, "active");
-  assert.equal(summary.chips.find((chip) => chip.label === "RUNTIME")?.value, "degraded");
+  assert.equal(summary.chips.find((chip) => chip.label === "RUNTIME")?.value, "limited");
   assert.equal(summary.chips.find((chip) => chip.label === "DURABLE")?.value, "disabled");
   assert.equal(summary.chips.find((chip) => chip.label === "SYNC")?.value, "disabled");
   assert.equal(summary.chips.find((chip) => chip.label === "MEM")?.value, "ready");

@@ -210,6 +210,7 @@ export interface ToolLoopCallbacks {
 }
 
 const TOOL_PROTOCOL_REPAIR_ERROR = "tool_protocol_repair";
+const FAILED_TOOL_RECOVERY_STREAK = 3;
 const TERMINAL_MUTATION_TOOL_NAMES = new Set([
   "system.applyPatch",
   "system.appendFile",
@@ -243,6 +244,83 @@ function buildToolLoopTerminalResult(
     runtimeContractSnapshot: ctx.runtimeContractSnapshot,
     mutationDetected: detectSuccessfulWorkspaceMutation(ctx.allToolCalls),
   };
+}
+
+function summarizeToolFailureForRecovery(call: ToolCallRecord): string {
+  try {
+    const parsed = JSON.parse(call.result) as { error?: unknown };
+    if (typeof parsed.error === "string" && parsed.error.trim().length > 0) {
+      return parsed.error.trim().replace(/\s+/g, " ");
+    }
+  } catch {
+    // Fall back to plain text below.
+  }
+  const compact = call.result
+    .trim()
+    .replace(/\s+/g, " ")
+    .slice(0, 140);
+  return compact.length > 0 ? compact : "tool call failed";
+}
+
+function buildFailedToolRecoveryHint(
+  failedCalls: readonly ToolCallRecord[],
+): RecoveryHint | undefined {
+  if (failedCalls.length < FAILED_TOOL_RECOVERY_STREAK) {
+    return undefined;
+  }
+  const summary = failedCalls
+    .slice(-FAILED_TOOL_RECOVERY_STREAK)
+    .map((call) => `${call.name}: ${summarizeToolFailureForRecovery(call)}`)
+    .join(" | ");
+  return {
+    key: "failed_tool_streak",
+    message:
+      `Recent tool failures: ${summary}. Stop repeating the same failing tool pattern. Reassess the errors and continue without tools unless a materially different tool action is clearly justified.`,
+  };
+}
+
+function collectRecentConsecutiveFailedToolCalls(
+  toolCalls: readonly ToolCallRecord[],
+): readonly ToolCallRecord[] {
+  const collected: ToolCallRecord[] = [];
+  for (let index = toolCalls.length - 1; index >= 0; index -= 1) {
+    const call = toolCalls[index];
+    if (call.failureBudgetExempt === true) {
+      continue;
+    }
+    if (!didToolCallFail(call.isError, call.result)) {
+      break;
+    }
+    collected.unshift(call);
+  }
+  return collected;
+}
+
+function updateFailedToolStreak(
+  currentStreak: number,
+  roundCalls: readonly ToolCallRecord[],
+): number {
+  let nextStreak = currentStreak;
+  for (const call of roundCalls) {
+    if (call.failureBudgetExempt === true) {
+      continue;
+    }
+    if (didToolCallFail(call.isError, call.result)) {
+      nextStreak += 1;
+      continue;
+    }
+    nextStreak = 0;
+  }
+  return nextStreak;
+}
+
+function mergeRecoveryHints(
+  recoveryHints: readonly RecoveryHint[],
+  extraHint: RecoveryHint | undefined,
+): readonly RecoveryHint[] {
+  if (!extraHint) return recoveryHints;
+  const filtered = recoveryHints.filter((hint) => hint.key !== extraHint.key);
+  return [...filtered, extraHint];
 }
 
 function syncToolProtocolSnapshot(ctx: ExecutionContext): void {
@@ -289,6 +367,7 @@ function pushToolResultMessage(params: {
   readonly durationMs: number;
   readonly synthetic?: boolean;
   readonly protocolRepairReason?: ToolProtocolRepairReason;
+  readonly failureBudgetExempt?: boolean;
 }): void {
   const {
     ctx,
@@ -321,6 +400,7 @@ function pushToolResultMessage(params: {
     toolCallId,
     ...(synthetic ? { synthetic: true } : {}),
     ...(protocolRepairReason ? { protocolRepairReason } : {}),
+    ...(params.failureBudgetExempt ? { failureBudgetExempt: true } : {}),
   });
   recordToolProtocolResult(ctx.toolProtocolState, toolCallId);
   syncToolProtocolSnapshot(ctx);
@@ -402,6 +482,7 @@ function sealPendingToolProtocol(
       durationMs: 0,
       synthetic: true,
       protocolRepairReason: reason,
+      failureBudgetExempt: true,
     });
   }
 
@@ -725,6 +806,7 @@ export async function executeSingleToolCall(
       args: {},
       isError: true,
       durationMs: 0,
+      failureBudgetExempt: permission.routingMiss === true,
     });
     if (permission.expandAfterRound) loopState.expandAfterRound = true;
     return "skip";
@@ -1461,6 +1543,8 @@ export async function executeToolCallLoop(
     activeRoutedToolSet: null,
     expandAfterRound: false,
   };
+  let consecutiveFailedToolCalls = 0;
+  let forcedFailureRecoveryUsed = false;
 
   // Turn-end completion validation now shares one turn-local
   // continuation controller instead of per-validator attempt maps.
@@ -2000,15 +2084,28 @@ export async function executeToolCallLoop(
       sealPendingToolProtocol(ctx, callbacks, "round_aborted");
       break;
     }
+    consecutiveFailedToolCalls = updateFailedToolStreak(
+      consecutiveFailedToolCalls,
+      roundCalls,
+    );
+    const failedToolRecoveryHint = buildFailedToolRecoveryHint(
+      collectRecentConsecutiveFailedToolCalls(ctx.allToolCalls),
+    );
+    const shouldForceFailureRecovery =
+      !forcedFailureRecoveryUsed &&
+      consecutiveFailedToolCalls >= FAILED_TOOL_RECOVERY_STREAK;
 
     // Recovery hints.
     const recoveryHistoryWindow = ctx.allToolCalls.slice(
       Math.max(0, ctx.allToolCalls.length - 48),
     );
-    const recoveryHints = buildRecoveryHints(
-      roundCalls,
-      new Set<string>(),
-      recoveryHistoryWindow,
+    const recoveryHints = mergeRecoveryHints(
+      buildRecoveryHints(
+        roundCalls,
+        new Set<string>(),
+        recoveryHistoryWindow,
+      ),
+      shouldForceFailureRecovery ? failedToolRecoveryHint : undefined,
     );
     callbacks.replaceRuntimeRecoveryHintMessages(ctx, recoveryHints);
     if (recoveryHints.length > 0) {
@@ -2087,11 +2184,33 @@ export async function executeToolCallLoop(
         statefulSessionId: ctx.sessionId,
         statefulResumeAnchor: ctx.stateful?.resumeAnchor,
         statefulHistoryCompacted: ctx.stateful?.historyCompacted,
+        ...(shouldForceFailureRecovery ? { toolChoice: "none" as const } : {}),
         budgetReason:
           "Max model recalls exceeded while following up after tool calls",
       }),
     );
     if (!nextResponse) break;
+    if (shouldForceFailureRecovery) {
+      forcedFailureRecoveryUsed = true;
+      if (responseHasToolCalls(nextResponse)) {
+        emitToolProtocolViolation(
+          ctx,
+          callbacks,
+          "tool_choice_none_ignored_after_failed_tool_recovery",
+          {
+            toolNames: nextResponse.toolCalls.map((toolCall) => toolCall.name),
+            finishReason: nextResponse.finishReason,
+          },
+        );
+        callbacks.setStopReason(
+          ctx,
+          "validation_error",
+          "Provider emitted tool calls after the runtime requested a no-tool recovery turn.",
+        );
+        ctx.response = { ...nextResponse, content: "" };
+        break;
+      }
+    }
     ctx.response = nextResponse;
     failClosedOnMalformedToolContinuation(ctx, callbacks);
   }

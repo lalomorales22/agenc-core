@@ -87,7 +87,6 @@ const DEFINITIONS: Record<SessionShellProfile, ShellProfileDefinition> = {
       "system.grep",
       "system.glob",
       "system.searchFiles",
-      "system.repoInventory",
       "system.gitStatus",
       "system.gitDiff",
       "system.gitShow",

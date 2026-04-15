@@ -19,6 +19,30 @@ export function createWatchToolPresentationCopyBuilder(dependencies = {}) {
     describeDesktopTextEditorStart,
   } = createWatchToolPresentationEditorDescriptors({ truncate });
 
+  function summarizeToolErrorCopy(toolName, prettyResult) {
+    const text = String(prettyResult ?? "").replace(/\s+/g, " ").trim();
+    if (!text) return null;
+    if (/old_string and new_string are identical/i.test(text)) {
+      return "No-op edit rejected";
+    }
+    if (/must be read first|full-file read/i.test(text)) {
+      return "File must be read first";
+    }
+    if (/path does not exist|file not found|enoent/i.test(text)) {
+      return "File not found";
+    }
+    if (toolName === "system.grep" || toolName === "system.searchFiles") {
+      return `Search failed: ${truncate(text, 180)}`;
+    }
+    if (toolName === "system.readFile" || toolName === "system.readFileRange") {
+      return `Read failed: ${truncate(text, 180)}`;
+    }
+    if (toolName === "system.editFile" || toolName === "system.applyPatch") {
+      return `Edit failed: ${truncate(text, 180)}`;
+    }
+    return null;
+  }
+
   function describeToolStart(data) {
     switch (data.kind) {
       case "delegate-start":
@@ -142,11 +166,15 @@ export function createWatchToolPresentationCopyBuilder(dependencies = {}) {
         const shellPreview = data.isError
           ? (data.stderrPreview ?? data.stdoutPreview ?? "")
           : (data.stdoutPreview ?? data.stderrPreview ?? "");
-        const shellFirstLine = sanitizeInlineText(
-          String(shellPreview).split("\n")[0] ?? "",
-        );
+        const shellLines = compactBodyLines(shellPreview, {
+          sanitizeDisplayText,
+          sanitizeInlineText,
+          truncate,
+          maxLines: data.isError ? Math.max(3, maxEventBodyLines) : 2,
+        });
+        const shellFirstLine = sanitizeInlineText(shellLines[0] ?? "");
         const shellBody = data.isError
-          ? shellFirstLine || data.commandText || "(command failed)"
+          ? (shellLines.join("\n") || data.commandText || "(command failed)")
           : [
             data.exitCode !== undefined ? `exit ${data.exitCode}` : null,
             shellFirstLine,
@@ -159,16 +187,21 @@ export function createWatchToolPresentationCopyBuilder(dependencies = {}) {
       }
       default: {
         const summary = buildToolSummary(data.summaryEntries);
+        const commonErrorCopy = data.isError
+          ? summarizeToolErrorCopy(data.toolName, data.prettyResult)
+          : null;
         return {
           title: data.isError ? `${data.toolName} failed` : data.toolName,
           body:
-            summary.length > 0
+            commonErrorCopy
+              ? commonErrorCopy
+              : summary.length > 0
               ? summary.join("\n")
               : compactBodyLines(data.prettyResult, {
                 sanitizeDisplayText,
                 sanitizeInlineText,
                 truncate,
-                maxLines: maxEventBodyLines,
+                maxLines: data.isError ? Math.max(4, maxEventBodyLines) : maxEventBodyLines,
               }).join("\n"),
           tone: data.isError ? "red" : "green",
         };

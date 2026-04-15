@@ -41,8 +41,14 @@ export function appendToolRecord(
   record: ToolCallRecord,
 ): RequestTaskObservationResult | undefined {
   ctx.allToolCalls.push(record);
-  if (didToolCallFail(record.isError, record.result)) {
+  if (
+    didToolCallFail(record.isError, record.result) &&
+    record.failureBudgetExempt !== true
+  ) {
     ctx.failedToolCalls++;
+    return undefined;
+  }
+  if (didToolCallFail(record.isError, record.result)) {
     return undefined;
   }
   const observation = observeRequestTaskToolRecord(ctx.requestTaskState, record);

@@ -1115,6 +1115,110 @@ describe("ChatExecutor", () => {
       expect(result.runtimeContractSnapshot?.toolProtocol.repairCount).toBe(1);
     });
 
+    it("forces one no-tool recovery turn after three consecutive real tool failures", async () => {
+      const toolHandler = vi.fn().mockResolvedValue(
+        JSON.stringify({ error: "tool failed" }),
+      );
+      const provider = createMockProvider("primary", {
+        chat: vi
+          .fn()
+          .mockResolvedValueOnce(
+            mockResponse({
+              content: "",
+              finishReason: "tool_calls",
+              toolCalls: [
+                { id: "tc-1", name: "system.grep", arguments: '{"pattern":"one","path":"."}' },
+              ],
+            }),
+          )
+          .mockResolvedValueOnce(
+            mockResponse({
+              content: "",
+              finishReason: "tool_calls",
+              toolCalls: [
+                { id: "tc-2", name: "system.grep", arguments: '{"pattern":"two","path":"."}' },
+              ],
+            }),
+          )
+          .mockResolvedValueOnce(
+            mockResponse({
+              content: "",
+              finishReason: "tool_calls",
+              toolCalls: [
+                { id: "tc-3", name: "system.grep", arguments: '{"pattern":"three","path":"."}' },
+              ],
+            }),
+          )
+          .mockResolvedValueOnce(
+            mockResponse({
+              content: "Recovered after reassessing the failures.",
+              finishReason: "stop",
+            }),
+          ),
+      });
+
+      const executor = new ChatExecutor({ providers: [provider], toolHandler });
+      const result = await executor.execute(createParams());
+
+      expect(result.stopReason).toBe("completed");
+      expect(result.content).toBe("Recovered after reassessing the failures.");
+      expect((provider.chat as ReturnType<typeof vi.fn>).mock.calls[3]?.[1]?.toolChoice).toBe("none");
+    });
+
+    it("fails closed when a forced no-tool recovery turn still emits tool calls", async () => {
+      const toolHandler = vi.fn().mockResolvedValue(
+        JSON.stringify({ error: "tool failed" }),
+      );
+      const provider = createMockProvider("primary", {
+        chat: vi
+          .fn()
+          .mockResolvedValueOnce(
+            mockResponse({
+              content: "",
+              finishReason: "tool_calls",
+              toolCalls: [
+                { id: "tc-1", name: "system.grep", arguments: '{"pattern":"one","path":"."}' },
+              ],
+            }),
+          )
+          .mockResolvedValueOnce(
+            mockResponse({
+              content: "",
+              finishReason: "tool_calls",
+              toolCalls: [
+                { id: "tc-2", name: "system.grep", arguments: '{"pattern":"two","path":"."}' },
+              ],
+            }),
+          )
+          .mockResolvedValueOnce(
+            mockResponse({
+              content: "",
+              finishReason: "tool_calls",
+              toolCalls: [
+                { id: "tc-3", name: "system.grep", arguments: '{"pattern":"three","path":"."}' },
+              ],
+            }),
+          )
+          .mockResolvedValueOnce(
+            mockResponse({
+              content: "",
+              finishReason: "tool_calls",
+              toolCalls: [
+                { id: "tc-4", name: "system.grep", arguments: '{"pattern":"four","path":"."}' },
+              ],
+            }),
+          ),
+      });
+
+      const executor = new ChatExecutor({ providers: [provider], toolHandler });
+      const result = await executor.execute(createParams());
+
+      expect(result.stopReason).toBe("validation_error");
+      expect(result.stopReasonDetail).toContain("no-tool recovery turn");
+      expect(result.runtimeContractSnapshot?.toolProtocol.violationCount).toBeGreaterThan(0);
+      expect((provider.chat as ReturnType<typeof vi.fn>).mock.calls[3]?.[1]?.toolChoice).toBe("none");
+    });
+
     it("sanitizes screenshot tool payloads and keeps image artifacts out-of-band", async () => {
       const hugeBase64 = "A".repeat(90_000);
       const toolHandler = vi.fn().mockResolvedValue(

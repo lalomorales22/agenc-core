@@ -269,6 +269,7 @@ describe("VoiceBridge delegation", () => {
       expect.objectContaining({
         sessionId: "session-1",
         systemPrompt: "You are a helpful assistant.",
+        maxFailureBudgetPerRequest: 4,
       }),
     );
     expect(send).toHaveBeenCalledWith(
@@ -362,6 +363,7 @@ describe("VoiceBridge delegation", () => {
 
     expect(execute).toHaveBeenCalledWith(
       expect.objectContaining({
+        maxFailureBudgetPerRequest: 4,
         trace: expect.objectContaining({
           includeProviderPayloads: true,
           onProviderTraceEvent: expect.any(Function),

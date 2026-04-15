@@ -10,18 +10,16 @@ const TOOL_EVENT_KINDS = new Set([
 const ALERT_EVENT_KINDS = new Set([
   "approval",
   "error",
-  "tool error",
-  "subagent error",
   "ws-error",
 ]);
 
 const BADGE_MAP = Object.freeze({
   "tool result": { label: "RETURN", tone: "green" },
-  "tool error": { label: "FAULT", tone: "red" },
+  "tool error": { label: "ERROR", tone: "red" },
   tool: { label: "EXEC", tone: "yellow" },
   "subagent tool": { label: "EXEC", tone: "amber" },
   "subagent tool result": { label: "RETURN", tone: "green" },
-  "subagent error": { label: "FAULT", tone: "red" },
+  "subagent error": { label: "ERROR", tone: "red" },
   agent: { label: "assistant", tone: "slate" },
   you: { label: "you", tone: "slate" },
   operator: { label: "CTRL", tone: "teal" },
@@ -741,8 +739,6 @@ export function buildWatchSurfaceSummary({
   const approvalAlertCount = recentEvents.filter((event) => event.kind === "approval").length;
   const errorAlertCount = recentEvents.filter((event) =>
     event.kind === "error" ||
-    event.kind === "tool error" ||
-    event.kind === "subagent error" ||
     event.kind === "ws-error"
   ).length;
   const routeState =

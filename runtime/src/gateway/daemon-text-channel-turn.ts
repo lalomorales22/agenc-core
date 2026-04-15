@@ -272,6 +272,7 @@ export async function executeTextChannelTurn(
       : {}),
     toolHandler,
     maxToolRounds: effectiveMaxToolRounds,
+    maxFailureBudgetPerRequest: 4,
     ...(sessionStateful ? { stateful: sessionStateful } : {}),
     ...(structuredOutput ? { structuredOutput } : {}),
     ...(isConcordiaGenerateAgentsTurn

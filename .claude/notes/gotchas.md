@@ -27,3 +27,8 @@
 ## Required verifier runtime dependencies must fail closed
 - When `verifierRuntimeRequired` is enabled, missing top-level verifier runtime wiring must end the turn as verifier retry / validation error instead of quietly downgrading to `skipped`.
 - Treat verifier eligibility checks separately from runtime dependency availability checks or the executor will silently accept an unverifiable completion.
+
+## Coding discovery policy should have one source of truth
+- Search/discovery guidance now spans prompt prose, shell profiles, and shell-agent tool bundles.
+- When changing preferred coding tools or demoting tools like `system.repoInventory`, update all of those surfaces together or centralize them behind one shared definition.
+- Otherwise the runtime will drift between what it advertises, what it auto-bundles, and what the operator actually sees in long coding sessions.

@@ -32,6 +32,10 @@ const MAX_RESULTS = 200;
 const DEFAULT_CONTEXT_LINES = 2;
 const MAX_DIFF_BYTES = 256_000;
 const TEXT_FILE_SIZE_LIMIT = 512_000;
+const MAX_RIPGREP_BUFFER = 12 * 1024 * 1024;
+const RIPGREP_REQUIRED_ERROR =
+  "ripgrep (rg) is required for coding search tools but is not available on PATH";
+const VCS_DIRECTORIES_TO_EXCLUDE = [".git", ".hg", ".jj", ".svn"] as const;
 const MANIFEST_NAMES = [
   "package.json",
   "tsconfig.json",
@@ -62,6 +66,17 @@ function normalizePositiveInteger(
   return Math.max(1, Math.min(max, Math.floor(value)));
 }
 
+function normalizeNonNegativeInteger(
+  value: unknown,
+  fallback: number,
+  max: number,
+): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.max(0, Math.min(max, Math.floor(value)));
+}
+
 function toOptionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0
     ? value.trim()
@@ -75,6 +90,22 @@ function toOptionalStringArray(value: unknown): readonly string[] | undefined {
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
   return entries.length > 0 ? entries : undefined;
+}
+
+function resolveSearchGlobPatterns(args: Record<string, unknown>): readonly string[] | undefined {
+  const patterns = [
+    ...(
+      typeof args.glob === "string"
+        ? [args.glob]
+        : Array.isArray(args.glob)
+          ? args.glob.filter((entry): entry is string => typeof entry === "string")
+          : []
+    ),
+    ...(toOptionalStringArray(args.filePatterns) ?? []),
+  ]
+    .map((entry) => entry.trim())
+    .filter((entry, index, all) => entry.length > 0 && all.indexOf(entry) === index);
+  return patterns.length > 0 ? patterns : undefined;
 }
 
 async function resolveWorkspacePath(params: {
@@ -96,6 +127,42 @@ async function resolveWorkspacePath(params: {
     return { error: safe.reason ?? "Path is outside allowed directories" };
   }
   return safe.resolved;
+}
+
+interface ResolvedSearchTarget {
+  readonly searchPath: string;
+  readonly searchRoot: string;
+  readonly targetArg: string;
+  readonly isDirectory: boolean;
+}
+
+async function resolveSearchTarget(params: {
+  readonly config: CodingToolConfig;
+  readonly args: Record<string, unknown>;
+  readonly pathArgKeys?: readonly string[];
+}): Promise<ResolvedSearchTarget | { error: string }> {
+  const workspacePath = await resolveWorkspacePath(params);
+  if (typeof workspacePath !== "string") {
+    return workspacePath;
+  }
+  const target = await stat(workspacePath).catch(() => undefined);
+  if (!target) {
+    return { error: `Path does not exist: ${workspacePath}` };
+  }
+  if (target.isDirectory()) {
+    return {
+      searchPath: workspacePath,
+      searchRoot: workspacePath,
+      targetArg: ".",
+      isDirectory: true,
+    };
+  }
+  return {
+    searchPath: workspacePath,
+    searchRoot: dirname(workspacePath),
+    targetArg: basename(workspacePath),
+    isDirectory: false,
+  };
 }
 
 async function resolveRepoRoot(params: {
@@ -152,6 +219,100 @@ async function listRepoFiles(repoRoot: string): Promise<readonly string[]> {
   return files;
 }
 
+let ripgrepAvailability: boolean | undefined;
+
+async function ensureRipgrepAvailable(cwd: string): Promise<string | undefined> {
+  if (ripgrepAvailability === true) return undefined;
+  if (ripgrepAvailability === false) return RIPGREP_REQUIRED_ERROR;
+  const result = await runCommand("rg", ["--version"], {
+    cwd,
+    maxBuffer: 64 * 1024,
+  });
+  if (result.exitCode === 0) {
+    ripgrepAvailability = true;
+    return undefined;
+  }
+  ripgrepAvailability = false;
+  return RIPGREP_REQUIRED_ERROR;
+}
+
+function appendRipgrepPathFilters(
+  args: string[],
+  options: {
+    readonly globPatterns?: readonly string[];
+    readonly type?: string;
+  },
+): void {
+  for (const directory of VCS_DIRECTORIES_TO_EXCLUDE) {
+    args.push("--glob", `!${directory}`);
+    args.push("--glob", `!${directory}/**`);
+  }
+  for (const pattern of options.globPatterns ?? []) {
+    args.push("--glob", pattern);
+  }
+  if (options.type) {
+    args.push("--type", options.type);
+  }
+}
+
+function describeRipgrepFailure(
+  result: Awaited<ReturnType<typeof runCommand>>,
+  fallback: string,
+): string {
+  return result.stderr.trim() || result.stdout.trim() || fallback;
+}
+
+async function listSearchTargetFiles(params: {
+  readonly target: ResolvedSearchTarget;
+  readonly globPatterns?: readonly string[];
+}): Promise<
+  | {
+      readonly searchPath: string;
+      readonly searchRoot: string;
+      readonly matches: readonly string[];
+    }
+  | { error: string }
+> {
+  const missingRipgrep = await ensureRipgrepAvailable(params.target.searchRoot);
+  if (missingRipgrep) {
+    return { error: missingRipgrep };
+  }
+  if (!params.target.isDirectory) {
+    const relativePath = basename(params.target.searchPath);
+    const matchesGlob =
+      !params.globPatterns ||
+      params.globPatterns.some((pattern) =>
+        matchGlob(pattern, relativePath) || matchGlob(pattern, basename(relativePath))
+      );
+    return {
+      searchPath: params.target.searchPath,
+      searchRoot: params.target.searchRoot,
+      matches: matchesGlob ? [relativePath] : [],
+    };
+  }
+  const rgArgs = ["--files", "--hidden"];
+  appendRipgrepPathFilters(rgArgs, { globPatterns: params.globPatterns });
+  rgArgs.push(params.target.targetArg);
+  const result = await runCommand("rg", rgArgs, {
+    cwd: params.target.searchRoot,
+    maxBuffer: MAX_RIPGREP_BUFFER,
+  });
+  if (result.exitCode !== 0) {
+    return {
+      error: describeRipgrepFailure(result, "ripgrep file listing failed"),
+    };
+  }
+  const matches = result.stdout
+    .split(/\r?\n/)
+    .map((entry) => entry.trim().replace(/^\.\//, ""))
+    .filter((entry) => entry.length > 0);
+  return {
+    searchPath: params.target.searchPath,
+    searchRoot: params.target.searchRoot,
+    matches,
+  };
+}
+
 function passesFileFilters(filePath: string, params: {
   readonly repoRoot: string;
   readonly globPatterns?: readonly string[];
@@ -185,21 +346,6 @@ function passesFileFilters(filePath: string, params: {
   return true;
 }
 
-function buildSearchRegex(params: {
-  readonly pattern: string;
-  readonly regex?: boolean;
-  readonly caseSensitive?: boolean;
-}): RegExp {
-  const source = params.regex === true
-    ? params.pattern
-    : escapeRegExp(params.pattern);
-  return new RegExp(source, params.caseSensitive === true ? "g" : "gi");
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 async function readTextFile(path: string): Promise<string | undefined> {
   const fileStat = await stat(path).catch(() => undefined);
   if (!fileStat?.isFile() || fileStat.size > TEXT_FILE_SIZE_LIMIT) {
@@ -225,6 +371,34 @@ function collectMatchSnippets(params: {
     snippets.push(params.lines[index] ?? "");
   }
   return snippets;
+}
+
+async function collectFileContextSnippet(params: {
+  readonly searchRoot: string;
+  readonly relativePath: string;
+  readonly lineNumber: number;
+  readonly contextLines: number;
+  readonly cache: Map<string, readonly string[]>;
+}): Promise<readonly string[]> {
+  if (params.contextLines === 0) {
+    const cached = params.cache.get(params.relativePath);
+    if (cached) {
+      return [cached[Math.max(0, params.lineNumber - 1)] ?? ""];
+    }
+  }
+  let lines = params.cache.get(params.relativePath);
+  if (!lines) {
+    const text = await readTextFile(resolvePath(params.searchRoot, params.relativePath));
+    lines = text ? text.split(/\r?\n/) : [];
+    params.cache.set(params.relativePath, lines);
+  }
+  if (lines.length === 0) return [];
+  return collectMatchSnippets({
+    lines,
+    matchLineIndex: Math.max(0, params.lineNumber - 1),
+    before: params.contextLines,
+    after: params.contextLines,
+  });
 }
 
 function parseStatusPorcelain(stdout: string): {
@@ -484,18 +658,29 @@ export function createCodingTools(config: CodingToolConfig): readonly Tool[] {
   const grepTool: Tool = {
     name: "system.grep",
     description:
-      "Search repo-local files for content matches using a native structured grep surface. Prefer this over raw shell grep/rg for coding workflows.",
+      "Search path-scoped files for content matches using ripgrep behind a native structured grep surface. Prefer this over raw shell grep/rg for coding workflows.",
     metadata: metadata("system.grep"),
     inputSchema: {
       type: "object",
       properties: {
         pattern: { type: "string" },
-        path: { type: "string", description: "Repo file or directory. Defaults to the working directory." },
+        path: { type: "string", description: "File or directory to search. Defaults to the working directory." },
         caseSensitive: { type: "boolean" },
         regex: { type: "boolean", description: "Treat pattern as a regex. Defaults to false." },
+        glob: {
+          anyOf: [
+            { type: "string" },
+            { type: "array", items: { type: "string" } },
+          ],
+        },
         filePatterns: { type: "array", items: { type: "string" } },
+        type: { type: "string", description: "Optional ripgrep file type filter (for example ts, js, py)." },
         contextLines: { type: "integer", minimum: 0, maximum: 10 },
         maxResults: { type: "integer", minimum: 1, maximum: MAX_RESULTS },
+        headLimit: { type: "integer", minimum: 1, maximum: MAX_RESULTS },
+        offset: { type: "integer", minimum: 0, maximum: 10_000 },
+        outputMode: { type: "string", description: "Optional additive output mode: matches (default), content, or count." },
+        multiline: { type: "boolean", description: "Enable multiline ripgrep mode. Supported only when outputMode is content." },
       },
       required: ["pattern"],
       additionalProperties: false,
@@ -503,26 +688,99 @@ export function createCodingTools(config: CodingToolConfig): readonly Tool[] {
     async execute(args) {
       const pattern = toOptionalString(args.pattern);
       if (!pattern) return errorResult("pattern must be a non-empty string");
-      const repoRoot = await resolveRepoRoot({
+      const target = await resolveSearchTarget({
         config,
         args,
         pathArgKeys: ["path"],
       });
-      if (typeof repoRoot !== "string") {
-        return errorResult(repoRoot.error);
+      if ("error" in target) {
+        return errorResult(target.error);
       }
-      const files = await listRepoFiles(repoRoot);
-      const filePatterns = toOptionalStringArray(args.filePatterns);
-      const regex = buildSearchRegex({
-        pattern,
-        regex: args.regex === true,
-        caseSensitive: args.caseSensitive === true,
-      });
-      const contextLines = normalizePositiveInteger(
+      const missingRipgrep = await ensureRipgrepAvailable(target.searchRoot);
+      if (missingRipgrep) return errorResult(missingRipgrep);
+      const outputMode = toOptionalString(args.outputMode) ?? "matches";
+      if (!["matches", "content", "count"].includes(outputMode)) {
+        return errorResult("outputMode must be one of matches, content, or count");
+      }
+      if (args.multiline === true && outputMode !== "content") {
+        return errorResult("multiline is only supported when outputMode is content");
+      }
+      const contextLines = normalizeNonNegativeInteger(
         args.contextLines,
         DEFAULT_CONTEXT_LINES,
         10,
       );
+      const globPatterns = resolveSearchGlobPatterns(args);
+      const type = toOptionalString(args.type);
+      const headLimit = normalizePositiveInteger(
+        args.headLimit ?? args.maxResults,
+        normalizePositiveInteger(args.maxResults, 50, MAX_RESULTS),
+        MAX_RESULTS,
+      );
+      const offset = normalizeNonNegativeInteger(args.offset, 0, 10_000);
+      const baseArgs = ["--hidden", "--max-columns", "500"];
+      appendRipgrepPathFilters(baseArgs, { globPatterns, type });
+      if (args.caseSensitive !== true) {
+        baseArgs.push("-i");
+      }
+      if (args.multiline === true) {
+        baseArgs.push("-U", "--multiline-dotall");
+      }
+      if (args.regex !== true) {
+        baseArgs.push("-F");
+      }
+      const patternArgs = pattern.startsWith("-") ? ["-e", pattern] : [pattern];
+
+      if (outputMode === "content") {
+        const rgArgs = [...baseArgs, "-n"];
+        if (contextLines > 0) {
+          rgArgs.push("-C", String(contextLines));
+        }
+        rgArgs.push(...patternArgs, target.targetArg);
+        const result = await runCommand("rg", rgArgs, {
+          cwd: target.searchRoot,
+          maxBuffer: MAX_RIPGREP_BUFFER,
+        });
+        if (result.exitCode !== 0 && result.exitCode !== 1) {
+          return errorResult(describeRipgrepFailure(result, "ripgrep search failed"));
+        }
+        const lines = result.stdout
+          .replace(/\s+$/, "")
+          .split(/\r?\n/)
+          .filter((line) => line.length > 0);
+        const pagedLines = lines.slice(offset, offset + headLimit);
+        return okResult({
+          repoRoot: target.searchRoot,
+          searchRoot: target.searchRoot,
+          searchPath: target.searchPath,
+          pattern,
+          regex: args.regex === true,
+          caseSensitive: args.caseSensitive === true,
+          outputMode,
+          multiline: args.multiline === true,
+          appliedLimit: headLimit,
+          appliedOffset: offset,
+          truncated: lines.length > offset + pagedLines.length,
+          content: pagedLines.join("\n"),
+        });
+      }
+
+      const rgArgs = [
+        ...baseArgs,
+        "--json",
+        "--line-number",
+        "--column",
+        ...patternArgs,
+        target.targetArg,
+      ];
+      const result = await runCommand("rg", rgArgs, {
+        cwd: target.searchRoot,
+        maxBuffer: MAX_RIPGREP_BUFFER,
+      });
+      if (result.exitCode !== 0 && result.exitCode !== 1) {
+        return errorResult(describeRipgrepFailure(result, "ripgrep search failed"));
+      }
+      const snippetCache = new Map<string, readonly string[]>();
       const matches: {
         filePath: string;
         line: number;
@@ -530,54 +788,95 @@ export function createCodingTools(config: CodingToolConfig): readonly Tool[] {
         matchText: string;
         snippet: readonly string[];
       }[] = [];
-      for (const filePath of files) {
-        if (
-          filePatterns &&
-          !filePatterns.some((glob) =>
-            matchGlob(glob, toRelativeWorkspacePath(repoRoot, filePath))
-          )
-        ) {
+      for (const line of result.stdout.split(/\r?\n/)) {
+        if (!line.trim()) continue;
+        let event: Record<string, unknown>;
+        try {
+          event = JSON.parse(line) as Record<string, unknown>;
+        } catch {
           continue;
         }
-        const text = await readTextFile(filePath);
-        if (!text) continue;
-        const lines = text.split(/\r?\n/);
-        for (let index = 0; index < lines.length; index += 1) {
-          const line = lines[index] ?? "";
-          regex.lastIndex = 0;
-          const match = regex.exec(line);
-          if (!match || match.index < 0) continue;
+        if (event.type !== "match") continue;
+        const data =
+          typeof event.data === "object" && event.data !== null
+            ? (event.data as Record<string, unknown>)
+            : undefined;
+        const pathData =
+          typeof data?.path === "object" && data.path !== null
+            ? (data.path as Record<string, unknown>)
+            : undefined;
+        const relativePath =
+          typeof pathData?.text === "string"
+            ? pathData.text.replace(/^\.\//, "")
+            : typeof pathData?.bytes === "string"
+              ? Buffer.from(pathData.bytes, "base64").toString("utf8").replace(/^\.\//, "")
+              : undefined;
+        const lineNumber =
+          typeof data?.line_number === "number" ? data.line_number : undefined;
+        const submatches = Array.isArray(data?.submatches)
+          ? data.submatches.filter(
+              (entry): entry is Record<string, unknown> =>
+                typeof entry === "object" && entry !== null,
+            )
+          : [];
+        if (!relativePath || !lineNumber || submatches.length === 0) {
+          continue;
+        }
+        const snippet = await collectFileContextSnippet({
+          searchRoot: target.searchRoot,
+          relativePath,
+          lineNumber,
+          contextLines,
+          cache: snippetCache,
+        });
+        for (const submatch of submatches) {
+          const column =
+            typeof submatch.start === "number" ? submatch.start + 1 : 1;
+          const matchText =
+            typeof submatch.match === "object" &&
+            submatch.match !== null &&
+            typeof (submatch.match as { text?: unknown }).text === "string"
+              ? (submatch.match as { text: string }).text
+              : "";
           matches.push({
-            filePath: toRelativeWorkspacePath(repoRoot, filePath),
-            line: index + 1,
-            column: match.index + 1,
-            matchText: match[0] ?? "",
-            snippet: collectMatchSnippets({
-              lines,
-              matchLineIndex: index,
-              before: contextLines,
-              after: contextLines,
-            }),
+            filePath: relativePath,
+            line: lineNumber,
+            column,
+            matchText,
+            snippet,
           });
-          if (matches.length >= normalizePositiveInteger(args.maxResults, 50, MAX_RESULTS)) {
-            return okResult({
-              repoRoot,
-              pattern,
-              regex: args.regex === true,
-              caseSensitive: args.caseSensitive === true,
-              truncated: true,
-              matches,
-            });
-          }
         }
       }
+      const pagedMatches = matches.slice(offset, offset + headLimit);
+      if (outputMode === "count") {
+        const fileCount = new Set(matches.map((match) => match.filePath)).size;
+        return okResult({
+          repoRoot: target.searchRoot,
+          searchRoot: target.searchRoot,
+          searchPath: target.searchPath,
+          pattern,
+          regex: args.regex === true,
+          caseSensitive: args.caseSensitive === true,
+          outputMode,
+          appliedLimit: headLimit,
+          appliedOffset: offset,
+          numFiles: fileCount,
+          numMatches: matches.length,
+          truncated: matches.length > offset + pagedMatches.length,
+          content: `Found ${matches.length} ${matches.length === 1 ? "match" : "matches"} across ${fileCount} ${fileCount === 1 ? "file" : "files"}.`,
+        });
+      }
       return okResult({
-        repoRoot,
+        repoRoot: target.searchRoot,
+        searchRoot: target.searchRoot,
+        searchPath: target.searchPath,
         pattern,
         regex: args.regex === true,
         caseSensitive: args.caseSensitive === true,
-        truncated: false,
-        matches,
+        appliedLimit: headLimit,
+        appliedOffset: offset,
+        truncated: matches.length > offset + pagedMatches.length,
+        matches: pagedMatches,
       });
     },
   };
@@ -585,7 +884,7 @@ export function createCodingTools(config: CodingToolConfig): readonly Tool[] {
   const globTool: Tool = {
     name: "system.glob",
     description:
-      "Match repo-local files by glob pattern using a native structured surface.",
+      "Match path-scoped files by glob pattern using ripgrep's file listing surface.",
     metadata: metadata("system.glob"),
     inputSchema: {
       type: "object",
@@ -600,21 +899,30 @@ export function createCodingTools(config: CodingToolConfig): readonly Tool[] {
     async execute(args) {
       const pattern = toOptionalString(args.pattern);
       if (!pattern) return errorResult("pattern must be a non-empty string");
-      const repoRoot = await resolveRepoRoot({ config, args, pathArgKeys: ["path"] });
-      if (typeof repoRoot !== "string") return errorResult(repoRoot.error);
-      const files = await listRepoFiles(repoRoot);
-      const matched = files
-        .map((filePath) => toRelativeWorkspacePath(repoRoot, filePath))
-        .filter((filePath) => matchGlob(pattern, filePath) || matchGlob(pattern, basename(filePath)))
-        .slice(0, normalizePositiveInteger(args.maxResults, 100, MAX_RESULTS));
-      return okResult({ repoRoot, pattern, matches: matched });
+      const target = await resolveSearchTarget({ config, args, pathArgKeys: ["path"] });
+      if ("error" in target) return errorResult(target.error);
+      const listed = await listSearchTargetFiles({
+        target,
+        globPatterns: [pattern],
+      });
+      if ("error" in listed) return errorResult(listed.error);
+      return okResult({
+        repoRoot: listed.searchRoot,
+        searchRoot: listed.searchRoot,
+        searchPath: listed.searchPath,
+        pattern,
+        matches: listed.matches.slice(
+          0,
+          normalizePositiveInteger(args.maxResults, 100, MAX_RESULTS),
+        ),
+      });
     },
   };
 
   const searchFilesTool: Tool = {
     name: "system.searchFiles",
     description:
-      "Search repo-local files by basename or relative path. Prefer this over raw shell find/fd for coding discovery.",
+      "Search path-scoped files by basename or relative path. Prefer this over raw shell find/fd for coding discovery.",
     metadata: metadata("system.searchFiles"),
     inputSchema: {
       type: "object",
@@ -622,6 +930,12 @@ export function createCodingTools(config: CodingToolConfig): readonly Tool[] {
         query: { type: "string" },
         regex: { type: "boolean" },
         path: { type: "string" },
+        glob: {
+          anyOf: [
+            { type: "string" },
+            { type: "array", items: { type: "string" } },
+          ],
+        },
         filePatterns: { type: "array", items: { type: "string" } },
         maxResults: { type: "integer", minimum: 1, maximum: MAX_RESULTS },
       },
@@ -631,22 +945,40 @@ export function createCodingTools(config: CodingToolConfig): readonly Tool[] {
     async execute(args) {
       const query = toOptionalString(args.query);
       if (!query) return errorResult("query must be a non-empty string");
-      const repoRoot = await resolveRepoRoot({ config, args, pathArgKeys: ["path"] });
-      if (typeof repoRoot !== "string") return errorResult(repoRoot.error);
-      const regex = args.regex === true ? new RegExp(query, "i") : undefined;
-      const files = await listRepoFiles(repoRoot);
-      const matched = files
+      const target = await resolveSearchTarget({ config, args, pathArgKeys: ["path"] });
+      if ("error" in target) return errorResult(target.error);
+      let regex: RegExp | undefined;
+      if (args.regex === true) {
+        try {
+          regex = new RegExp(query, "i");
+        } catch (error) {
+          return errorResult(
+            `Invalid regex pattern: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+      const listed = await listSearchTargetFiles({
+        target,
+        globPatterns: resolveSearchGlobPatterns(args),
+      });
+      if ("error" in listed) return errorResult(listed.error);
+      const matched = listed.matches
         .filter((filePath) =>
-          passesFileFilters(filePath, {
-            repoRoot,
-            globPatterns: toOptionalStringArray(args.filePatterns),
+          passesFileFilters(resolvePath(listed.searchRoot, filePath), {
+            repoRoot: listed.searchRoot,
             query: args.regex === true ? undefined : query,
             regex,
           })
         )
-        .map((filePath) => toRelativeWorkspacePath(repoRoot, filePath))
         .slice(0, normalizePositiveInteger(args.maxResults, 100, MAX_RESULTS));
-      return okResult({ repoRoot, query, regex: args.regex === true, matches: matched });
+      return okResult({
+        repoRoot: listed.searchRoot,
+        searchRoot: listed.searchRoot,
+        searchPath: listed.searchPath,
+        query,
+        regex: args.regex === true,
+        matches: matched,
+      });
     },
   };
 

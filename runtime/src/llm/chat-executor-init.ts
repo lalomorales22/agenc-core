@@ -161,6 +161,14 @@ export async function initializeExecutionContext(
           deps.maxModelRecallsPerRequest,
         )
       : deps.maxModelRecallsPerRequest;
+  const effectiveFailureBudget =
+    typeof params.maxFailureBudgetPerRequest === "number" &&
+      Number.isFinite(params.maxFailureBudgetPerRequest)
+      ? normalizeRuntimeLimit(
+          params.maxFailureBudgetPerRequest,
+          deps.maxFailureBudgetPerRequest,
+        )
+      : deps.maxFailureBudgetPerRequest;
   const messageText = extractMessageText(message);
   const initialRoutedToolNames = params.toolRouting?.routedToolNames
     ? Array.from(new Set(params.toolRouting.routedToolNames))
@@ -279,7 +287,7 @@ export async function initializeExecutionContext(
       maxToolRounds: effectiveMaxToolRounds,
       toolBudgetPerRequest: effectiveToolBudget,
       maxModelRecallsPerRequest: effectiveMaxModelRecalls,
-      maxFailureBudgetPerRequest: deps.maxFailureBudgetPerRequest,
+      maxFailureBudgetPerRequest: effectiveFailureBudget,
       requestTimeoutMs: normalizeInitRequestTimeoutMs(
         params.requestTimeoutMs ?? deps.requestTimeoutMs,
       ),

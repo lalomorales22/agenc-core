@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { MemoryBackend } from "../memory/types.js";
 import {
   buildRuntimeContractStatusSnapshotForSession,
+  buildSessionReplayHistory,
   buildSessionStatefulOptions,
   clearSessionRuntimeState,
   enrichRuntimeContractSnapshotForSession,
@@ -196,6 +197,36 @@ describe("web session runtime state helpers", () => {
         reconciliationHash: "hash-123",
       },
       historyCompacted: true,
+    });
+  });
+
+  it("repairs replay history so orphaned tool results regain an assistant envelope", () => {
+    const history = buildSessionReplayHistory([], {
+      version: 1,
+      boundarySeq: 1,
+      snapshot: {},
+      tailEvents: [
+        {
+          role: "tool",
+          toolCallId: "tc-1",
+          toolName: "system.grep",
+          content: '{"error":"failed"}',
+        },
+      ],
+    });
+
+    expect(history[0]).toMatchObject({
+      role: "assistant",
+      toolCalls: [
+        expect.objectContaining({
+          id: "tc-1",
+          name: "system.grep",
+        }),
+      ],
+    });
+    expect(history[1]).toMatchObject({
+      role: "tool",
+      toolCallId: "tc-1",
     });
   });
 

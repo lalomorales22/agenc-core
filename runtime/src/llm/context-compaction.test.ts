@@ -228,4 +228,37 @@ describe("context compaction", () => {
     expect(compacted.compactedHistory[1]?.content).toEqual(history[0].content);
     expect(compacted.compactedHistory[2]).toEqual(history[2]);
   });
+
+  it("keeps session compaction tails aligned to whole tool turns", () => {
+    const history: LLMMessage[] = [
+      {
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "tc-1", name: "system.grep", arguments: '{"pattern":"foo"}' }],
+      },
+      {
+        role: "tool",
+        toolCallId: "tc-1",
+        toolName: "system.grep",
+        content: '{"error":"failed"}',
+      },
+      {
+        role: "assistant",
+        content: "Continuing after the failed grep.",
+      },
+      {
+        role: "user",
+        content: "Keep going.",
+      },
+    ];
+
+    const compacted = compactHistoryIntoArtifactContext({
+      sessionId: "session-safe-tail",
+      history,
+      keepTailCount: 3,
+      source: "session_compaction",
+    });
+
+    expect(compacted.compactedHistory.slice(1, 5)).toEqual(history);
+  });
 });

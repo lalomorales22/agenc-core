@@ -796,6 +796,7 @@ export class VoiceBridge {
         sessionId,
         toolHandler: delegationToolHandler,
         maxToolRounds: MAX_DELEGATION_TOOL_ROUNDS,
+        maxFailureBudgetPerRequest: 4,
         signal: abortController.signal,
         ...(providerTrace ? { trace: providerTrace } : {}),
       });

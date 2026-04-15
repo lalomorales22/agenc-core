@@ -438,9 +438,6 @@ function resolveRetainedTailStartIndex(
     0,
     input.history.length - keepTailCount,
   );
-  if (input.source !== "executor_compaction") {
-    return preferredTailStartIndex;
-  }
   return findSafeRetainedTailStartIndex(
     input.history,
     preferredTailStartIndex,

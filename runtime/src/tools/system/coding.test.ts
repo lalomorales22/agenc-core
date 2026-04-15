@@ -38,6 +38,27 @@ async function createRepoFixture(): Promise<string> {
   return root;
 }
 
+async function createWorkspaceFixture(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "agenc-coding-workspace-"));
+  await mkdir(join(root, "src"), { recursive: true });
+  await writeFile(
+    join(root, "src", "app.ts"),
+    [
+      "export function greet(name: string): string {",
+      "  return `Hello, ${name}`;",
+      "}",
+      "",
+      "export function useGreet(): string {",
+      "  return greet(\"world\");",
+      "}",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  await writeFile(join(root, "README.md"), "# workspace fixture\n", "utf8");
+  return root;
+}
+
 const createdRoots: string[] = [];
 
 afterEach(async () => {
@@ -176,5 +197,126 @@ describe("createCodingTools", () => {
       (await symbolReferences!.execute({ path: root, symbol: "greet" })).content,
     ) as { references: Array<{ filePath: string }> };
     expect(refsResult.references.some((entry) => entry.filePath === "src/app.ts")).toBe(true);
+  });
+
+  it("supports grep, searchFiles, and glob outside git repositories", async () => {
+    const root = await createWorkspaceFixture();
+    createdRoots.push(root);
+    const tools = createCodingTools({
+      allowedPaths: [root],
+      persistenceRootDir: root,
+    });
+
+    const grepTool = tools.find(byName("system.grep"));
+    const searchFilesTool = tools.find(byName("system.searchFiles"));
+    const globTool = tools.find(byName("system.glob"));
+    expect(grepTool).toBeDefined();
+    expect(searchFilesTool).toBeDefined();
+    expect(globTool).toBeDefined();
+
+    const grepResult = JSON.parse(
+      (await grepTool!.execute({ pattern: "Hello", path: root })).content,
+    ) as { matches: Array<{ filePath: string; line: number }> };
+    expect(grepResult.matches.some((match) => match.filePath === "src/app.ts")).toBe(true);
+
+    const searchResult = JSON.parse(
+      (await searchFilesTool!.execute({ query: "app", path: root })).content,
+    ) as { matches: string[] };
+    expect(searchResult.matches).toContain("src/app.ts");
+
+    const globResult = JSON.parse(
+      (await globTool!.execute({ pattern: "**/*.ts", path: root })).content,
+    ) as { matches: string[] };
+    expect(globResult.matches).toContain("src/app.ts");
+  });
+
+  it("keeps grep and file search scoped to the requested subpath", async () => {
+    const root = await createRepoFixture();
+    createdRoots.push(root);
+    await mkdir(join(root, "docs"), { recursive: true });
+    await writeFile(join(root, "docs", "notes.md"), "greet from docs\n", "utf8");
+
+    const tools = createCodingTools({
+      allowedPaths: [root],
+      persistenceRootDir: root,
+    });
+    const grepTool = tools.find(byName("system.grep"));
+    const searchFilesTool = tools.find(byName("system.searchFiles"));
+    expect(grepTool).toBeDefined();
+    expect(searchFilesTool).toBeDefined();
+
+    const grepResult = JSON.parse(
+      (await grepTool!.execute({ pattern: "docs", path: join(root, "src") })).content,
+    ) as { matches: Array<{ filePath: string }> };
+    expect(grepResult.matches).toHaveLength(0);
+
+    const searchResult = JSON.parse(
+      (await searchFilesTool!.execute({ query: "notes", path: join(root, "src") })).content,
+    ) as { matches: string[] };
+    expect(searchResult.matches).toHaveLength(0);
+  });
+
+  it("supports additive grep output modes and structured regex failures", async () => {
+    const root = await createWorkspaceFixture();
+    createdRoots.push(root);
+    const tools = createCodingTools({
+      allowedPaths: [root],
+      persistenceRootDir: root,
+    });
+    const grepTool = tools.find(byName("system.grep"));
+    expect(grepTool).toBeDefined();
+
+    const contentResult = JSON.parse(
+      (
+        await grepTool!.execute({
+          pattern: "return",
+          path: root,
+          outputMode: "content",
+          contextLines: 0,
+          headLimit: 1,
+        })
+      ).content,
+    ) as { content: string; outputMode: string };
+    expect(contentResult.outputMode).toBe("content");
+    expect(contentResult.content).toContain("return");
+
+    const countResult = JSON.parse(
+      (
+        await grepTool!.execute({
+          pattern: "return",
+          path: root,
+          outputMode: "count",
+        })
+      ).content,
+    ) as { numMatches: number; outputMode: string };
+    expect(countResult.outputMode).toBe("count");
+    expect(countResult.numMatches).toBeGreaterThan(0);
+
+    const invalidRegexResult = await grepTool!.execute({
+      pattern: "(",
+      path: root,
+      regex: true,
+    });
+    expect(invalidRegexResult.isError).toBe(true);
+    expect(invalidRegexResult.content).toContain("error");
+  });
+
+  it("returns a structured error for invalid searchFiles regex input", async () => {
+    const root = await createWorkspaceFixture();
+    createdRoots.push(root);
+    const tools = createCodingTools({
+      allowedPaths: [root],
+      persistenceRootDir: root,
+    });
+    const searchFilesTool = tools.find(byName("system.searchFiles"));
+    expect(searchFilesTool).toBeDefined();
+
+    const result = await searchFilesTool!.execute({
+      query: "(",
+      path: root,
+      regex: true,
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("Invalid regex pattern");
   });
 });

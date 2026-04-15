@@ -6,6 +6,7 @@ import type { LLMPipelineStopReason } from "../llm/policy.js";
 import type { ActiveTaskContext } from "../llm/turn-execution-contract-types.js";
 import type { LLMStatefulResumeAnchor } from "../llm/types.js";
 import type { MemoryBackend } from "../memory/types.js";
+import { repairToolTurnSequence } from "../llm/tool-turn-validator.js";
 import type {
   RuntimeContractSnapshot,
   RuntimeContractStatusSnapshot,
@@ -451,10 +452,10 @@ export function buildSessionReplayHistory(
   thread: readonly LLMMessage[],
   replayState: PersistedSessionReplayState | undefined,
 ): readonly LLMMessage[] {
-  return [
+  return repairToolTurnSequence([
     ...thread,
     ...(replayState?.tailEvents ? cloneReplayTailEvents(replayState.tailEvents) : []),
-  ];
+  ]);
 }
 
 function buildPersistedSessionRuntimeState(

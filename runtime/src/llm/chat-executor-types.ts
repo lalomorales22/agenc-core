@@ -152,6 +152,7 @@ export interface ToolCallRecord {
   readonly toolCallId?: string;
   readonly synthetic?: boolean;
   readonly protocolRepairReason?: string;
+  readonly failureBudgetExempt?: boolean;
 }
 
 type ChatExecutionTraceEventType =
@@ -216,6 +217,8 @@ export interface ChatExecuteParams {
   readonly toolBudgetPerRequest?: number;
   /** Per-call model recall budget (calls after the first) — overrides the constructor default. */
   readonly maxModelRecallsPerRequest?: number;
+  /** Per-call failed-tool budget — overrides the constructor default. */
+  readonly maxFailureBudgetPerRequest?: number;
   /** Per-call end-to-end timeout in milliseconds — overrides the constructor default. 0 = unlimited. */
   readonly requestTimeoutMs?: number;
   /** Optional explicit per-turn output-token continuation budget. Null disables Claude-style budget continuation. */
