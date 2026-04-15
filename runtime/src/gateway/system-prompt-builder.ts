@@ -270,7 +270,7 @@ function buildModelDisclosureContext(config: GatewayConfig): string {
  * Assemble the full system prompt from workspace files, personality
  * templates, and the desktop / model-disclosure context sections.
  */
-export async function buildSystemPrompt(
+export async function buildBaseSystemPrompt(
   config: GatewayConfig,
   opts: {
     yolo: boolean;
@@ -370,6 +370,18 @@ export async function buildSystemPrompt(
     `System prompt loaded from default personality template: ${getDefaultWorkspacePath()}`,
   );
   return prompt;
+}
+
+export async function buildSystemPrompt(
+  config: GatewayConfig,
+  opts: {
+    yolo: boolean;
+    configPath: string;
+    logger: Logger;
+  },
+  options?: { forVoice?: boolean },
+): Promise<string> {
+  return buildBaseSystemPrompt(config, opts, options);
 }
 
 /**

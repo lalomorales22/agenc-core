@@ -4,6 +4,7 @@ import type {
   ChatToolRoutingSummary,
 } from "../llm/chat-executor.js";
 import { executeChatToLegacyResult } from "../llm/execute-chat.js";
+import { normalizePromptEnvelope } from "../llm/prompt-envelope.js";
 import type {
   LLMProviderTraceEvent,
   LLMStructuredOutputRequest,
@@ -196,6 +197,9 @@ export async function executeTextChannelTurn(
     systemPrompt: profileAwareSystemPrompt,
     routedToolNames: toolRoutingDecision?.routedToolNames,
   });
+  const promptEnvelope = normalizePromptEnvelope({
+    baseSystemPrompt: effectiveSystemPrompt,
+  });
 
   if (traceConfig.enabled) {
     const requestTracePayload = {
@@ -281,7 +285,7 @@ export async function executeTextChannelTurn(
   const rawResult = await executeChatToLegacyResult(chatExecutor, {
     message: msg,
     history: session.history,
-    systemPrompt: effectiveSystemPrompt,
+    promptEnvelope,
     sessionId: msg.sessionId,
     ...(sessionActiveTaskContext
       ? { runtimeContext: { activeTaskContext: sessionActiveTaskContext } }

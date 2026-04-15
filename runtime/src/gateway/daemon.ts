@@ -216,6 +216,7 @@ import {
   buildSystemPrompt,
   resolveActiveHostWorkspacePath,
 } from "./system-prompt-builder.js";
+import { createPromptEnvelope } from "../llm/prompt-envelope.js";
 import {
   HookDispatcher,
   createBuiltinHooks,
@@ -4627,7 +4628,9 @@ export class DaemonManager {
         ...(taskId ? { taskId } : {}),
         task: params.objective,
         prompt: params.prompt ?? params.objective,
-        ...(resolvedRole.systemPrompt ? { systemPrompt: resolvedRole.systemPrompt } : {}),
+        ...(resolvedRole.systemPrompt
+          ? { promptEnvelope: createPromptEnvelope(resolvedRole.systemPrompt) }
+          : {}),
         ...(resolvedRole.toolNames ? { tools: resolvedRole.toolNames } : {}),
         workingDirectory: scope.workingDirectory,
         ...(scope.workspaceRoot ? { workspaceRoot: scope.workspaceRoot } : {}),

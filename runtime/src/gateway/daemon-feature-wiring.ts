@@ -13,6 +13,7 @@ import type { MemoryBackend } from "../memory/types.js";
 import type { ChannelPlugin } from "./channel.js";
 import type { ChatExecutor } from "../llm/chat-executor.js";
 import type { ToolHandler, LLMProvider } from "../llm/types.js";
+import { createPromptEnvelope } from "../llm/prompt-envelope.js";
 import type { Tool } from "../tools/types.js";
 import { loadWallet } from "./wallet-loader.js";
 import { WorkspaceLoader } from "./workspace-files.js";
@@ -309,7 +310,9 @@ export async function wireAutonomousFeatures(
       chatExecutor: ctx.chatExecutor!,
       toolHandler: ctx.baseToolHandler!,
       memory: ctx.memoryBackend!,
-      systemPrompt: "You are an autonomous AI research agent.",
+      promptEnvelope: createPromptEnvelope(
+        "You are an autonomous AI research agent.",
+      ),
       communicator,
       goalManager: ctx.goalManager,
       traceProviderPayloads,

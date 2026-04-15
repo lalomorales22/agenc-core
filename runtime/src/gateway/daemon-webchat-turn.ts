@@ -7,6 +7,7 @@ import type {
 import type { ChatExecutionTraceEvent } from "../llm/chat-executor-types.js";
 import { hasActionableStatefulFallback } from "../llm/chat-executor-recovery.js";
 import { executeChatToLegacyResult } from "../llm/execute-chat.js";
+import { normalizePromptEnvelope } from "../llm/prompt-envelope.js";
 import type {
   LLMProviderTraceEvent,
   StreamProgressCallback,
@@ -202,6 +203,9 @@ export async function executeWebChatConversationTurn(
       systemPrompt: profileAwareSystemPrompt,
       routedToolNames: toolRoutingDecision?.routedToolNames,
     });
+    const promptEnvelope = normalizePromptEnvelope({
+      baseSystemPrompt: effectiveSystemPrompt,
+    });
 
     if (traceConfig.enabled) {
       const requestTracePayload = {
@@ -296,7 +300,7 @@ export async function executeWebChatConversationTurn(
     const rawResult = await executeChatToLegacyResult(chatExecutor, {
       message: effectiveMessage,
       history: session.history,
-      systemPrompt: effectiveSystemPrompt,
+      promptEnvelope,
       sessionId: msg.sessionId,
       runtimeContext:
         typeof runtimeWorkspaceRoot === "string" || sessionActiveTaskContext

@@ -9,6 +9,7 @@
 
 import type { ChatExecutor } from "../llm/chat-executor.js";
 import type { ChatExecutorResult } from "../llm/chat-executor-types.js";
+import type { PromptEnvelopeV1 } from "../llm/prompt-envelope.js";
 import type { LLMMessage, LLMProvider, ToolHandler } from "../llm/types.js";
 import type { GatewayMessage } from "./message.js";
 import type { Logger } from "../utils/logger.js";
@@ -203,7 +204,7 @@ export interface PreparedCycleContext {
   readonly sessionId: string;
   readonly cycleToolHandler: ToolHandler;
   readonly actorPrompt: string;
-  readonly actorSystemPrompt: string;
+  readonly actorPromptEnvelope: PromptEnvelopeV1;
 }
 
 export interface ResolvedCycleOutcome {

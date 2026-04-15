@@ -268,7 +268,10 @@ describe("VoiceBridge delegation", () => {
     expect(freshExecute).toHaveBeenCalledWith(
       expect.objectContaining({
         sessionId: "session-1",
-        systemPrompt: "You are a helpful assistant.",
+        promptEnvelope: expect.objectContaining({
+          kind: "prompt_envelope_v1",
+          baseSystemPrompt: "You are a helpful assistant.",
+        }),
       }),
     );
     expect(send).toHaveBeenCalledWith(
@@ -363,6 +366,10 @@ describe("VoiceBridge delegation", () => {
 
     expect(execute).toHaveBeenCalledWith(
       expect.objectContaining({
+        promptEnvelope: expect.objectContaining({
+          kind: "prompt_envelope_v1",
+          baseSystemPrompt: "You are a helpful assistant.",
+        }),
         trace: expect.objectContaining({
           includeProviderPayloads: true,
           onProviderTraceEvent: expect.any(Function),

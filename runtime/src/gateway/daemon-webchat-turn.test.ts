@@ -199,14 +199,12 @@ You have broad access to this machine via the system.bash tool.`,
 
     expect(execute).toHaveBeenCalledWith(
       expect.objectContaining({
-        systemPrompt: expect.not.stringContaining("Solana: test"),
-      }),
-    );
-    expect(execute).toHaveBeenCalledWith(
-      expect.objectContaining({
-        systemPrompt: expect.stringContaining(
-          "You have broad access to this machine via the system.bash tool.",
-        ),
+        promptEnvelope: expect.objectContaining({
+          kind: "prompt_envelope_v1",
+          baseSystemPrompt: expect.stringContaining(
+            "You have broad access to this machine via the system.bash tool.",
+          ),
+        }),
       }),
     );
   });

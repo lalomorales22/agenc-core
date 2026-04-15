@@ -49,6 +49,23 @@ describe("normalizeMessagesForAPI", () => {
     expect(userMessages[0]!.content).toBe("part a\n\npart b");
   });
 
+  it("does not merge synthetic user-context messages into adjacent user turns", () => {
+    const input: LLMMessage[] = [
+      { role: "system", content: "sys" },
+      {
+        role: "user",
+        content: "<system-reminder>\n# context\nvalue\n</system-reminder>",
+        runtimeOnly: { mergeBoundary: "user_context" },
+      },
+      { role: "user", content: "real user turn" },
+    ];
+    const out = normalizeMessagesForAPI(input);
+    const userMessages = out.filter((m) => m.role === "user");
+    expect(userMessages).toHaveLength(2);
+    expect(userMessages[0]!.content).toContain("<system-reminder>");
+    expect(userMessages[1]!.content).toBe("real user turn");
+  });
+
   it("drops orphan tool messages", () => {
     const input: LLMMessage[] = [
       { role: "system", content: "sys" },

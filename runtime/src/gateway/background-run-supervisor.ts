@@ -13,6 +13,7 @@
 import type { ChatExecutor } from "../llm/chat-executor.js";
 import type { ChatExecutorResult } from "../llm/chat-executor-types.js";
 import { executeChatToLegacyResult } from "../llm/execute-chat.js";
+import { normalizePromptEnvelope } from "../llm/prompt-envelope.js";
 import type { LLMProvider, ToolHandler } from "../llm/types.js";
 import type { Logger } from "../utils/logger.js";
 import { silentLogger } from "../utils/logger.js";
@@ -3577,13 +3578,13 @@ export class BackgroundRunSupervisor {
     sessionId: string;
     cycleToolHandler: ToolHandler;
     actorPrompt: string;
-    actorSystemPrompt: string;
+    actorPromptEnvelope: import("../llm/prompt-envelope.js").PromptEnvelopeV1;
   }): Promise<{
     actorResult?: ChatExecutorResult;
     decision: BackgroundRunDecision;
     heartbeatMs?: number;
   }> {
-    const { run, sessionId, cycleToolHandler, actorPrompt, actorSystemPrompt } = params;
+    const { run, sessionId, cycleToolHandler, actorPrompt, actorPromptEnvelope } = params;
     let actorResult: ChatExecutorResult | undefined;
     let decision: BackgroundRunDecision;
     let heartbeatMs: number | undefined;
@@ -3645,7 +3646,7 @@ export class BackgroundRunSupervisor {
         actorResult = await executeChatToLegacyResult(this.chatExecutor, {
           message: toRunMessage(actorPrompt, sessionId, run.id, run.cycleCount),
           history: run.internalHistory,
-          systemPrompt: actorSystemPrompt,
+          promptEnvelope: actorPromptEnvelope,
           sessionId,
           requestTimeoutMs: BACKGROUND_RUN_ACTOR_REQUEST_TIMEOUT_MS,
           stateful: run.carryForward?.providerContinuation
@@ -3855,17 +3856,26 @@ export class BackgroundRunSupervisor {
       sessionId,
       cycleToolHandler,
       actorPrompt: buildActorPrompt(run),
-      actorSystemPrompt: `${appendShellProfilePromptSection({
-        systemPrompt: this.getSystemPrompt(),
-        profile: run.shellProfile ?? DEFAULT_SESSION_SHELL_PROFILE,
-      })}\n\n${BACKGROUND_ACTOR_SECTION}`,
+      actorPromptEnvelope: normalizePromptEnvelope({
+        baseSystemPrompt: appendShellProfilePromptSection({
+          systemPrompt: this.getSystemPrompt(),
+          profile: run.shellProfile ?? DEFAULT_SESSION_SHELL_PROFILE,
+        }),
+        systemSections: [
+          {
+            source: "background_actor",
+            content: BACKGROUND_ACTOR_SECTION,
+          },
+        ],
+        userSections: [],
+      }),
     };
   }
 
   private async resolvePreparedCycleOutcome(
     context: PreparedCycleContext,
   ): Promise<ResolvedCycleOutcome | undefined> {
-    const { run, sessionId, cycleToolHandler, actorPrompt, actorSystemPrompt } = context;
+    const { run, sessionId, cycleToolHandler, actorPrompt, actorPromptEnvelope } = context;
     const trace = buildBackgroundRunTraceIds(run, "execute_cycle");
     const cycleSpan = startReplaySpan({
       name: "background_run.execute_cycle",
@@ -3908,7 +3918,7 @@ export class BackgroundRunSupervisor {
         sessionId,
         cycleToolHandler,
         actorPrompt,
-        actorSystemPrompt,
+        actorPromptEnvelope,
       }));
     } catch (error) {
       if (run.abortController?.signal.aborted) {

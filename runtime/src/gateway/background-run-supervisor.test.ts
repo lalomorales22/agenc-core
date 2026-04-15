@@ -585,8 +585,19 @@ describe("background-run-supervisor", () => {
     });
 
     expect(execute.mock.calls[0]?.[0].message.content).toContain("Cycle: 1");
-    expect(execute.mock.calls[0]?.[0].systemPrompt).toContain(
-      "launch it so the tool call returns immediately",
+    expect(execute.mock.calls[0]?.[0].promptEnvelope).toEqual(
+      expect.objectContaining({
+        kind: "prompt_envelope_v1",
+        baseSystemPrompt: expect.any(String),
+        systemSections: expect.arrayContaining([
+          expect.objectContaining({
+            source: "background_actor",
+            content: expect.stringContaining(
+              "launch it so the tool call returns immediately",
+            ),
+          }),
+        ]),
+      }),
     );
     expect(execute.mock.calls[0]?.[0].maxToolRounds).toBe(0);
     expect(execute.mock.calls[0]?.[0].toolBudgetPerRequest).toBe(0);

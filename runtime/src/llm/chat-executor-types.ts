@@ -5,6 +5,7 @@
  */
 
 import type { GatewayMessage } from "../gateway/message.js";
+import type { PromptEnvelopeV1 } from "./prompt-envelope.js";
 import type {
   LLMMessage,
   LLMProviderEvidence,
@@ -194,7 +195,7 @@ export interface ChatExecutionTraceEvent {
 export interface ChatExecuteParams {
   readonly message: GatewayMessage;
   readonly history: readonly LLMMessage[];
-  readonly systemPrompt: string;
+  readonly promptEnvelope: PromptEnvelopeV1;
   readonly sessionId: string;
   /** Optional request-scoped structured output contract. */
   readonly structuredOutput?: LLMStructuredOutputRequest;
@@ -631,7 +632,8 @@ export interface ExecutionContext {
   // --- Immutable request params (set once in init, never mutated) ---
   readonly message: GatewayMessage;
   readonly messageText: string;
-  readonly systemPrompt: string;
+  readonly baseSystemPrompt: string;
+  promptEnvelope: PromptEnvelopeV1;
   readonly sessionId: string;
   readonly structuredOutput?: ChatExecuteParams["structuredOutput"];
   readonly runtimeWorkspaceRoot?: string;
@@ -726,7 +728,7 @@ export interface ExecutionContext {
 interface BuildExecutionContextParams {
   readonly message: GatewayMessage;
   readonly messageText: string;
-  readonly systemPrompt: string;
+  readonly promptEnvelope: PromptEnvelopeV1;
   readonly sessionId: string;
   readonly structuredOutput?: ChatExecuteParams["structuredOutput"];
   readonly runtimeContext?: ChatExecuteParams["runtimeContext"];
@@ -774,7 +776,8 @@ export function buildDefaultExecutionContext(
     // --- Immutable request params ---
     message: params.message,
     messageText: params.messageText,
-    systemPrompt: params.systemPrompt,
+    baseSystemPrompt: params.promptEnvelope.baseSystemPrompt,
+    promptEnvelope: params.promptEnvelope,
     sessionId: params.sessionId,
     structuredOutput: params.structuredOutput,
     runtimeWorkspaceRoot:

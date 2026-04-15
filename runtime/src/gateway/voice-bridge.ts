@@ -22,6 +22,7 @@ import type { Logger } from "../utils/logger.js";
 import type { ToolHandler } from "../llm/types.js";
 import type { ChatExecutor } from "../llm/chat-executor.js";
 import { executeChatToLegacyResult } from "../llm/execute-chat.js";
+import { normalizePromptEnvelope } from "../llm/prompt-envelope.js";
 import type { SessionManager } from "./session.js";
 import type { HookDispatcher } from "./hooks.js";
 import type { ApprovalEngine } from "./approvals.js";
@@ -805,7 +806,9 @@ export class VoiceBridge {
       const result = await executeChatToLegacyResult(chatExecutor, {
         message: gatewayMsg,
         history,
-        systemPrompt: this.config.systemPrompt,
+        promptEnvelope: normalizePromptEnvelope({
+          baseSystemPrompt: this.config.systemPrompt,
+        }),
         sessionId,
         toolHandler: delegationToolHandler,
         maxToolRounds: MAX_DELEGATION_TOOL_ROUNDS,

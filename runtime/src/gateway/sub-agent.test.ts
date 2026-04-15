@@ -22,6 +22,7 @@ import type {
 import type { Tool, ToolResult } from "../tools/types.js";
 import { ToolRegistry } from "../tools/registry.js";
 import { RuntimeErrorCodes } from "../types/errors.js";
+import { createPromptEnvelope } from "../llm/prompt-envelope.js";
 
 // ============================================================================
 // Helpers
@@ -1005,13 +1006,13 @@ describe("SubAgentManager", () => {
 
       try {
         const manager = new SubAgentManager(makeManagerConfig({
-          systemPrompt: "parent sub-agent prompt",
+          promptEnvelope: createPromptEnvelope("parent sub-agent prompt"),
         }));
         const sessionId = await manager.spawn({
           parentSessionId: "p",
           task: "verify the implementation",
           prompt: "Run the verifier checks",
-          systemPrompt: "verifier worker prompt",
+          promptEnvelope: createPromptEnvelope("verifier worker prompt"),
           tools: ["system.readFile", "system.bash"],
           requiredToolEvidence: {
             maxCorrectionAttempts: 1,
@@ -1027,7 +1028,12 @@ describe("SubAgentManager", () => {
         expect(manager.getResult(sessionId)?.success).toBe(true);
         expect(executeSpy).toHaveBeenCalledWith(
           expect.objectContaining({
-            systemPrompt: expect.stringContaining("verifier worker prompt"),
+            promptEnvelope: expect.objectContaining({
+              kind: "prompt_envelope_v1",
+              baseSystemPrompt: expect.stringContaining(
+                "verifier worker prompt",
+              ),
+            }),
             requiredToolEvidence: expect.objectContaining({
               executionEnvelope: expect.objectContaining({
                 verificationMode: "grounded_read",
@@ -2501,7 +2507,7 @@ describe("SubAgentManager", () => {
       const manager = new SubAgentManager(
         makeManagerConfig({
           createContext: vi.fn(async () => mockContext),
-          systemPrompt: "Custom prompt for sub-agent",
+          promptEnvelope: createPromptEnvelope("Custom prompt for sub-agent"),
         }),
       );
 

@@ -84,6 +84,8 @@ export function normalizeMessagesForAPI(
       tail &&
       tail.role === "user" &&
       message.role === "user" &&
+      !tail.runtimeOnly?.mergeBoundary &&
+      !message.runtimeOnly?.mergeBoundary &&
       typeof tail.content === "string" &&
       typeof message.content === "string"
     ) {

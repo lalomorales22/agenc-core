@@ -18,6 +18,11 @@ import { createGatewayMessage } from "./message.js";
 import { ChatExecutor } from "../llm/chat-executor.js";
 import { runSubagentToLegacyResult } from "./subagent-query.js";
 import { buildModelRoutingPolicy } from "../llm/model-routing-policy.js";
+import {
+  createPromptEnvelope,
+  normalizePromptEnvelope,
+  type PromptEnvelopeV1,
+} from "../llm/prompt-envelope.js";
 import type { GatewayLLMConfig } from "./types.js";
 import type { PromptBudgetConfig } from "../llm/prompt-budget.js";
 import {
@@ -170,7 +175,7 @@ export interface SubAgentConfig {
   readonly toolBundle?: string;
   readonly taskId?: string;
   readonly prompt?: string;
-  readonly systemPrompt?: string;
+  readonly promptEnvelope?: PromptEnvelopeV1;
   readonly continuationSessionId?: string;
   readonly timeoutMs?: number;
   readonly toolBudgetPerRequest?: number;
@@ -228,7 +233,7 @@ export interface SubAgentManagerConfig {
   readonly maxDepth?: number;
   readonly maxRetainedTerminalHandles?: number;
   readonly terminalHandleRetentionMs?: number;
-  readonly systemPrompt?: string;
+  readonly promptEnvelope?: PromptEnvelopeV1;
   readonly composeToolHandler?: (params: {
     sessionIdentity: SubAgentSessionIdentity;
     context: IsolatedSessionContext;
@@ -328,12 +333,66 @@ interface PersistedSubAgentState {
   readonly finishedAt: number | null;
 }
 
+interface LegacySubAgentConfigRecord extends Record<string, unknown> {
+  readonly promptEnvelope?: PromptEnvelopeV1;
+  readonly systemPrompt?: string;
+}
+
 function subAgentStateKey(sessionId: string): string {
   return `${SUB_AGENT_STATE_KEY_PREFIX}${sessionId}`;
 }
 
 function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function normalizeSubAgentPromptEnvelope(
+  envelope: PromptEnvelopeV1 | undefined,
+  fallbackBaseSystemPrompt: string,
+): PromptEnvelopeV1 {
+  return normalizePromptEnvelope(
+    envelope ?? createPromptEnvelope(fallbackBaseSystemPrompt),
+  );
+}
+
+function normalizeSubAgentConfig(
+  config: SubAgentConfig,
+  managerPromptEnvelope?: PromptEnvelopeV1,
+): SubAgentConfig {
+  return {
+    ...config,
+    promptEnvelope: normalizeSubAgentPromptEnvelope(
+      config.promptEnvelope,
+      managerPromptEnvelope?.baseSystemPrompt ?? DEFAULT_SUB_AGENT_SYSTEM_PROMPT,
+    ),
+  };
+}
+
+function normalizePersistedSubAgentConfig(
+  value: unknown,
+): SubAgentConfig | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const rawConfig = value as LegacySubAgentConfigRecord;
+  const promptEnvelope = normalizeSubAgentPromptEnvelope(
+    rawConfig.promptEnvelope,
+    typeof rawConfig.systemPrompt === "string"
+      ? rawConfig.systemPrompt
+      : DEFAULT_SUB_AGENT_SYSTEM_PROMPT,
+  );
+  const normalized = {
+    ...(cloneJson(rawConfig) as Record<string, unknown>),
+    promptEnvelope,
+  };
+  delete (normalized as Record<string, unknown>).systemPrompt;
+  return normalized as SubAgentConfig;
+}
+
+function normalizePromptEnvelopeFingerprint(
+  envelope: PromptEnvelopeV1 | undefined,
+): string {
+  return stableConfigFragment(normalizePromptEnvelope(envelope ?? createPromptEnvelope("")));
 }
 
 function coercePersistedSubAgentState(
@@ -365,13 +424,17 @@ function coercePersistedSubAgentState(
   ) {
     return undefined;
   }
+  const normalizedConfig = normalizePersistedSubAgentConfig(raw.config);
+  if (!normalizedConfig) {
+    return undefined;
+  }
   return {
     version: 1,
     sessionId: raw.sessionId,
     parentSessionId: raw.parentSessionId,
     depth: raw.depth,
     task: raw.task,
-    config: cloneJson(raw.config as SubAgentConfig),
+    config: normalizedConfig,
     status: raw.status,
     result:
       raw.result && typeof raw.result === "object"
@@ -504,6 +567,16 @@ function validateContinuationCompatibility(params: {
     return "continuationSessionId must preserve verifier obligations";
   }
 
+  const existingPromptEnvelope = normalizePromptEnvelopeFingerprint(
+    params.existing.promptEnvelope,
+  );
+  const nextPromptEnvelope = normalizePromptEnvelopeFingerprint(
+    params.next.promptEnvelope,
+  );
+  if (existingPromptEnvelope !== nextPromptEnvelope) {
+    return "continuationSessionId must preserve delegated prompt state";
+  }
+
   return undefined;
 }
 
@@ -557,31 +630,35 @@ export class SubAgentManager {
 
   async spawn(config: SubAgentConfig): Promise<string> {
     this.pruneTerminalHandles();
+    const normalizedConfig = normalizeSubAgentConfig(
+      config,
+      this.config.promptEnvelope,
+    );
 
     // Validate inputs
-    if (!config.parentSessionId) {
+    if (!normalizedConfig.parentSessionId) {
       throw new SubAgentSpawnError("", "parentSessionId must be non-empty");
     }
-    if (!config.task) {
+    if (!normalizedConfig.task) {
       throw new SubAgentSpawnError(
-        config.parentSessionId,
+        normalizedConfig.parentSessionId,
         "task must be non-empty",
       );
     }
     if (isRuntimeLimitReached(this.activeCount, this.maxConcurrent)) {
       throw new SubAgentSpawnError(
-        config.parentSessionId,
+        normalizedConfig.parentSessionId,
         `max concurrent sub-agents reached (${this.maxConcurrent})`,
       );
     }
-    const continuationHandle = await this.resolveContinuationHandle(config);
-    const parentDepth = this.resolveSessionDepth(config.parentSessionId);
+    const continuationHandle = await this.resolveContinuationHandle(normalizedConfig);
+    const parentDepth = this.resolveSessionDepth(normalizedConfig.parentSessionId);
     const depth = continuationHandle
       ? continuationHandle.depth
       : parentDepth + 1;
     if (!continuationHandle && isRuntimeLimitExceeded(depth, this.maxDepth)) {
       throw new SubAgentSpawnError(
-        config.parentSessionId,
+        normalizedConfig.parentSessionId,
         `max sub-agent depth reached (${this.maxDepth})`,
       );
     }
@@ -592,10 +669,10 @@ export class SubAgentManager {
 
     const handle: SubAgentHandle = {
       sessionId,
-      parentSessionId: config.parentSessionId,
+      parentSessionId: normalizedConfig.parentSessionId,
       depth,
-      task: config.task,
-      config,
+      task: normalizedConfig.task,
+      config: normalizedConfig,
       // Phase 2.8: sub-agent memory inheritance
       // "none" = empty history (default, fully isolated)
       // "read_snapshot" handled by caller injecting parent context as system messages
@@ -619,7 +696,7 @@ export class SubAgentManager {
     });
 
     this.logger.info(
-      `Sub-agent ${sessionId} spawned for parent ${config.parentSessionId}`,
+      `Sub-agent ${sessionId} spawned for parent ${normalizedConfig.parentSessionId}`,
     );
     return sessionId;
   }
@@ -934,7 +1011,10 @@ export class SubAgentManager {
       parentSessionId: persisted.parentSessionId,
       depth: persisted.depth,
       task: persisted.task,
-      config: cloneJson(persisted.config),
+      config: normalizeSubAgentConfig(
+        persisted.config,
+        this.config.promptEnvelope,
+      ),
       history: [...recoverTranscriptHistory(transcript, {
         injectContinuationPrompt: true,
       })],
@@ -1116,13 +1196,17 @@ export class SubAgentManager {
         scope: "dm",
       });
 
-      const systemPrompt = appendShellProfilePromptSection({
-        systemPrompt:
-          handle.config.systemPrompt ??
-          this.config.systemPrompt ??
-          DEFAULT_SUB_AGENT_SYSTEM_PROMPT,
-        profile: handle.config.shellProfile ?? "general",
+      const promptEnvelope = normalizePromptEnvelope({
+        ...(handle.config.promptEnvelope ??
+          createPromptEnvelope(DEFAULT_SUB_AGENT_SYSTEM_PROMPT)),
+        baseSystemPrompt: appendShellProfilePromptSection({
+          systemPrompt:
+            handle.config.promptEnvelope?.baseSystemPrompt ??
+            DEFAULT_SUB_AGENT_SYSTEM_PROMPT,
+          profile: handle.config.shellProfile ?? "general",
+        }),
       });
+      const baseSystemPrompt = promptEnvelope.baseSystemPrompt;
       const subAgentTraceId = `subagent:${handle.sessionId}:${Date.now()}`;
       const unsafeBenchmarkMode = handle.config.unsafeBenchmarkMode === true;
       const traceEnabled =
@@ -1236,7 +1320,10 @@ export class SubAgentManager {
           params: {
             message,
             history: handle.history,
-            systemPrompt,
+            promptEnvelope: {
+              ...promptEnvelope,
+              baseSystemPrompt,
+            },
             sessionId: handle.sessionId,
             ...(spawnRoutedTools
               ? { toolRouting: { routedToolNames: spawnRoutedTools } }

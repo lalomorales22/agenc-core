@@ -29,7 +29,7 @@
  * @module
  */
 
-import { injectContext } from "./chat-executor-context-injection.js";
+import { collectContextSections } from "./chat-executor-context-injection.js";
 import { compactHistory } from "./chat-executor-history-compaction.js";
 import { renderArtifactContextPrompt } from "./context-compaction.js";
 import {
@@ -43,6 +43,12 @@ import {
   normalizeHistoryForStatefulReconciliation,
   appendUserMessage,
 } from "./chat-executor-text.js";
+import {
+  flattenPromptEnvelope,
+  normalizePromptEnvelope,
+  type PromptEnvelopeV1,
+  type PromptSection,
+} from "./prompt-envelope.js";
 import {
   mergeTurnExecutionRequiredToolEvidence,
   resolveTurnExecutionContract,
@@ -140,7 +146,7 @@ export async function initializeExecutionContext(
   deps: InitializeExecutionContextDependencies,
   helpers: InitializeExecutionContextHelpers,
 ): Promise<ExecutionContext> {
-  const { message, systemPrompt, sessionId, signal } = params;
+  const { message, sessionId, signal } = params;
   let { history } = params;
   const effectiveMaxToolRounds =
     typeof params.maxToolRounds === "number" && Number.isFinite(params.maxToolRounds)
@@ -252,12 +258,13 @@ export async function initializeExecutionContext(
     base: params.requiredToolEvidence,
     turnExecutionContract,
   });
+  const promptEnvelope = normalizePromptEnvelope(params.promptEnvelope);
 
   const ctx = buildDefaultExecutionContext(
     {
       message,
       messageText,
-      systemPrompt,
+      promptEnvelope,
       sessionId,
       structuredOutput: params.structuredOutput,
       runtimeContext: params.runtimeContext,
@@ -315,25 +322,27 @@ export async function initializeExecutionContext(
     return ctx;
   }
 
-  // Build messages array with explicit section tags for prompt budgeting.
-  pushMessage(ctx, { role: "system", content: ctx.systemPrompt }, "system_anchor");
+  const systemSections: PromptSection[] = [...ctx.promptEnvelope.systemSections];
+  const userSections: PromptSection[] = [...ctx.promptEnvelope.userSections];
   if (
     ctx.stateful?.sessionStartContextMessages &&
     ctx.stateful.sessionStartContextMessages.length > 0
   ) {
     for (const message of ctx.stateful.sessionStartContextMessages) {
-      pushMessage(ctx, message, "system_runtime");
+      if (typeof message.content !== "string" || message.content.trim().length === 0) {
+        continue;
+      }
+      systemSections.push({
+        source: "session_start_context",
+        content: message.content.trim(),
+      });
     }
   }
   if (ctx.stateful?.artifactContext) {
-    pushMessage(
-      ctx,
-      {
-        role: "system",
-        content: renderArtifactContextPrompt(ctx.stateful.artifactContext),
-      },
-      "system_runtime",
-    );
+    systemSections.push({
+      source: "artifact_context",
+      content: renderArtifactContextPrompt(ctx.stateful.artifactContext),
+    });
   }
 
   const isConcordiaTurn = isConcordiaTurnMessage;
@@ -346,73 +355,96 @@ export async function initializeExecutionContext(
   // Context injection — skill, identity, memory, and learning (all best-effort)
   const contextInjectionDeps = { promptBudget: deps.promptBudget };
   if (enableSkillContext) {
-    await injectContext(
+    const sections = await collectContextSections(
       ctx,
       deps.skillInjector,
       ctx.messageText,
       ctx.sessionId,
-      ctx.messages,
-      ctx.messageSections,
       "system_runtime",
       contextInjectionDeps,
     );
+    for (const entry of sections) {
+      (entry.role === "user" ? userSections : systemSections).push(entry.section);
+    }
   }
   // Phase 5.4: inject agent identity (personality, beliefs, traits) after skills
   // but before memory/learning so the agent's persona frames retrieved context.
   // Identity is always injected (not gated on hasHistory) since it defines who the agent is.
   if (enableIdentityContext && deps.identityProvider) {
-    await injectContext(
+    const sections = await collectContextSections(
       ctx,
       deps.identityProvider,
       ctx.messageText,
       ctx.sessionId,
-      ctx.messages,
-      ctx.messageSections,
       "system_runtime",
       contextInjectionDeps,
     );
+    for (const entry of sections) {
+      systemSections.push(entry.section);
+    }
   }
   // Persistent semantic memory (workspace-scoped, cross-session) is always
   // injected — it provides facts learned in prior sessions (e.g. user's name).
   // The retriever handles its own scoping: working memory is session-scoped,
   // semantic/episodic memory is workspace-scoped with maxAge filtering.
   if (enableMemoryContext && ctx.hasHistory) {
-    await injectContext(
+    const sections = await collectContextSections(
       ctx,
       deps.memoryRetriever,
       ctx.messageText,
       ctx.sessionId,
-      ctx.messages,
-      ctx.messageSections,
       "memory_semantic",
       contextInjectionDeps,
     );
+    for (const entry of sections) {
+      systemSections.push(entry.section);
+    }
   }
   // Session-scoped providers (learning patterns, progress tracker) are gated
   // on hasHistory since they rely on current-session context and should not
   // inject stale session state into a truly fresh first turn.
   if (enableMemoryContext && ctx.hasHistory) {
-    await injectContext(
+    const learningSections = await collectContextSections(
       ctx,
       deps.learningProvider,
       ctx.messageText,
       ctx.sessionId,
-      ctx.messages,
-      ctx.messageSections,
       "memory_episodic",
       contextInjectionDeps,
     );
-    await injectContext(
+    for (const entry of learningSections) {
+      systemSections.push(entry.section);
+    }
+    const progressSections = await collectContextSections(
       ctx,
       deps.progressProvider,
       ctx.messageText,
       ctx.sessionId,
-      ctx.messages,
-      ctx.messageSections,
       "memory_working",
       contextInjectionDeps,
     );
+    for (const entry of progressSections) {
+      systemSections.push(entry.section);
+    }
   }
+
+  ctx.promptEnvelope = {
+    kind: "prompt_envelope_v1",
+    baseSystemPrompt: ctx.baseSystemPrompt,
+    systemSections,
+    userSections,
+  } as PromptEnvelopeV1;
+
+  const flattenedCallPrefix = flattenPromptEnvelope("call", {
+    envelope: ctx.promptEnvelope,
+  });
+  ctx.messages.push(...flattenedCallPrefix.messages);
+  ctx.messageSections.push(...flattenedCallPrefix.sections);
+
+  const flattenedReconciliationPrefix = flattenPromptEnvelope("reconciliation", {
+    envelope: ctx.promptEnvelope,
+  });
+  ctx.reconciliationMessages.push(...flattenedReconciliationPrefix.messages);
 
   // Append history and user message
   const normalizedHistory = normalizeHistory(ctx.history);
