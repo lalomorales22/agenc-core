@@ -56,6 +56,40 @@ test("normalizer parses shell result previews and formatted command fields", () 
   );
 });
 
+test("normalizer suppresses read and search transcript bursts", () => {
+  const normalizer = createNormalizer();
+
+  assert.equal(
+    normalizer.shouldSuppressToolTranscript("system.readFileRange", {
+      path: "PLAN.md",
+      startLine: 1,
+      endLine: 120,
+    }),
+    true,
+  );
+  assert.equal(
+    normalizer.shouldSuppressToolTranscript("system.grep", {
+      pattern: "ShellState",
+      path: "src",
+    }),
+    true,
+  );
+  assert.equal(
+    normalizer.shouldSuppressToolTranscript("system.searchFiles", {
+      pattern: "*.c",
+      path: "src",
+    }),
+    true,
+  );
+  assert.equal(
+    normalizer.shouldSuppressToolTranscript("system.glob", {
+      pattern: "**/*.c",
+      path: "src",
+    }),
+    true,
+  );
+});
+
 test("normalizer keeps generic result parsing separate from final transcript copy", () => {
   const normalizer = createNormalizer();
 

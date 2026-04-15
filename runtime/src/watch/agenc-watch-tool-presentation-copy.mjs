@@ -19,6 +19,27 @@ export function createWatchToolPresentationCopyBuilder(dependencies = {}) {
     describeDesktopTextEditorStart,
   } = createWatchToolPresentationEditorDescriptors({ truncate });
 
+  const FILE_WRITE_PREVIEW_MAX_LINES = 10;
+  const FILE_WRITE_PREVIEW_MAX_CHARS = 2400;
+
+  function countTextLines(value) {
+    if (typeof value !== "string" || value.length === 0) {
+      return 0;
+    }
+    const segments = value.split("\n");
+    return value.endsWith("\n") ? segments.length - 1 : segments.length;
+  }
+
+  function buildFileWritePreview(value) {
+    if (typeof value !== "string" || value.length === 0) {
+      return null;
+    }
+    const normalized = String(value).replace(/\r\n/g, "\n");
+    const lines = normalized.split("\n");
+    const previewLines = lines.slice(0, FILE_WRITE_PREVIEW_MAX_LINES).join("\n");
+    return truncate(previewLines, FILE_WRITE_PREVIEW_MAX_CHARS);
+  }
+
   function summarizeEditFileErrorCopy(data) {
     const text = String(data.errorText ?? "").replace(/\s+/g, " ").trim();
     if (!text) return "Error editing file";
@@ -73,20 +94,29 @@ export function createWatchToolPresentationCopyBuilder(dependencies = {}) {
           tone: "magenta",
         };
       case "file-write-start":
-        return {
-          title: `${data.action === "append" ? "Append" : "Edit"} ${data.filePathDisplay || "file"}`,
-          body: joinDescriptorBody(
-            [data.filePathDisplay ? `path: ${data.filePathDisplay}` : null, "", data.content],
-            data.filePathDisplay || "(pending file write)",
-          ),
-          tone: "yellow",
-          previewMode: "source-write",
-          ...buildSourceMetadata({
-            filePath: data.filePathRaw,
-            mutationKind: data.action,
-            mutationAfterText: data.content ?? undefined,
-          }),
-        };
+        {
+          const lineCount = countTextLines(data.content);
+          const preview = buildFileWritePreview(data.content);
+          return {
+            title: `${data.action === "append" ? "Append" : "Write"} ${data.filePathDisplay || "file"}`,
+            body: joinDescriptorBody(
+              [
+                data.filePathDisplay ? `path: ${data.filePathDisplay}` : null,
+                lineCount > 0 ? `lines: ${lineCount}` : null,
+                preview ? "" : null,
+                preview,
+              ],
+              data.filePathDisplay || "(pending file write)",
+            ),
+            tone: "yellow",
+            previewMode: "source-write",
+            ...buildSourceMetadata({
+              filePath: data.filePathRaw,
+              mutationKind: data.action,
+              mutationAfterText: preview ?? undefined,
+            }),
+          };
+        }
       case "file-edit-start":
         return {
           title: `Update ${data.filePathDisplay || "file"}`,
@@ -158,17 +188,30 @@ export function createWatchToolPresentationCopyBuilder(dependencies = {}) {
           tone: data.isError ? "red" : "magenta",
         };
       case "file-write-result":
-        return {
-          title: `${data.action === "append" ? "Appended" : "Edited"} ${data.filePathDisplay || "file"}`,
-          body: `${data.filePathDisplay || "file"}${data.bytesWrittenText ? ` (${data.bytesWrittenText})` : ""}`,
-          tone: data.isError ? "red" : "green",
-          previewMode: "source-write",
-          ...buildSourceMetadata({
-            filePath: data.filePathRaw,
-            mutationKind: data.action,
-            mutationAfterText: typeof data.content === "string" ? data.content : undefined,
-          }),
-        };
+        {
+          const lineCount = countTextLines(data.content);
+          const preview = buildFileWritePreview(data.content);
+          return {
+            title: `${data.action === "append" ? "Appended" : "Wrote"} ${data.filePathDisplay || "file"}`,
+            body: joinDescriptorBody(
+              [
+                data.filePathDisplay ? `path: ${data.filePathDisplay}` : null,
+                lineCount > 0 ? `lines: ${lineCount}` : null,
+                data.bytesWrittenText ? `written: ${data.bytesWrittenText}` : null,
+                preview ? "" : null,
+                preview,
+              ],
+              data.filePathDisplay || "(file written)",
+            ),
+            tone: data.isError ? "red" : "green",
+            previewMode: "source-write",
+            ...buildSourceMetadata({
+              filePath: data.filePathRaw,
+              mutationKind: data.action,
+              mutationAfterText: preview ?? undefined,
+            }),
+          };
+        }
       case "file-edit-result":
         return {
           title: `${data.isError ? "Update" : "Updated"} ${data.filePathDisplay || "file"}`,
@@ -197,7 +240,7 @@ export function createWatchToolPresentationCopyBuilder(dependencies = {}) {
         return {
           title: `Read ${data.filePathDisplay || "file"}`,
           body: joinDescriptorBody(
-            [data.filePathDisplay ? `path: ${data.filePathDisplay}` : null, data.sizeText, "", data.content],
+            [data.filePathDisplay ? `path: ${data.filePathDisplay}` : null, data.sizeText],
             data.filePathDisplay || "(file read)",
           ),
           tone: data.isError ? "red" : "slate",
