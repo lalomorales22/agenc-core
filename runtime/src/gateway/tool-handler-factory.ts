@@ -129,7 +129,6 @@ const SESSION_ALLOWED_ROOT_TOOL_NAMES = new Set([
   "system.gitWorktreeCreate",
   "system.gitWorktreeRemove",
   "system.gitWorktreeStatus",
-  "system.applyPatch",
   "system.symbolSearch",
   "system.symbolDefinition",
   "system.symbolReferences",
@@ -166,7 +165,6 @@ const SESSION_ID_TOOL_NAMES = new Set([
   "system.writeFile",
   "system.appendFile",
   "system.editFile",
-  "system.applyPatch",
 ]);
 const TOOL_PATH_ARG_KEYS: Readonly<Record<string, readonly string[]>> = {
   "desktop.text_editor": ["path"],
@@ -186,7 +184,6 @@ const TOOL_PATH_ARG_KEYS: Readonly<Record<string, readonly string[]>> = {
   "system.gitWorktreeCreate": ["path", "worktreePath"],
   "system.gitWorktreeRemove": ["path", "worktreePath"],
   "system.gitWorktreeStatus": ["worktreePath"],
-  "system.applyPatch": ["path"],
   "system.symbolSearch": ["path"],
   "system.symbolDefinition": ["path", "filePath"],
   "system.symbolReferences": ["path", "filePath"],

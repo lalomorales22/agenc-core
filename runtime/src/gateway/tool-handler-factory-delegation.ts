@@ -71,7 +71,6 @@ const MUTATING_CHILD_TOOL_NAMES = new Set([
   "system.writeFile",
   "system.appendFile",
   "system.editFile",
-  "system.applyPatch",
   "system.move",
   "system.delete",
   "system.mkdir",

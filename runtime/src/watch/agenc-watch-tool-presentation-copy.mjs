@@ -70,7 +70,7 @@ export function createWatchToolPresentationCopyBuilder(dependencies = {}) {
     if (toolName === "system.readFile" || toolName === "system.readFileRange") {
       return `Read failed: ${truncate(text, 180)}`;
     }
-    if (toolName === "system.editFile" || toolName === "system.applyPatch") {
+    if (toolName === "system.editFile") {
       return `Edit failed: ${truncate(text, 180)}`;
     }
     return null;

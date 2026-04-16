@@ -119,7 +119,6 @@ export const HIGH_RISK_TOOLS = new Set([
   "system.bash",
   "system.writeFile",
   "system.delete",
-  "system.applyPatch",
   "system.gitWorktreeCreate",
   "system.gitWorktreeRemove",
   "system.applescript",

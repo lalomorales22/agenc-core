@@ -1,12 +1,9 @@
-import { readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve as resolvePath } from "node:path";
 
 import type { Tool, ToolCatalogEntry, ToolResult } from "../types.js";
 import { safeStringify } from "../types.js";
 import {
-  hasSessionRead,
-  recordSessionRead,
-  resolveSessionId,
   resolveToolAllowedPaths,
   safePath,
 } from "./filesystem.js";
@@ -441,153 +438,6 @@ function summarizeChanges(changed: readonly {
     untracked,
     conflicted,
   };
-}
-
-interface ParsedFilePatch {
-  readonly oldPath: string;
-  readonly newPath: string;
-  readonly hunks: readonly ParsedHunk[];
-  readonly createsFile: boolean;
-  readonly deletesFile: boolean;
-}
-
-interface ParsedHunk {
-  readonly oldStart: number;
-  readonly oldCount: number;
-  readonly newStart: number;
-  readonly newCount: number;
-  readonly lines: readonly string[];
-}
-
-function parseUnifiedDiff(diffText: string): ParsedFilePatch[] {
-  const lines = diffText.replace(/\r\n/g, "\n").split("\n");
-  const patches: ParsedFilePatch[] = [];
-  let index = 0;
-  while (index < lines.length) {
-    const line = lines[index] ?? "";
-    if (!line.startsWith("--- ")) {
-      index += 1;
-      continue;
-    }
-    const oldPathRaw = line.slice(4).trim();
-    const nextLine = lines[index + 1] ?? "";
-    if (!nextLine.startsWith("+++ ")) {
-      throw new Error("Invalid unified diff: missing +++ header");
-    }
-    const newPathRaw = nextLine.slice(4).trim();
-    index += 2;
-    const hunks: ParsedHunk[] = [];
-    while (index < lines.length) {
-      const hunkHeader = lines[index] ?? "";
-      if (hunkHeader.startsWith("--- ")) {
-        break;
-      }
-      if (!hunkHeader.startsWith("@@ ")) {
-        index += 1;
-        continue;
-      }
-      const match =
-        /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(hunkHeader);
-      if (!match) {
-        throw new Error(`Invalid unified diff hunk header: ${hunkHeader}`);
-      }
-      index += 1;
-      const hunkLines: string[] = [];
-      while (index < lines.length) {
-        const hunkLine = lines[index] ?? "";
-        if (hunkLine.startsWith("@@ ") || hunkLine.startsWith("--- ")) {
-          break;
-        }
-        if (hunkLine.startsWith("\\ No newline at end of file")) {
-          index += 1;
-          continue;
-        }
-        hunkLines.push(hunkLine);
-        index += 1;
-      }
-      hunks.push({
-        oldStart: Number(match[1] ?? 0),
-        oldCount: Number(match[2] ?? 1),
-        newStart: Number(match[3] ?? 0),
-        newCount: Number(match[4] ?? 1),
-        lines: hunkLines,
-      });
-    }
-    patches.push({
-      oldPath: stripDiffPath(oldPathRaw),
-      newPath: stripDiffPath(newPathRaw),
-      hunks,
-      createsFile: oldPathRaw === "/dev/null",
-      deletesFile: newPathRaw === "/dev/null",
-    });
-  }
-  return patches;
-}
-
-function stripDiffPath(value: string): string {
-  const trimmed = value.trim();
-  if (trimmed === "/dev/null") return trimmed;
-  if (trimmed.startsWith("a/") || trimmed.startsWith("b/")) {
-    return trimmed.slice(2);
-  }
-  return trimmed;
-}
-
-function applyParsedPatchToLines(params: {
-  readonly originalLines: readonly string[];
-  readonly patch: ParsedFilePatch;
-}): string[] {
-  const next: string[] = [];
-  let cursor = 0;
-  for (const hunk of params.patch.hunks) {
-    const targetIndex = Math.max(0, hunk.oldStart - 1);
-    while (cursor < targetIndex && cursor < params.originalLines.length) {
-      next.push(params.originalLines[cursor] ?? "");
-      cursor += 1;
-    }
-    for (const line of hunk.lines) {
-      const prefix = line[0];
-      const content = line.slice(1);
-      if (prefix === " ") {
-        const existing = params.originalLines[cursor] ?? "";
-        if (existing !== content) {
-          throw new Error(`Patch context mismatch near line ${cursor + 1}`);
-        }
-        next.push(existing);
-        cursor += 1;
-        continue;
-      }
-      if (prefix === "-") {
-        const existing = params.originalLines[cursor] ?? "";
-        if (existing !== content) {
-          throw new Error(`Patch removal mismatch near line ${cursor + 1}`);
-        }
-        cursor += 1;
-        continue;
-      }
-      if (prefix === "+") {
-        next.push(content);
-      }
-    }
-  }
-  while (cursor < params.originalLines.length) {
-    next.push(params.originalLines[cursor] ?? "");
-    cursor += 1;
-  }
-  return next;
-}
-
-async function resolvePatchTargetPath(params: {
-  readonly patchPath: string;
-  readonly repoRoot: string;
-  readonly allowedPaths: readonly string[];
-}): Promise<string> {
-  const absolutePath = resolvePath(params.repoRoot, params.patchPath);
-  const safe = await safePath(absolutePath, params.allowedPaths);
-  if (!safe.safe) {
-    throw new Error(safe.reason ?? `Path ${params.patchPath} is outside allowed directories`);
-  }
-  return safe.resolved;
 }
 
 function scoreCatalogEntry(entry: ToolCatalogEntry, query?: string): number {
@@ -1329,88 +1179,6 @@ export function createCodingTools(config: CodingToolConfig): readonly Tool[] {
     },
   };
 
-  const applyPatchTool: Tool = {
-    name: "system.applyPatch",
-    description:
-      "Apply a unified diff patch to repo-local files using the runtime's read-before-write and allowed-path safety rules.",
-    metadata: metadata("system.applyPatch", true),
-    inputSchema: {
-      type: "object",
-      properties: {
-        path: { type: "string", description: "Repo root or path inside the repo." },
-        patch: { type: "string" },
-      },
-      required: ["patch"],
-      additionalProperties: false,
-    },
-    async execute(args) {
-      const patch = toOptionalString(args.patch);
-      if (!patch) return errorResult("patch must be a non-empty string");
-      const repoRoot = await resolveRepoRoot({ config, args, pathArgKeys: ["path"] });
-      if (typeof repoRoot !== "string") return errorResult(repoRoot.error);
-      const allowedPaths = resolveToolAllowedPaths(config.allowedPaths, args);
-      const sessionId = resolveSessionId(args);
-      const patches = parseUnifiedDiff(patch);
-      if (patches.length === 0) {
-        return errorResult("Patch does not contain any file hunks");
-      }
-
-      const changedFiles: string[] = [];
-      for (const filePatch of patches) {
-        const targetPath = filePatch.deletesFile ? filePatch.oldPath : filePatch.newPath;
-        if (!targetPath || targetPath === "/dev/null") {
-          return errorResult("Patch must target a repo-local file path");
-        }
-        const resolvedTarget = await resolvePatchTargetPath({
-          patchPath: targetPath,
-          repoRoot,
-          allowedPaths,
-        }).catch((error) => ({
-          error: error instanceof Error ? error.message : String(error),
-        }));
-        if (typeof resolvedTarget !== "string") {
-          return errorResult(resolvedTarget.error);
-        }
-
-        const existingStat = await stat(resolvedTarget).catch(() => undefined);
-        if (existingStat && !hasSessionRead(sessionId, resolvedTarget)) {
-          return errorResult(
-            `Call system.readFile on "${targetPath}" before system.applyPatch.`,
-          );
-        }
-
-        const originalText = existingStat
-          ? await readFile(resolvedTarget, "utf8").catch(() => "")
-          : "";
-        const originalLines = originalText.length > 0 ? originalText.split(/\r?\n/) : [];
-
-        if (filePatch.deletesFile) {
-          if (!existingStat) {
-            return errorResult(`Cannot delete missing file ${targetPath}`);
-          }
-          await rm(resolvedTarget, { force: false });
-          changedFiles.push(targetPath);
-          continue;
-        }
-
-        const nextLines = applyParsedPatchToLines({
-          originalLines,
-          patch: filePatch,
-        });
-        const nextText = nextLines.join("\n");
-        await writeFile(resolvedTarget, nextText, "utf8");
-        recordSessionRead(sessionId, resolvedTarget);
-        changedFiles.push(targetPath);
-      }
-
-      return okResult({
-        repoRoot,
-        changedFiles,
-        fileCount: changedFiles.length,
-      });
-    },
-  };
-
   const symbolSearchTool: Tool = {
     name: "system.symbolSearch",
     description: "Search semantic repo symbols from the native code-intel index.",
@@ -1619,7 +1387,6 @@ export function createCodingTools(config: CodingToolConfig): readonly Tool[] {
     gitWorktreeCreateTool,
     gitWorktreeRemoveTool,
     gitWorktreeStatusTool,
-    applyPatchTool,
     symbolSearchTool,
     symbolDefinitionTool,
     symbolReferencesTool,

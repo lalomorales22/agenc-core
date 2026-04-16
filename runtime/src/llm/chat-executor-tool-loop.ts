@@ -171,7 +171,6 @@ export interface ToolLoopCallbacks {
 }
 
 const TERMINAL_MUTATION_TOOL_NAMES = new Set([
-  "system.applyPatch",
   "system.appendFile",
   "system.delete",
   "system.editFile",

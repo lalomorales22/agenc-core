@@ -253,7 +253,7 @@ function inferToolSource(name: string): ToolSource {
 }
 
 function inferToolFamily(name: string): string {
-  if (name.startsWith("system.git") || name === "system.applyPatch") {
+  if (name.startsWith("system.git")) {
     return "coding";
   }
   if (
