@@ -121,11 +121,14 @@ export function createWatchFrameController(dependencies = {}) {
   };
 
   // Split an ANSI-colored row into an array of per-cell entries
-  // `{sgr, char}` up to `width` columns. `sgr` is the cumulative
-  // escape-sequence prefix active for that cell (concatenation of
-  // every SGR escape seen since the previous non-escape character).
-  // Short rows are padded with blank cells so the compositor can
-  // index any column without bounds checks.
+  // `{sgr, char}` up to `width` columns. `sgr` is the FULL active
+  // SGR state at that cell — the accumulated escape sequences since
+  // the last reset (`\x1b[0m` / `\x1b[m`). This way a run of
+  // identically-colored cells all carry the same sgr string and the
+  // compositor can safely emit the state once per change rather
+  // than losing the bg color after the first cell. Short rows are
+  // padded with blank cells so the compositor can index any column
+  // without bounds checks.
   function splitAnsiCells(row, width) {
     const cells = new Array(width);
     let index = 0;
@@ -135,13 +138,16 @@ export function createWatchFrameController(dependencies = {}) {
       if (row[index] === "\x1b") {
         const match = row.slice(index).match(/^\x1b\[[0-9;]*m/);
         if (match) {
-          activeSgr += match[0];
+          if (match[0] === "\x1b[0m" || match[0] === "\x1b[m") {
+            activeSgr = "";
+          } else {
+            activeSgr += match[0];
+          }
           index += match[0].length;
           continue;
         }
       }
       cells[col] = { sgr: activeSgr, char: row[index] };
-      activeSgr = "";
       index += 1;
       col += 1;
     }
