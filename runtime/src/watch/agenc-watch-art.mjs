@@ -91,48 +91,16 @@ export async function createAnsiArtRenderer({ imagePath, ramp, invert } = {}) {
     const key = `${targetCols}:${targetRows}:${targetAspect}`;
     if (key === cacheKey && cacheRows !== null) return cacheRows;
 
-    // Fit-to-strip: compute the ideal source aspect (h/w in source
-    // pixels) that would produce exactly `targetRows × targetCols`
-    // output cells without distortion, then center-crop the source
-    // to that aspect. A landscape image like aura.jpeg (1280×720)
-    // gets its sides cropped to a portrait region so the strip fills
-    // end-to-end — same look as a naturally-square image like
-    // girl.jpeg.
-    const desiredSourceAspect =
-      targetRows / Math.max(1, targetCols * targetAspect);
-    const actualSourceAspect = sourceHeight / sourceWidth;
-    let cropX = 0;
-    let cropY = 0;
-    let cropW = sourceWidth;
-    let cropH = sourceHeight;
-    if (actualSourceAspect > desiredSourceAspect) {
-      // Source is taller than the strip wants — keep full width,
-      // crop top/bottom symmetrically.
-      cropH = Math.max(1, Math.round(sourceWidth * desiredSourceAspect));
-      cropY = Math.max(0, Math.floor((sourceHeight - cropH) / 2));
-    } else if (actualSourceAspect < desiredSourceAspect) {
-      // Source is wider than the strip wants — keep full height,
-      // crop sides symmetrically.
-      cropW = Math.max(1, Math.round(sourceHeight / desiredSourceAspect));
-      cropX = Math.max(0, Math.floor((sourceWidth - cropW) / 2));
-    }
-
+    // Stretch-to-fill: resize the source directly to the strip's
+    // target dimensions regardless of source aspect. Landscape
+    // images like aura.jpeg get vertically stretched to cover the
+    // full body top-to-bottom; portrait/square images look the
+    // same as before. No cropping — the full source frame is
+    // preserved horizontally and vertically, just scaled to fit.
     const renderRows = targetRows;
-
-    // Quality pass:
-    //  1. `contrast(+0.15)` boosts mid-tone separation so the ramp
-    //     isn't dominated by dark chars in low-light regions.
-    //  2. Supersample the cropped region to 2× the target dims with
-    //     BICUBIC, then average each 2×2 block down to the final
-    //     cell. Gives proper area sampling (vs BILINEAR's
-    //     nearest-neighbor grab when the source is much larger than
-    //     the cell grid).
     const superCols = targetCols * 2;
     const superRows = renderRows * 2;
     const clone = decoded.clone();
-    if (cropX !== 0 || cropY !== 0 || cropW !== sourceWidth || cropH !== sourceHeight) {
-      clone.crop({ x: cropX, y: cropY, w: cropW, h: cropH });
-    }
     clone.contrast(0.15);
     clone.resize({
       w: superCols,
