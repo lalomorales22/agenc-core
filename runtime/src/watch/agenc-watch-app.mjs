@@ -2066,15 +2066,27 @@ async function refreshArtPanel() {
     }
     const width = termWidth();
     const height = termHeight();
-    // Render the art across the full terminal so every TUI space
-    // cell has an art pixel underneath in the compositor. The
-    // `widthFraction` config knob is preserved in the config
-    // surface for future cropping flexibility but the output is
-    // blitted full width either way.
-    void cfg.widthFraction;
-    const rows = await artRenderer.render({ cols: width, rows: height });
+    // Right-side art strip: fixed default width so the art stays the
+    // same size as the terminal or chat area resizes / scrolls. The
+    // `watch.art.cols` config is the static column count; falls back
+    // to `widthFraction * width` when cols is not set. Clamps so the
+    // left column still has a reasonable budget for chat content.
+    const cfgCols = Number(cfg.cols);
+    const desiredCols = Number.isFinite(cfgCols) && cfgCols > 0
+      ? Math.floor(cfgCols)
+      : Math.floor(width * cfg.widthFraction);
+    const artCols = Math.max(
+      20,
+      Math.min(Math.floor(width * 0.7), Math.max(20, desiredCols)),
+    );
+    if (artCols >= width - 20) {
+      watchState.artPanelRows = null;
+      watchState.artPanelCols = 0;
+      return;
+    }
+    const rows = await artRenderer.render({ cols: artCols, rows: height });
     watchState.artPanelRows = rows;
-    watchState.artPanelCols = width;
+    watchState.artPanelCols = artCols;
     scheduleRender();
   } catch {
     watchState.artPanelRows = null;

@@ -152,24 +152,37 @@ export function createWatchFrameController(dependencies = {}) {
     return cells;
   }
 
-  // Composite a TUI row with an ANSI art row: TUI content wins on
-  // any non-space cell; space cells fall through to the art pixel at
-  // the same column. Runs character-by-character with inline SGR
-  // parsing so we never split an escape sequence or mix the two
-  // streams' color state. Called once per frame per row — cheap
-  // enough for ~150×50 terminals at animation rates.
-  function compositeRowWithArt(tuiRow, artRow, width) {
+  // Composite a TUI row with a right-side ANSI art strip: the left
+  // `width - artCols` columns are preserved exactly (chat area stays
+  // clean and readable). Only the rightmost `artCols` columns are
+  // composited — TUI cells carrying a visible non-space character
+  // stay on top; space cells fall through to the art pixel at that
+  // column. Art is pinned to the right edge; when chat content
+  // scrolls in the left region the art stays in place visually
+  // because it's re-applied on every frame.
+  function compositeRowWithArt(tuiRow, artRow, width, artCols) {
+    if (artCols <= 0 || artCols >= width) return tuiRow;
+    const leftCols = width - artCols;
     const tuiCells = splitAnsiCells(tuiRow, width);
-    const artCells = splitAnsiCells(artRow, width);
+    const artCells = splitAnsiCells(artRow, artCols);
     let output = "";
     let activeSgr = "";
     for (let col = 0; col < width; col += 1) {
-      const tuiCell = tuiCells[col];
-      const artCell = artCells[col];
+      const tuiCell = tuiCells[col] ?? { sgr: "", char: " " };
+      if (col < leftCols) {
+        if (tuiCell.sgr !== activeSgr) {
+          output += "\x1b[0m" + tuiCell.sgr;
+          activeSgr = tuiCell.sgr;
+        }
+        output += tuiCell.char;
+        continue;
+      }
+      const artCol = col - leftCols;
+      const artCell = artCells[artCol] ?? { sgr: "", char: " " };
       const source =
-        tuiCell && tuiCell.char !== " " && tuiCell.char !== "\u00a0"
+        tuiCell.char !== " " && tuiCell.char !== "\u00a0"
           ? tuiCell
-          : artCell ?? tuiCell ?? { sgr: "", char: " " };
+          : artCell;
       if (source.sgr !== activeSgr) {
         output += "\x1b[0m" + source.sgr;
         activeSgr = source.sgr;
@@ -3847,24 +3860,29 @@ export function createWatchFrameController(dependencies = {}) {
       Math.min(height, composerStartRow + composerInputOffsetRows + (composer.cursorRow ?? 0)),
     );
 
-    // ANSI art wallpaper compositing. When `watchState.artPanelRows`
-    // is populated (rasterized by the art controller in
-    // agenc-watch-app.mjs and refreshed on terminal resize), each
-    // row is composited cell-by-cell: TUI cells carrying a visible
-    // non-space character stay on top; space cells let the art
-    // underneath show through. Terminals don't have real layering,
-    // so this space-replacement approach is the closest practical
-    // approximation — matches the mockup where cockpit borders and
-    // text render opaquely over a persistent background image.
+    // Right-side ANSI art wallpaper compositing. TUI renders at
+    // natural full terminal width; the rightmost `artPanelCols`
+    // columns are composited against the art — TUI chars on top,
+    // space cells show art underneath. Left columns (chat area) are
+    // left exactly as the TUI produced them so text stays readable.
     const artPanelRows = Array.isArray(watchState.artPanelRows)
       ? watchState.artPanelRows
       : null;
-    if (artPanelRows && artPanelRows.length > 0) {
+    const artPanelCols = Number.isFinite(Number(watchState.artPanelCols))
+      ? Math.max(0, Math.floor(Number(watchState.artPanelCols)))
+      : 0;
+    if (
+      artPanelRows &&
+      artPanelRows.length > 0 &&
+      artPanelCols > 0 &&
+      artPanelCols < width
+    ) {
       for (let rowIndex = 0; rowIndex < nextFrameLines.length; rowIndex += 1) {
         nextFrameLines[rowIndex] = compositeRowWithArt(
           String(nextFrameLines[rowIndex] ?? ""),
           artPanelRows[rowIndex] ?? "",
           width,
+          artPanelCols,
         );
       }
     }
