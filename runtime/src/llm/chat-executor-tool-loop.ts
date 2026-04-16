@@ -14,15 +14,6 @@ import type {
 } from "./types.js";
 import type { PromptBudgetSection } from "./prompt-budget.js";
 import type { LLMRetryPolicyMatrix, LLMPipelineStopReason } from "./policy.js";
-import { type ArtifactAccessMode } from "../workflow/artifact-contract.js";
-import type { ExecutionEnvelope } from "../workflow/execution-envelope.js";
-import {
-  isPathWithinAnyRoot,
-  normalizeEnvelopePath,
-  normalizeEnvelopeRoots,
-  normalizeWorkspaceRoot,
-  resolveExplicitArtifactReferencePath,
-} from "../workflow/path-normalization.js";
 import type {
   ToolCallRecord,
   ChatExecutionTraceEvent,
@@ -67,6 +58,10 @@ import {
   sealPendingToolProtocol,
   syncToolProtocolSnapshot,
 } from "./chat-executor-tool-protocol-helpers.js";
+import {
+  canonicalizeExplicitArtifactReferenceArgs,
+  enforceTopLevelExecutionEnvelope,
+} from "./chat-executor-envelope-helpers.js";
 import {
   applyActiveRoutedToolNames,
   buildActiveRoutedToolSet,
@@ -320,124 +315,6 @@ export interface ToolLoopConfig {
 // ============================================================================
 // executeSingleToolCall (standalone)
 // ============================================================================
-
-const READ_ONLY_ENVELOPE_TOOL_NAMES = new Set([
-  "system.readFile",
-  "system.listDir",
-  "system.stat",
-]);
-const WRITE_ENVELOPE_TOOL_MODES: Readonly<Record<string, ArtifactAccessMode>> = {
-  "desktop.text_editor": "write",
-  "system.writeFile": "write",
-  "system.appendFile": "write",
-  "system.delete": "write",
-  "system.mkdir": "write",
-  "system.move": "write",
-};
-const ENVELOPE_TOOL_PATH_ARG_KEYS: Readonly<Record<string, readonly string[]>> = {
-  "desktop.text_editor": ["path"],
-  "system.readFile": ["path"],
-  "system.writeFile": ["path"],
-  "system.appendFile": ["path"],
-  "system.listDir": ["path"],
-  "system.stat": ["path"],
-  "system.mkdir": ["path"],
-  "system.delete": ["path"],
-  "system.move": ["source", "destination"],
-};
-function getExecutionEnvelopeFilesystemAccessMode(
-  toolName: string,
-): ArtifactAccessMode | undefined {
-  if (READ_ONLY_ENVELOPE_TOOL_NAMES.has(toolName)) {
-    return "read";
-  }
-  return WRITE_ENVELOPE_TOOL_MODES[toolName];
-}
-
-function canonicalizeExplicitArtifactReferenceArgs(params: {
-  readonly toolName: string;
-  readonly args: Record<string, unknown>;
-  readonly workspaceRoot?: string;
-  readonly declaredArtifacts?: readonly string[];
-}): { readonly args: Record<string, unknown>; readonly canonicalizedFields: readonly string[] } {
-  const pathKeys = ENVELOPE_TOOL_PATH_ARG_KEYS[params.toolName] ?? [];
-  if (pathKeys.length === 0) {
-    return { args: params.args, canonicalizedFields: [] };
-  }
-
-  let nextArgs = params.args;
-  const canonicalizedFields: string[] = [];
-  for (const key of pathKeys) {
-    const rawValue = nextArgs[key];
-    if (typeof rawValue !== "string" || rawValue.trim().length === 0) {
-      continue;
-    }
-    const canonicalPath = resolveExplicitArtifactReferencePath({
-      rawPath: rawValue,
-      workspaceRoot: params.workspaceRoot,
-      declaredArtifacts: params.declaredArtifacts,
-    });
-    if (!canonicalPath || canonicalPath === rawValue) {
-      continue;
-    }
-    if (nextArgs === params.args) {
-      nextArgs = { ...params.args };
-    }
-    nextArgs[key] = canonicalPath;
-    canonicalizedFields.push(`${key}:artifact_ref`);
-  }
-
-  return { args: nextArgs, canonicalizedFields };
-}
-
-function enforceTopLevelExecutionEnvelope(params: {
-  readonly toolName: string;
-  readonly args: Record<string, unknown>;
-  readonly executionEnvelope?: ExecutionEnvelope;
-  readonly defaultWorkingDirectory?: string;
-}): string | undefined {
-  const envelope = params.executionEnvelope;
-  if (!envelope) return undefined;
-
-  if (
-    envelope.allowedTools?.length &&
-    !envelope.allowedTools.includes(params.toolName)
-  ) {
-    return `Tool ${params.toolName} is outside the execution envelope for this turn`;
-  }
-
-  const mode = getExecutionEnvelopeFilesystemAccessMode(params.toolName);
-  if (!mode) {
-    return undefined;
-  }
-
-  const pathKeys = ENVELOPE_TOOL_PATH_ARG_KEYS[params.toolName] ?? [];
-  if (pathKeys.length === 0) {
-    return undefined;
-  }
-
-  // Audit S1.6: normalize the envelope workspace root so it matches the
-  // root the verifier and child execution paths see, instead of just
-  // trimming whitespace.
-  const workspaceRoot =
-    normalizeWorkspaceRoot(envelope.workspaceRoot) ?? params.defaultWorkingDirectory;
-  const allowedRoots = normalizeEnvelopeRoots(
-    mode === "read" ? envelope.allowedReadRoots ?? [] : envelope.allowedWriteRoots ?? [],
-    workspaceRoot,
-  );
-  for (const key of pathKeys) {
-    const rawValue = params.args[key];
-    if (typeof rawValue !== "string" || rawValue.trim().length === 0) {
-      continue;
-    }
-    const normalizedPath = normalizeEnvelopePath(rawValue, workspaceRoot);
-    if (allowedRoots.length > 0 && !isPathWithinAnyRoot(normalizedPath, allowedRoots)) {
-      return `Path ${normalizedPath} is outside the execution envelope roots for this turn`;
-    }
-  }
-
-  return undefined;
-}
 
 function extractDiscoveredToolNamesFromSearchResult(
   toolName: string,
