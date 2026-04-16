@@ -167,8 +167,8 @@ export function createWatchFrameController(dependencies = {}) {
   // scrolls in the left region the art stays in place visually
   // because it's re-applied on every frame.
   function compositeRowWithArt(tuiRow, artRow, width, artCols) {
-    if (artCols <= 0 || artCols >= width) return tuiRow;
-    const leftCols = width - artCols;
+    if (artCols <= 0 || artCols > width) return tuiRow;
+    const leftCols = Math.max(0, width - artCols);
     const tuiCells = splitAnsiCells(tuiRow, width);
     const artCells = splitAnsiCells(artRow, artCols);
     let output = "";
@@ -3896,7 +3896,7 @@ export function createWatchFrameController(dependencies = {}) {
       artPanelRows &&
       artPanelRows.length > 0 &&
       artPanelCols > 0 &&
-      artPanelCols < width
+      artPanelCols <= width
     ) {
       const bodyStart = headerRowCount;
       const bodyEndExclusive = Math.max(bodyStart, composerStartRow - 1);

@@ -2066,24 +2066,24 @@ async function refreshArtPanel() {
     }
     const width = termWidth();
     const height = termHeight();
-    // Right-side art strip: fixed default width so the art stays the
-    // same size as the terminal or chat area resizes / scrolls. The
-    // `watch.art.cols` config is the static column count; falls back
-    // to `widthFraction * width` when cols is not set. Clamps so the
-    // left column still has a reasonable budget for chat content.
+    // Full-terminal art: render at the exact terminal dimensions and
+    // let the compositor decide which cells show art (space cells in
+    // body rows) vs TUI chars (non-space cells, and everything in
+    // header + composer bands which the frame compositor skips).
+    // `watch.art.cols` and `widthFraction` are still respected when
+    // present so the strip can be narrowed by config; default is
+    // full width.
     const cfgCols = Number(cfg.cols);
-    const desiredCols = Number.isFinite(cfgCols) && cfgCols > 0
+    const cfgFraction = Number(cfg.widthFraction);
+    const hasExplicitCols = Number.isFinite(cfgCols) && cfgCols > 0;
+    const hasExplicitFraction =
+      Number.isFinite(cfgFraction) && cfgFraction > 0 && cfgFraction < 1;
+    const desiredCols = hasExplicitCols
       ? Math.floor(cfgCols)
-      : Math.floor(width * cfg.widthFraction);
-    const artCols = Math.max(
-      20,
-      Math.min(Math.floor(width * 0.7), Math.max(20, desiredCols)),
-    );
-    if (artCols >= width - 20) {
-      watchState.artPanelRows = null;
-      watchState.artPanelCols = 0;
-      return;
-    }
+      : hasExplicitFraction
+        ? Math.max(20, Math.floor(width * cfgFraction))
+        : width;
+    const artCols = Math.max(1, Math.min(width, desiredCols));
     const rows = await artRenderer.render({ cols: artCols, rows: height });
     watchState.artPanelRows = rows;
     watchState.artPanelCols = artCols;
