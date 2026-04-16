@@ -3257,11 +3257,6 @@ export function createSessionToolHandler(config: SessionToolHandlerConfig): Tool
     });
 
     if (isSubAgentSession && lifecycleEmitter) {
-      const verifierRequirement = verifier?.resolveVerifierRequirement({
-        runtimeRequired: runtimeContractFlags?.verifierRuntimeRequired,
-        projectBootstrap: runtimeContractFlags?.verifierProjectBootstrap,
-        workspaceRoot: defaultWorkingDirectory ?? scopedFilesystemRoot,
-      });
       lifecycleEmitter.emit({
         type: 'subagents.tool.result',
         timestamp: Date.now(),
@@ -3275,9 +3270,6 @@ export function createSessionToolHandler(config: SessionToolHandlerConfig): Tool
           toolCallId,
           ...(subAgentInfo?.parentToolCallId
             ? { parentToolCallId: subAgentInfo.parentToolCallId }
-            : {}),
-          ...(verifierRequirement
-            ? { verifierRequirement }
             : {}),
         },
       });

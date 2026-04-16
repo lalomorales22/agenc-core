@@ -1775,11 +1775,6 @@ describe("createSessionToolHandler", () => {
     expect(lifecycleEmitter.emit).toHaveBeenCalledTimes(2);
     expect(lifecycleEvents[0].type).toBe("subagents.tool.executing");
     expect(lifecycleEvents[1].type).toBe("subagents.tool.result");
-    expect(
-      (lifecycleEvents[1].payload as {
-        verifierRequirement?: { required?: boolean };
-      }).verifierRequirement?.required,
-    ).toBe(true);
 
     const executingCount = sentMessages.filter((m) => m.type === "tools.executing").length;
     const resultCount = sentMessages.filter((m) => m.type === "tools.result").length;
