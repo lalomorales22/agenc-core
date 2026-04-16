@@ -2551,6 +2551,22 @@ export class DaemonManager {
               shellProfile: effectiveProfile,
             });
           },
+        resolveAdvertisedToolNames: (sessionId, shellProfile, discoveredToolNames) =>
+          this.getAdvertisedToolNames(
+            undefined,
+            this.evaluateShellFeatureAdmission({
+              sessionId,
+              feature: "codingCommands",
+              domain: "shell",
+            }).allowed
+              ? this.resolveEffectiveShellProfile({
+                  sessionId,
+                  metadata: sessionMgr.get(sessionId)?.metadata ?? {},
+                  preferred: shellProfile,
+                })
+              : DEFAULT_SESSION_SHELL_PROFILE,
+            discoveredToolNames,
+          ),
         seedHistoryForSession: (sessionId) =>
           sessionMgr.get(sessionId)?.history ?? [],
         isSessionBusy: (sessionId) =>
