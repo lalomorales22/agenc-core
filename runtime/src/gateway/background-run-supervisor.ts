@@ -587,6 +587,7 @@ export class BackgroundRunSupervisor {
   private readonly createToolHandler: BackgroundRunSupervisorConfig["createToolHandler"];
   private readonly resolveExecutionContext?: BackgroundRunSupervisorConfig["resolveExecutionContext"];
   private readonly buildToolRoutingDecision?: BackgroundRunSupervisorConfig["buildToolRoutingDecision"];
+  private readonly resolveAdvertisedToolNames?: BackgroundRunSupervisorConfig["resolveAdvertisedToolNames"];
   private readonly seedHistoryForSession?: BackgroundRunSupervisorConfig["seedHistoryForSession"];
   private readonly isSessionBusy?: BackgroundRunSupervisorConfig["isSessionBusy"];
   private readonly onStatus?: BackgroundRunSupervisorConfig["onStatus"];
@@ -626,6 +627,7 @@ export class BackgroundRunSupervisor {
     this.createToolHandler = config.createToolHandler;
     this.resolveExecutionContext = config.resolveExecutionContext;
     this.buildToolRoutingDecision = config.buildToolRoutingDecision;
+    this.resolveAdvertisedToolNames = config.resolveAdvertisedToolNames;
     this.seedHistoryForSession = config.seedHistoryForSession;
     this.isSessionBusy = config.isSessionBusy;
     this.onStatus = config.onStatus;
@@ -3732,6 +3734,14 @@ export class BackgroundRunSupervisor {
         actorResult = nativeCycle.actorResult;
         decision = toDecisionFromDomainVerification(nativeCycle.verification);
       } else {
+        const advertisedToolNames =
+          this.resolveAdvertisedToolNames?.(
+            sessionId,
+            run.shellProfile ?? DEFAULT_SESSION_SHELL_PROFILE,
+            run.interactiveContextState?.discoveredToolNames,
+          ) ??
+          run.interactiveContextState?.defaultAdvertisedToolNames ??
+          [];
         const baseToolRoutingDecision = this.buildToolRoutingDecision?.(
           sessionId,
           actorPrompt,
@@ -3753,9 +3763,7 @@ export class BackgroundRunSupervisor {
           run,
           promptEnvelope: actorPromptEnvelope,
           runtimeWorkspaceRoot: resolvedExecutionContext?.runtimeContext?.workspaceRoot,
-          advertisedToolNames:
-            toolRoutingDecision?.routedToolNames ??
-            run.interactiveContextState?.defaultAdvertisedToolNames,
+          advertisedToolNames,
         });
         run.interactiveContextState = cloneInteractiveContextState(
           interactiveContextState,
@@ -3766,6 +3774,14 @@ export class BackgroundRunSupervisor {
         }
         // Phase E: background-run supervisor migrated to drain the
         // Phase C generator inside the cycle loop.
+        const routedToolNames =
+          toolRoutingDecision?.routedToolNames ?? advertisedToolNames;
+        const expandedToolNames = Array.from(
+          new Set([
+            ...advertisedToolNames,
+            ...(toolRoutingDecision?.expandedToolNames ?? []),
+          ]),
+        );
         actorResult = await executeChatToLegacyResult(this.chatExecutor, {
           message: toRunMessage(actorPrompt, sessionId, run.id, run.cycleCount),
           history: run.internalHistory,
@@ -3800,13 +3816,16 @@ export class BackgroundRunSupervisor {
           maxToolRounds: BACKGROUND_RUN_MAX_TOOL_ROUNDS,
           toolBudgetPerRequest: BACKGROUND_RUN_MAX_TOOL_BUDGET,
           maxModelRecallsPerRequest: BACKGROUND_RUN_MAX_MODEL_RECALLS,
-          toolRouting: toolRoutingDecision
-            ? {
-              routedToolNames: toolRoutingDecision.routedToolNames,
-              expandedToolNames: toolRoutingDecision.expandedToolNames,
-              expandOnMiss: true,
-            }
-            : undefined,
+          toolRouting:
+            routedToolNames.length > 0 || expandedToolNames.length > 0
+              ? {
+                advertisedToolNames,
+                routedToolNames,
+                expandedToolNames,
+                expandOnMiss: true,
+                persistDiscovery: true,
+              }
+              : undefined,
           ...(actorTrace ? { trace: actorTrace } : {}),
         });
 

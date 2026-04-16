@@ -577,6 +577,45 @@ describe("SubAgentManager", () => {
       expect(grokProvider.chat).toHaveBeenCalledTimes(1);
     });
 
+    it("advertises the resolved child tool bundle instead of the full executor catalog", async () => {
+      const executeSpy = vi
+        .spyOn(ChatExecutor.prototype, "execute")
+        .mockResolvedValue({
+          content: "sub-agent output",
+          toolCalls: [],
+          providerEvidence: undefined,
+          tokenUsage: undefined,
+          stopReason: "completed",
+          stopReasonDetail: undefined,
+          callUsage: [],
+          finalPromptShape: undefined,
+          statefulSummary: undefined,
+          toolRoutingSummary: undefined,
+          plannerSummary: undefined,
+          model: "mock",
+        } as any);
+      const manager = new SubAgentManager(makeManagerConfig());
+
+      try {
+        await manager.spawn({
+          parentSessionId: "p",
+          task: "inspect the workspace",
+          tools: ["tool.a", "tool.b"],
+        });
+        await settle();
+
+        expect(executeSpy).toHaveBeenCalledTimes(1);
+        expect((executeSpy.mock.calls[0]?.[0] as any).toolRouting).toEqual({
+          advertisedToolNames: ["tool.a", "tool.b"],
+          routedToolNames: ["tool.a", "tool.b"],
+          expandedToolNames: ["tool.a", "tool.b"],
+          persistDiscovery: true,
+        });
+      } finally {
+        executeSpy.mockRestore();
+      }
+    });
+
     it("passes workspace override to createContext", async () => {
       const createContext = vi.fn(async () => makeMockContext());
       const manager = new SubAgentManager(makeManagerConfig({ createContext }));

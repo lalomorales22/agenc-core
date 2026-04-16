@@ -1471,17 +1471,14 @@ export class SubAgentManager {
             }
           : undefined;
 
-      // When the spawn comes from the orchestrator pipeline (has an
-      // execution context with explicit tool scope), pass the resolved
-      // tools as routedToolNames so the sub-agent's ChatExecutor uses
-      // the full scope instead of re-deriving a narrower set from
-      // message content heuristics.  Direct spawns (no delegation spec)
-      // continue to use the ChatExecutor's default routing.
-      const spawnRoutedTools =
-        handle.config.delegationSpec &&
-        handle.config.tools &&
-        handle.config.tools.length > 0
-          ? [...handle.config.tools]
+      // Child sessions should advertise the resolved child tool bundle
+      // directly instead of falling back to the parent executor's broad
+      // allowlist. That keeps child prompts cache-stable and avoids
+      // provider-side tool trimming when the role already resolved a
+      // concrete tool set.
+      const spawnAdvertisedTools =
+        handle.config.tools && handle.config.tools.length > 0
+          ? [...new Set(handle.config.tools)]
           : undefined;
       const runtimeWorkspaceRoot = resolveSubAgentWorkspaceRoot(handle.config);
 
@@ -1505,8 +1502,15 @@ export class SubAgentManager {
               baseSystemPrompt,
             },
             sessionId: handle.sessionId,
-            ...(spawnRoutedTools
-              ? { toolRouting: { routedToolNames: spawnRoutedTools } }
+            ...(spawnAdvertisedTools
+              ? {
+                  toolRouting: {
+                    advertisedToolNames: spawnAdvertisedTools,
+                    routedToolNames: spawnAdvertisedTools,
+                    expandedToolNames: spawnAdvertisedTools,
+                    persistDiscovery: true,
+                  },
+                }
               : {}),
             ...(runtimeWorkspaceRoot
               ? {

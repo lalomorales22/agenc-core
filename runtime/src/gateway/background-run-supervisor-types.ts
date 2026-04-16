@@ -194,6 +194,11 @@ export interface BackgroundRunSupervisorConfig {
     history: readonly LLMMessage[],
     shellProfile: SessionShellProfile,
   ) => ToolRoutingDecision | undefined;
+  readonly resolveAdvertisedToolNames?: (
+    sessionId: string,
+    shellProfile: SessionShellProfile,
+    discoveredToolNames?: readonly string[],
+  ) => readonly string[];
   readonly seedHistoryForSession?: (sessionId: string) => readonly LLMMessage[];
   readonly isSessionBusy?: (sessionId: string) => boolean;
   readonly onStatus?: (

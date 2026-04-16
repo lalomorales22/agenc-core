@@ -845,6 +845,71 @@ describe("background-run-supervisor", () => {
     expect(remainingMs).toBeLessThanOrEqual(4_000);
   });
 
+  it("passes the advertised tool bundle to actor cycles when no narrower route is active", async () => {
+    const execute = vi.fn(async () =>
+      makeResult({
+        content: "Still working.",
+      }),
+    );
+    const supervisorLlm: LLMProvider = {
+      name: "supervisor",
+      chat: vi.fn(async () => ({
+        content:
+          '{"state":"working","userUpdate":"Still working.","internalSummary":"verified running","nextCheckMs":4000,"shouldNotifyUser":false}',
+        toolCalls: [],
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        model: "supervisor-model",
+        finishReason: "stop",
+      })),
+      chatStream: vi.fn(),
+      healthCheck: vi.fn(async () => true),
+    };
+
+    const supervisor = new BackgroundRunSupervisor({
+      chatExecutor: { execute } as any,
+      supervisorLlm,
+      getSystemPrompt: () => "base system prompt",
+      runStore: createRunStore(),
+      createToolHandler: (): ToolHandler => vi.fn(async () => "ok"),
+      buildToolRoutingDecision: () => undefined,
+      resolveAdvertisedToolNames: () => [
+        "system.bash",
+        "system.readFile",
+        "system.searchTools",
+      ],
+      publishUpdate: vi.fn(async () => undefined),
+    });
+
+    await supervisor.startRun({
+      sessionId: "session-routing",
+      objective: "Keep implementing until the workspace build is complete.",
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    await eventually(() => {
+      expect(execute).toHaveBeenCalledTimes(1);
+    });
+
+    expect(execute.mock.calls[0]?.[0]?.toolRouting).toEqual({
+      advertisedToolNames: [
+        "system.bash",
+        "system.readFile",
+        "system.searchTools",
+      ],
+      routedToolNames: [
+        "system.bash",
+        "system.readFile",
+        "system.searchTools",
+      ],
+      expandedToolNames: [
+        "system.bash",
+        "system.readFile",
+        "system.searchTools",
+      ],
+      expandOnMiss: true,
+      persistDiscovery: true,
+    });
+  });
+
   it("passes provider trace options to actor and supervisor calls when enabled", async () => {
     const publishUpdate = vi.fn(async () => undefined);
     const execute = vi.fn(async () =>
