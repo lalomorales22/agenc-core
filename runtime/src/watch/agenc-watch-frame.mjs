@@ -119,6 +119,67 @@ export function createWatchFrameController(dependencies = {}) {
     lastRenderedFrameWidth: 0,
     lastRenderedFrameHeight: 0,
   };
+
+  // Split an ANSI-colored row into an array of per-cell entries
+  // `{sgr, char}` up to `width` columns. `sgr` is the cumulative
+  // escape-sequence prefix active for that cell (concatenation of
+  // every SGR escape seen since the previous non-escape character).
+  // Short rows are padded with blank cells so the compositor can
+  // index any column without bounds checks.
+  function splitAnsiCells(row, width) {
+    const cells = new Array(width);
+    let index = 0;
+    let activeSgr = "";
+    let col = 0;
+    while (index < row.length && col < width) {
+      if (row[index] === "\x1b") {
+        const match = row.slice(index).match(/^\x1b\[[0-9;]*m/);
+        if (match) {
+          activeSgr += match[0];
+          index += match[0].length;
+          continue;
+        }
+      }
+      cells[col] = { sgr: activeSgr, char: row[index] };
+      activeSgr = "";
+      index += 1;
+      col += 1;
+    }
+    while (col < width) {
+      cells[col] = { sgr: "", char: " " };
+      col += 1;
+    }
+    return cells;
+  }
+
+  // Composite a TUI row with an ANSI art row: TUI content wins on
+  // any non-space cell; space cells fall through to the art pixel at
+  // the same column. Runs character-by-character with inline SGR
+  // parsing so we never split an escape sequence or mix the two
+  // streams' color state. Called once per frame per row — cheap
+  // enough for ~150×50 terminals at animation rates.
+  function compositeRowWithArt(tuiRow, artRow, width) {
+    const tuiCells = splitAnsiCells(tuiRow, width);
+    const artCells = splitAnsiCells(artRow, width);
+    let output = "";
+    let activeSgr = "";
+    for (let col = 0; col < width; col += 1) {
+      const tuiCell = tuiCells[col];
+      const artCell = artCells[col];
+      const source =
+        tuiCell && tuiCell.char !== " " && tuiCell.char !== "\u00a0"
+          ? tuiCell
+          : artCell ?? tuiCell ?? { sgr: "", char: " " };
+      if (source.sgr !== activeSgr) {
+        output += "\x1b[0m" + source.sgr;
+        activeSgr = source.sgr;
+      }
+      output += source.char;
+    }
+    output += "\x1b[0m";
+    return output;
+  }
+
   const splashRenderer = createWatchSplashRenderer({
     watchState,
     transportState,
@@ -3700,25 +3761,6 @@ export function createWatchFrameController(dependencies = {}) {
   }
 
   function buildVisibleFrameSnapshot({ width = termWidth(), height = termHeight() } = {}) {
-    // When the right-side ANSI art panel is active, render the rest
-    // of the frame into a narrowed width (`width - artPanelCols`) so
-    // the cockpit, composer, and event cards naturally fit the
-    // remaining budget instead of being clipped with an ellipsis
-    // marker at blit time.
-    const artPanelRows = Array.isArray(watchState.artPanelRows)
-      ? watchState.artPanelRows
-      : null;
-    const rawArtPanelCols = Number.isFinite(Number(watchState.artPanelCols))
-      ? Math.max(0, Math.floor(Number(watchState.artPanelCols)))
-      : 0;
-    const artPanelCols =
-      artPanelRows && artPanelRows.length > 0 && rawArtPanelCols > 0 && rawArtPanelCols < width
-        ? rawArtPanelCols
-        : 0;
-    const fullTerminalWidth = width;
-    if (artPanelCols > 0) {
-      width = width - artPanelCols;
-    }
     let frame = [];
     let diffNavigation = null;
     const { popup } = currentBottomPopupLayout(width, height);
@@ -3805,21 +3847,31 @@ export function createWatchFrameController(dependencies = {}) {
       Math.min(height, composerStartRow + composerInputOffsetRows + (composer.cursorRow ?? 0)),
     );
 
-    // Right-side ANSI art panel overlay. The frame above was
-    // rendered at `width = fullTerminalWidth - artPanelCols` so every
-    // row already fits the left column exactly. Just append the
-    // matching art row — no clipping, no ellipsis marker.
-    if (artPanelCols > 0 && artPanelRows && artPanelRows.length > 0) {
+    // ANSI art wallpaper compositing. When `watchState.artPanelRows`
+    // is populated (rasterized by the art controller in
+    // agenc-watch-app.mjs and refreshed on terminal resize), each
+    // row is composited cell-by-cell: TUI cells carrying a visible
+    // non-space character stay on top; space cells let the art
+    // underneath show through. Terminals don't have real layering,
+    // so this space-replacement approach is the closest practical
+    // approximation — matches the mockup where cockpit borders and
+    // text render opaquely over a persistent background image.
+    const artPanelRows = Array.isArray(watchState.artPanelRows)
+      ? watchState.artPanelRows
+      : null;
+    if (artPanelRows && artPanelRows.length > 0) {
       for (let rowIndex = 0; rowIndex < nextFrameLines.length; rowIndex += 1) {
-        const leftPart = nextFrameLines[rowIndex] ?? "";
-        const artRow = artPanelRows[rowIndex] ?? "";
-        nextFrameLines[rowIndex] = leftPart + artRow;
+        nextFrameLines[rowIndex] = compositeRowWithArt(
+          String(nextFrameLines[rowIndex] ?? ""),
+          artPanelRows[rowIndex] ?? "",
+          width,
+        );
       }
     }
 
     return {
       lines: nextFrameLines,
-      width: artPanelCols > 0 ? fullTerminalWidth : width,
+      width,
       height,
       composer: {
         ...composer,

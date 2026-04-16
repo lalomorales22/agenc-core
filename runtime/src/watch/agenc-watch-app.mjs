@@ -2066,21 +2066,15 @@ async function refreshArtPanel() {
     }
     const width = termWidth();
     const height = termHeight();
-    const artCols = Math.max(
-      10,
-      Math.min(
-        Math.floor(width * 0.6),
-        Math.floor(width * cfg.widthFraction),
-      ),
-    );
-    if (artCols >= width) {
-      watchState.artPanelRows = null;
-      watchState.artPanelCols = 0;
-      return;
-    }
-    const rows = await artRenderer.render({ cols: artCols, rows: height });
+    // Render the art across the full terminal so every TUI space
+    // cell has an art pixel underneath in the compositor. The
+    // `widthFraction` config knob is preserved in the config
+    // surface for future cropping flexibility but the output is
+    // blitted full width either way.
+    void cfg.widthFraction;
+    const rows = await artRenderer.render({ cols: width, rows: height });
     watchState.artPanelRows = rows;
-    watchState.artPanelCols = artCols;
+    watchState.artPanelCols = width;
     scheduleRender();
   } catch {
     watchState.artPanelRows = null;
