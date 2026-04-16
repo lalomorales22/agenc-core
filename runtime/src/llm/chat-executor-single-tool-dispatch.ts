@@ -449,6 +449,8 @@ export async function executeSingleToolCall(
         event: "PreToolUse",
         sessionId: ctx.sessionId,
         toolCall,
+        parsedInput: args as Record<string, unknown>,
+        ...(ctx.runtimeWorkspaceRoot ? { cwd: ctx.runtimeWorkspaceRoot } : {}),
       },
     });
     if (preDispatch.action === "deny") {
@@ -581,6 +583,7 @@ export async function executeSingleToolCall(
 
   // Cut 5.2: PostToolUse / PostToolUseFailure hook dispatch.
   if (config.hookRegistry) {
+    const cwdFields = ctx.runtimeWorkspaceRoot ? { cwd: ctx.runtimeWorkspaceRoot } : {};
     if (exec.toolFailed) {
       await dispatchHooks({
         registry: config.hookRegistry,
@@ -592,6 +595,8 @@ export async function executeSingleToolCall(
           sessionId: ctx.sessionId,
           toolCall,
           errorMessage: result,
+          parsedInput: args as Record<string, unknown>,
+          ...cwdFields,
         },
       });
     } else {
@@ -606,6 +611,8 @@ export async function executeSingleToolCall(
           toolCall,
           result,
           isError: exec.toolFailed,
+          parsedInput: args as Record<string, unknown>,
+          ...cwdFields,
         },
       });
     }
