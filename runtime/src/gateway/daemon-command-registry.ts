@@ -1674,18 +1674,6 @@ export interface CommandRegistryDaemonContext {
   getDesktopBridges(): Map<string, unknown>;
   getPlaywrightBridges(): Map<string, unknown>;
   getContainerMCPBridges(): Map<string, unknown[]>;
-  getGoalManager(): {
-    addGoal(params: {
-      title: string;
-      description: string;
-      priority: string;
-      source: string;
-      maxAttempts: number;
-    }): Promise<{ id: string; title: string }>;
-    getActiveGoals(): Promise<
-      Array<{ priority: string; status: string; title: string }>
-    >;
-  } | null;
   startSlashInit(params: {
     workspaceRoot: string;
     force?: boolean;
@@ -6421,49 +6409,6 @@ export function createDaemonCommandRegistry(
       },
     });
   }
-
-  // /goal — create or list goals (lazy access to goalManager via getter)
-  commandRegistry.register({
-    name: "goal",
-    description: "Create or list goals",
-    args: "[description]",
-    global: true,
-    handler: async (cmdCtx) => {
-      const gm = ctx.getGoalManager();
-      if (!gm) {
-        await cmdCtx.reply(
-          "Goal manager not available. Autonomous features may be disabled.",
-        );
-        return;
-      }
-      if (cmdCtx.args) {
-        const goal = await gm.addGoal({
-          title: cmdCtx.args.slice(0, 60),
-          description: cmdCtx.args,
-          priority: "medium",
-          source: "user",
-          maxAttempts: 2,
-        });
-        await cmdCtx.reply(
-          `Goal created [${goal.id.slice(0, 8)}]: ${goal.title}`,
-        );
-      } else {
-        const active = await gm.getActiveGoals();
-        if (active.length === 0) {
-          await cmdCtx.reply(
-            "No active goals. Use /goal <description> to create one.",
-          );
-          return;
-        }
-        const lines = active.map(
-          (g) => `  [${g.priority}/${g.status}] ${g.title}`,
-        );
-        await cmdCtx.reply(
-          `Active goals (${active.length}):\n${lines.join("\n")}`,
-        );
-      }
-    },
-  });
 
   // ---- /memory (Phase 9.1) ----
   commandRegistry.register({

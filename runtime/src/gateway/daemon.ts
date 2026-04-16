@@ -389,7 +389,6 @@ import {
 import type { TopLevelVerifierTraceEvent } from "./top-level-verifier.js";
 import {
   wireSocial as wireSocialStandalone,
-  wireAutonomousFeatures as wireAutonomousFeaturesStandalone,
   type FeatureWiringContext,
 } from "./daemon-feature-wiring.js";
 import {
@@ -1140,9 +1139,6 @@ export class DaemonManager {
     import("../mcp-client/types.js").MCPToolBridge[]
   > = new Map();
   private _desktopRouterFactory: DesktopRouterFactory | null = null;
-  private _desktopExecutor:
-    | import("../autonomous/desktop-executor.js").DesktopExecutor
-    | null = null;
   private _backgroundRunSupervisor: BackgroundRunSupervisor | null = null;
   private _durableSubrunOrchestrator: DurableSubrunOrchestrator | null = null;
   private _remoteJobManager: SystemRemoteJobManager | null = null;
@@ -1160,9 +1156,6 @@ export class DaemonManager {
       updatedAt: number;
     }
   >();
-  private _goalManager:
-    | import("../autonomous/goal-manager.js").GoalManager
-    | null = null;
   private readonly _foregroundSessionLocks = new Set<string>();
   private _policyEngine: import("../policy/engine.js").PolicyEngine | null =
     null;
@@ -1875,9 +1868,6 @@ export class DaemonManager {
         this._externalChannels.set(name, channel);
         pendingExternalChannels.delete(name);
       }
-
-      // Wire up autonomous features (curiosity, self-learning, meta-planner, proactive comms)
-      await this.wireAutonomousFeatures(gatewayConfig);
 
       // Wire up subsystems (social module)
       await this.wireSocial(gatewayConfig);
@@ -3697,8 +3687,6 @@ export class DaemonManager {
       proactiveCommunicator: this._proactiveCommunicator as any,
       heartbeatScheduler: this._heartbeatScheduler as any,
       cronScheduler: this._cronScheduler as any,
-      goalManager: this._goalManager as any,
-      desktopExecutor: this._desktopExecutor as any,
       mcpManager: this._mcpManager as any,
       externalChannels: new Map(this._externalChannels),
       llmProviders: this._llmProviders,
@@ -3720,19 +3708,11 @@ export class DaemonManager {
     this._proactiveCommunicator = ctx.proactiveCommunicator as any;
     this._heartbeatScheduler = ctx.heartbeatScheduler as any;
     this._cronScheduler = ctx.cronScheduler as any;
-    this._goalManager = ctx.goalManager as any;
-    this._desktopExecutor = ctx.desktopExecutor as any;
   }
 
   private async wireSocial(config: GatewayConfig): Promise<void> {
     const ctx = this._buildFeatureWiringContext();
     await wireSocialStandalone(config, ctx);
-    this._applyFeatureWiringContext(ctx);
-  }
-
-  private async wireAutonomousFeatures(config: GatewayConfig): Promise<void> {
-    const ctx = this._buildFeatureWiringContext();
-    await wireAutonomousFeaturesStandalone(config, ctx);
     this._applyFeatureWiringContext(ctx);
   }
 
@@ -5075,7 +5055,6 @@ export class DaemonManager {
       getDesktopBridges: () => this._desktopBridges,
       getPlaywrightBridges: () => this._playwrightBridges,
       getContainerMCPBridges: () => this._containerMCPBridges as any,
-      getGoalManager: () => this._goalManager as any,
       startSlashInit: async (params) => {
         const workspaceRoot = resolvePath(params.workspaceRoot);
         const filePath = `${workspaceRoot}/AGENC.md`;
@@ -7773,10 +7752,6 @@ export class DaemonManager {
       this._cronScheduler.stop();
       this._cronScheduler = null;
     }
-    if (this._desktopExecutor !== null) {
-      this._desktopExecutor.cancel();
-      this._desktopExecutor = null;
-    }
   }
 
   async stop(): Promise<void> {
@@ -7899,13 +7874,6 @@ export class DaemonManager {
         this._cronScheduler.stop();
         this._cronScheduler = null;
       }
-      // Stop desktop executor
-      if (this._desktopExecutor !== null) {
-        this._desktopExecutor.cancel();
-        this._desktopExecutor = null;
-      }
-      // Clear goal manager
-      this._goalManager = null;
       // Clear proactive communicator
       this._proactiveCommunicator = null;
       // Stop WebChat channel before gateway
@@ -7938,18 +7906,6 @@ export class DaemonManager {
     } finally {
       this.shutdownInProgress = false;
     }
-  }
-
-  get desktopExecutor():
-    | import("../autonomous/desktop-executor.js").DesktopExecutor
-    | null {
-    return this._desktopExecutor;
-  }
-
-  get goalManager():
-    | import("../autonomous/goal-manager.js").GoalManager
-    | null {
-    return this._goalManager;
   }
 
   get proactiveCommunicator(): ProactiveCommunicator | null {
