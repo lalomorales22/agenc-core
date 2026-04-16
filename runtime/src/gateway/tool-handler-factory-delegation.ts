@@ -38,7 +38,6 @@ import type { TaskStore } from "../tools/system/task-tracker.js";
 import {
   buildDelegatedRuntimeResult,
   computeDelegatedExecutionEnvelopeFingerprint,
-  mapPlannerVerifierSnapshotToRuntimeVerdict,
   resolveDelegatedTerminalOutcome,
 } from "./delegated-runtime-result.js";
 import type { VerifierRequirement } from "./verifier-probes.js";
@@ -532,7 +531,6 @@ async function finalizeDelegationTask(params: {
 }): Promise<void> {
   const childResult = params.result;
   const failedChildToolCalls = countFailedChildToolCalls(childResult?.toolCalls);
-  const verifierVerdict = mapPlannerVerifierSnapshotToRuntimeVerdict(undefined);
   const terminalOutcome = resolveDelegatedTerminalOutcome({
     surface: "direct_child",
     workerSessionId: params.childSessionId,
@@ -549,7 +547,6 @@ async function finalizeDelegationTask(params: {
           ? "timed_out"
           : undefined,
     verifierRequirement: params.verifierRequirement,
-    verifierVerdict,
     executionLocation: params.executionLocation,
     executionEnvelopeFingerprint:
       childResult?.contractFingerprint ?? params.executionEnvelopeFingerprint,
@@ -589,7 +586,6 @@ async function finalizeDelegationTask(params: {
       runtimeResult: terminalOutcome.runtimeResult,
       usage:
         childResult?.tokenUsage as unknown as Record<string, unknown> | undefined,
-      verifierVerdict,
       ownedArtifacts: params.ownedArtifacts,
       executionLocation: params.executionLocation,
       childSessionId: params.childSessionId,
@@ -637,7 +633,6 @@ async function finalizeDelegationTask(params: {
     output: childResult?.output,
     runtimeResult: terminalOutcome.runtimeResult,
     usage: childResult?.tokenUsage as unknown as Record<string, unknown> | undefined,
-    verifierVerdict,
     ownedArtifacts: params.ownedArtifacts,
     executionLocation: params.executionLocation,
     childSessionId: params.childSessionId,
@@ -684,7 +679,6 @@ export async function executeDelegationTool(
     const failedChildToolCalls = countFailedChildToolCalls(
       resultParams.childResult.toolCalls,
     );
-    const verifierVerdict = mapPlannerVerifierSnapshotToRuntimeVerdict(undefined);
     const terminalOutcome = resolveDelegatedTerminalOutcome({
       surface: "direct_child",
       workerSessionId: resultParams.childSessionId,
@@ -696,7 +690,6 @@ export async function executeDelegationTool(
       validationCode: resultParams.childResult.validationCode,
       reportedStatus: resultParams.childInfo?.status,
       verifierRequirement: resultParams.verifierRequirement,
-      verifierVerdict,
       executionLocation: resultParams.localExecutionLocation,
       executionEnvelopeFingerprint:
         resultParams.childResult.contractFingerprint ??
@@ -1553,7 +1546,6 @@ export async function executeDelegationTool(
 
     const childInfo = subAgentManager.getInfo(childSessionId);
     const failedChildToolCalls = countFailedChildToolCalls(childResult.toolCalls);
-    const verifierVerdict = mapPlannerVerifierSnapshotToRuntimeVerdict(undefined);
     const terminalOutcome = resolveDelegatedTerminalOutcome({
       surface: "direct_child",
       workerSessionId: childSessionId,
@@ -1565,7 +1557,6 @@ export async function executeDelegationTool(
       validationCode: childResult.validationCode,
       reportedStatus: childInfo?.status,
       verifierRequirement,
-      verifierVerdict,
       executionLocation: localExecutionLocation,
       executionEnvelopeFingerprint:
         childResult.contractFingerprint ?? executionEnvelopeFingerprint,
@@ -1607,7 +1598,6 @@ export async function executeDelegationTool(
           runtimeResult: terminalOutcome.runtimeResult,
           usage:
             childResult.tokenUsage as unknown as Record<string, unknown> | undefined,
-          verifierVerdict,
           ownedArtifacts: admittedInput.delegationAdmission?.ownedArtifacts,
           workingDirectory,
           isolation: admittedInput.delegationAdmission?.isolationReason,
@@ -1679,7 +1669,6 @@ export async function executeDelegationTool(
         runtimeResult: terminalOutcome.runtimeResult,
         usage:
           childResult.tokenUsage as unknown as Record<string, unknown> | undefined,
-        verifierVerdict,
         ownedArtifacts: admittedInput.delegationAdmission?.ownedArtifacts,
         workingDirectory,
         isolation: admittedInput.delegationAdmission?.isolationReason,

@@ -38,25 +38,6 @@ export interface DelegatedTerminalOutcome {
   readonly failureReason?: string;
 }
 
-export interface PlannerVerifierSnapshot {
-  readonly performed: boolean;
-  readonly overall: "pass" | "retry" | "fail" | "skipped";
-  readonly summary?: string;
-}
-
-export function mapPlannerVerifierSnapshotToRuntimeVerdict(
-  snapshot: PlannerVerifierSnapshot | undefined,
-): RuntimeVerifierVerdict | undefined {
-  if (!snapshot) return undefined;
-  return {
-    attempted: snapshot.performed === true,
-    overall: snapshot.overall,
-    ...(typeof snapshot.summary === "string" && snapshot.summary.trim().length > 0
-      ? { summary: snapshot.summary.trim() }
-      : {}),
-  };
-}
-
 export function mergeVerifierRequirements(params: {
   readonly inherited?: VerifierRequirement;
   readonly resolved?: VerifierRequirement;
@@ -116,8 +97,6 @@ export function buildDelegatedIncompleteReason(params: {
     "remainingRequirements"
   >;
   readonly stopReasonDetail?: string;
-  readonly verifierRequirement?: VerifierRequirement;
-  readonly verifierVerdict?: RuntimeVerifierVerdict;
 }): string | undefined {
   if (!params.completionState || params.completionState === "completed") {
     return undefined;
@@ -144,11 +123,7 @@ export function buildDelegatedIncompleteReason(params: {
 export function buildDelegatedRuntimeResult(
   params: DelegatedRuntimeResultParams,
 ): DelegatedRuntimeResult {
-  const completionState = resolveEffectiveCompletionState({
-    completionState: params.completionState,
-    verifierRequirement: params.verifierRequirement,
-    verifierVerdict: params.verifierVerdict,
-  });
+  const completionState = params.completionState;
   const status = params.status ??
     resolveDelegatedTerminalStatus({
       completionState,
@@ -192,17 +167,12 @@ export function resolveDelegatedTerminalOutcome(params: {
   readonly validationCode?: DelegationOutputValidationCode;
   readonly taskId?: string;
   readonly verifierRequirement?: VerifierRequirement;
-  readonly verifierVerdict?: RuntimeVerifierVerdict;
   readonly executionLocation?: RuntimeExecutionLocation;
   readonly executionEnvelopeFingerprint?: string;
   readonly continuationSessionId?: string;
   readonly ownedArtifacts?: readonly string[];
 }): DelegatedTerminalOutcome {
-  const completionState = resolveEffectiveCompletionState({
-    completionState: params.completionState,
-    verifierRequirement: params.verifierRequirement,
-    verifierVerdict: params.verifierVerdict,
-  });
+  const completionState = params.completionState;
   const terminalStatus = resolveDelegatedTerminalStatus({
     completionState,
     stopReason: params.stopReason,
@@ -219,7 +189,6 @@ export function resolveDelegatedTerminalOutcome(params: {
     validationCode: params.validationCode,
     taskId: params.taskId,
     verifierRequirement: params.verifierRequirement,
-    verifierVerdict: params.verifierVerdict,
     executionLocation: params.executionLocation,
     executionEnvelopeFingerprint: params.executionEnvelopeFingerprint,
     continuationSessionId: params.continuationSessionId,
@@ -230,8 +199,6 @@ export function resolveDelegatedTerminalOutcome(params: {
     completionState,
     completionProgress: params.completionProgress,
     stopReasonDetail: params.stopReasonDetail,
-    verifierRequirement: params.verifierRequirement,
-    verifierVerdict: params.verifierVerdict,
   });
   return {
     success: terminalStatus === "completed" && completionState === "completed",
@@ -247,14 +214,6 @@ export function computeDelegatedExecutionEnvelopeFingerprint(
   return createHash("sha256")
     .update(stableStringify(payload))
     .digest("hex");
-}
-
-function resolveEffectiveCompletionState(params: {
-  readonly completionState?: WorkflowCompletionState;
-  readonly verifierRequirement?: VerifierRequirement;
-  readonly verifierVerdict?: RuntimeVerifierVerdict;
-}): WorkflowCompletionState | undefined {
-  return params.completionState;
 }
 
 function uniqueStrings<T extends string>(values: readonly T[]): readonly T[] {

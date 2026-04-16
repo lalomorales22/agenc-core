@@ -103,7 +103,6 @@ import {
 import {
   buildDelegatedIncompleteReason,
   buildDelegatedRuntimeResult,
-  mapPlannerVerifierSnapshotToRuntimeVerdict,
 } from "./delegated-runtime-result.js";
 import {
   summarizeParentRequestForSubagent,
@@ -1164,7 +1163,6 @@ export class SubAgentOrchestrator implements DeterministicPipelineExecutor {
               stopReason: attemptOutcome.stopReason,
               stopReasonDetail: attemptOutcome.stopReasonDetail,
               validationCode: attemptOutcome.validationCode,
-              verifierVerdict: mapPlannerVerifierSnapshotToRuntimeVerdict(undefined),
               executionEnvelopeFingerprint:
                 attemptOutcome.contractFingerprint,
               continuationSessionId: attemptOutcome.subagentSessionId,
@@ -1723,7 +1721,6 @@ export class SubAgentOrchestrator implements DeterministicPipelineExecutor {
         completionState: result.completionState,
         completionProgress: result.completionProgress,
         stopReasonDetail: result.stopReasonDetail,
-        verifierVerdict: mapPlannerVerifierSnapshotToRuntimeVerdict(undefined),
       });
       const message = completionStateFailure ??
         (
