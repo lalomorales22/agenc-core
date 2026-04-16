@@ -160,28 +160,6 @@ export interface RuntimeContractSnapshot {
   readonly toolProtocol: RuntimeToolProtocolSnapshot;
 }
 
-export interface CompletionValidatorResult {
-  readonly id: CompletionValidatorId;
-  readonly outcome: CompletionValidatorOutcome;
-  readonly reason?: string;
-  readonly blockingMessage?: string;
-  readonly evidence?: unknown;
-  readonly maxAttempts?: number;
-  readonly exhaustedDetail?: string;
-  readonly validationCode?: DelegationOutputValidationCode;
-  readonly verifier?: RuntimeVerifierVerdict;
-  readonly verifierTaskId?: string;
-  readonly verifierRequirement?: VerifierRequirement;
-  readonly verifierLauncherKind?: "subagent" | "remote_job";
-}
-
-export interface CompletionValidatorContext {
-  readonly sessionId: string;
-  readonly workspaceRoot?: string;
-  readonly turnClass: string;
-  readonly stopReason: string;
-}
-
 export interface RuntimeWorkerHandle {
   readonly id: string;
   readonly kind: string;
