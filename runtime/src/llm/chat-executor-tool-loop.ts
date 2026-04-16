@@ -52,6 +52,14 @@ import {
   buildRoutingExpansionMessage,
 } from "./chat-executor-tool-utils.js";
 import {
+  FAILED_TOOL_RECOVERY_STREAK,
+  buildFailedToolRecoveryHint,
+  collectRecentConsecutiveFailedToolCalls,
+  mergeRecoveryHints,
+  responseRepeatsFailedToolPattern,
+  updateFailedToolStreak,
+} from "./chat-executor-failed-tool-tracking.js";
+import {
   applyActiveRoutedToolNames,
   buildActiveRoutedToolSet,
 } from "./chat-executor-routing-state.js";
@@ -203,7 +211,6 @@ export interface ToolLoopCallbacks {
 }
 
 const TOOL_PROTOCOL_REPAIR_ERROR = "tool_protocol_repair";
-const FAILED_TOOL_RECOVERY_STREAK = 3;
 const TERMINAL_MUTATION_TOOL_NAMES = new Set([
   "system.applyPatch",
   "system.appendFile",
@@ -236,154 +243,6 @@ function buildToolLoopTerminalResult(
     runtimeContractSnapshot: ctx.runtimeContractSnapshot,
     mutationDetected: detectSuccessfulWorkspaceMutation(ctx.allToolCalls),
   };
-}
-
-function summarizeToolFailureForRecovery(call: ToolCallRecord): string {
-  try {
-    const parsed = JSON.parse(call.result) as { error?: unknown };
-    if (typeof parsed.error === "string" && parsed.error.trim().length > 0) {
-      return parsed.error.trim().replace(/\s+/g, " ");
-    }
-  } catch {
-    // Fall back to plain text below.
-  }
-  const compact = call.result
-    .trim()
-    .replace(/\s+/g, " ")
-    .slice(0, 140);
-  return compact.length > 0 ? compact : "tool call failed";
-}
-
-function buildFailedToolRecoveryHint(
-  failedCalls: readonly ToolCallRecord[],
-): RecoveryHint | undefined {
-  if (failedCalls.length < FAILED_TOOL_RECOVERY_STREAK) {
-    return undefined;
-  }
-  const summary = failedCalls
-    .slice(-FAILED_TOOL_RECOVERY_STREAK)
-    .map((call) => `${call.name}: ${summarizeToolFailureForRecovery(call)}`)
-    .join(" | ");
-  return {
-    key: "failed_tool_streak",
-    message:
-      `Recent tool failures: ${summary}. Stop repeating the same failing tool pattern. Reassess the errors and continue without tools unless a materially different tool action is clearly justified.`,
-  };
-}
-
-function stableToolFailureValue(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map((item) => stableToolFailureValue(item)).join(",")}]`;
-  }
-  if (value && typeof value === "object") {
-    const entries = Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(
-        ([key, entryValue]) =>
-          `${JSON.stringify(key)}:${stableToolFailureValue(entryValue)}`,
-      );
-    return `{${entries.join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
-
-function toolFailureSignature(
-  name: string,
-  args: Record<string, unknown>,
-): string {
-  return `${name}:${stableToolFailureValue(args)}`;
-}
-
-function toolCallSignature(toolCall: LLMToolCall): string | undefined {
-  try {
-    const parsed = JSON.parse(toolCall.arguments) as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return undefined;
-    }
-    return toolFailureSignature(
-      toolCall.name,
-      parsed as Record<string, unknown>,
-    );
-  } catch {
-    return undefined;
-  }
-}
-
-function isRepeatedSameFailedToolPattern(
-  failedCalls: readonly ToolCallRecord[],
-): boolean {
-  const recentFailures = failedCalls.slice(-FAILED_TOOL_RECOVERY_STREAK);
-  if (recentFailures.length < FAILED_TOOL_RECOVERY_STREAK) {
-    return false;
-  }
-  const [first, ...rest] = recentFailures.map((call) =>
-    toolFailureSignature(call.name, call.args),
-  );
-  return rest.every((signature) => signature === first);
-}
-
-function responseRepeatsFailedToolPattern(params: {
-  readonly response: LLMResponse;
-  readonly failedCalls: readonly ToolCallRecord[];
-}): boolean {
-  if (!isRepeatedSameFailedToolPattern(params.failedCalls)) {
-    return false;
-  }
-  const repeatedFailure = params.failedCalls[params.failedCalls.length - 1];
-  if (!repeatedFailure) {
-    return false;
-  }
-  const repeatedSignature = toolFailureSignature(
-    repeatedFailure.name,
-    repeatedFailure.args,
-  );
-  return params.response.toolCalls.every(
-    (toolCall) => toolCallSignature(toolCall) === repeatedSignature,
-  );
-}
-
-function collectRecentConsecutiveFailedToolCalls(
-  toolCalls: readonly ToolCallRecord[],
-): readonly ToolCallRecord[] {
-  const collected: ToolCallRecord[] = [];
-  for (let index = toolCalls.length - 1; index >= 0; index -= 1) {
-    const call = toolCalls[index];
-    if (call.failureBudgetExempt === true) {
-      continue;
-    }
-    if (!didToolCallFail(call.isError, call.result)) {
-      break;
-    }
-    collected.unshift(call);
-  }
-  return collected;
-}
-
-function updateFailedToolStreak(
-  currentStreak: number,
-  roundCalls: readonly ToolCallRecord[],
-): number {
-  let nextStreak = currentStreak;
-  for (const call of roundCalls) {
-    if (call.failureBudgetExempt === true) {
-      continue;
-    }
-    if (didToolCallFail(call.isError, call.result)) {
-      nextStreak += 1;
-      continue;
-    }
-    nextStreak = 0;
-  }
-  return nextStreak;
-}
-
-function mergeRecoveryHints(
-  recoveryHints: readonly RecoveryHint[],
-  extraHint: RecoveryHint | undefined,
-): readonly RecoveryHint[] {
-  if (!extraHint) return recoveryHints;
-  const filtered = recoveryHints.filter((hint) => hint.key !== extraHint.key);
-  return [...filtered, extraHint];
 }
 
 function syncToolProtocolSnapshot(ctx: ExecutionContext): void {
