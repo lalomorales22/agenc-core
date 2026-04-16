@@ -63,6 +63,10 @@ import {
   enforceTopLevelExecutionEnvelope,
 } from "./chat-executor-envelope-helpers.js";
 import {
+  callModelWithReactiveCompact,
+  runPerIterationCompactionBeforeModelCall,
+} from "./chat-executor-compaction-wrappers.js";
+import {
   applyActiveRoutedToolNames,
   buildActiveRoutedToolSet,
 } from "./chat-executor-routing-state.js";
@@ -107,13 +111,6 @@ import {
   type ContentReplacementState,
   type ToolBudgetConfig,
 } from "./tool-result-budget.js";
-import {
-  applyPerIterationCompaction,
-  computeAutocompactThreshold,
-} from "./compact/index.js";
-import { applyReactiveCompact } from "./compact/reactive-compact.js";
-import { tryProjectedContextCollapse } from "./chat-executor-history-compaction.js";
-import { LLMContextWindowExceededError } from "./errors.js";
 import {
   appendToolRecord,
   checkRequestTimeout,
@@ -899,211 +896,6 @@ export async function executeSingleToolCall(
  * provider call in this file is now preceded by this helper, so the
  * chain actually runs.
  */
-async function runPerIterationCompactionBeforeModelCall(
-  ctx: ExecutionContext,
-  config: ToolLoopConfig,
-  callbacks: ToolLoopCallbacks,
-  phase: ChatCallUsageRecord["phase"],
-): Promise<void> {
-  const result = applyPerIterationCompaction({
-    messages: ctx.messages,
-    state: ctx.perIterationCompaction,
-    nowMs: Date.now(),
-    autocompactThresholdTokens: computeAutocompactThreshold(
-      config.contextWindowTokens,
-      config.maxOutputTokens,
-    ),
-    lastResponseUsage: ctx.response?.usage,
-    collapseHook: (messages) => {
-      const projected = tryProjectedContextCollapse({
-        history: messages,
-        sessionId: ctx.sessionId,
-        existingArtifactContext: ctx.compactedArtifactContext,
-        autocompactThresholdTokens: computeAutocompactThreshold(
-          config.contextWindowTokens,
-          config.maxOutputTokens,
-        ),
-      });
-      if (!projected) {
-        return {
-          action: "noop" as const,
-          messages,
-        };
-      }
-      ctx.compacted = true;
-      ctx.compactedArtifactContext = projected.artifactContext;
-      return {
-        action: "collapsed" as const,
-        messages: projected.history,
-        boundary: projected.boundary,
-      };
-    },
-    ...(config.consolidationHook
-      ? { consolidationHook: config.consolidationHook }
-      : {}),
-  });
-
-  ctx.perIterationCompaction = result.state;
-
-  if (result.action === "noop") return;
-
-  // Phase H: dispatch PreCompact for each layer that fired, with the
-  // registry-supplied matcher allowed to veto.
-  if (config.hookRegistry) {
-    for (const boundary of result.boundaries) {
-      const content =
-        typeof boundary.content === "string" ? boundary.content : "";
-      const layer = extractCompactionLayerTag(content) as
-        | "snip"
-        | "microcompact"
-        | "context-collapse"
-        | "autocompact"
-        | "reactive-compact";
-      await dispatchHooks({
-        registry: config.hookRegistry,
-        event: "PreCompact",
-        matchKey: layer,
-        executor: defaultHookExecutor,
-        context: {
-          event: "PreCompact",
-          sessionId: ctx.sessionId,
-          layer,
-        },
-      });
-    }
-  }
-
-  // Snip and microcompact actually prune messages; autocompact is
-  // decision-only and hands the pruned view back unchanged.
-  if (result.messages.length !== ctx.messages.length) {
-    // The compaction chain returns a readonly slice. We need a mutable
-    // array on ctx.messages so the rest of the loop can push to it.
-    // Preserve section alignment by trimming messageSections to match.
-    const droppedCount = ctx.messages.length - result.messages.length;
-    ctx.messages = [...result.messages];
-    if (ctx.messageSections.length >= droppedCount) {
-      ctx.messageSections.splice(0, droppedCount);
-    }
-  }
-
-  for (const boundary of result.boundaries) {
-    const content =
-      typeof boundary.content === "string" ? boundary.content : "";
-    callbacks.emitExecutionTrace(ctx, {
-      type: "compaction_triggered",
-      phase,
-      callIndex: ctx.callIndex,
-      payload: {
-        layer: extractCompactionLayerTag(content),
-        boundary: content,
-        messagesAfter: ctx.messages.length,
-      },
-    });
-  }
-
-  // Phase H: dispatch PostCompact for each layer that fired, AFTER
-  // ctx.messages has been updated so hooks observe the new state.
-  if (config.hookRegistry) {
-    for (const boundary of result.boundaries) {
-      const content =
-        typeof boundary.content === "string" ? boundary.content : "";
-      const layer = extractCompactionLayerTag(content) as
-        | "snip"
-        | "microcompact"
-        | "context-collapse"
-        | "autocompact"
-        | "reactive-compact";
-      await dispatchHooks({
-        registry: config.hookRegistry,
-        event: "PostCompact",
-        matchKey: layer,
-        executor: defaultHookExecutor,
-        context: {
-          event: "PostCompact",
-          sessionId: ctx.sessionId,
-          layer,
-        },
-      });
-    }
-  }
-}
-
-/**
- * Extract the `[layer]` tag from a compaction boundary message's
- * content. Returns `"unknown"` if no tag is found. The layers write
- * their tag as the first bracketed token in the boundary content
- * (e.g. `[snip] dropped 12 oldest messages after 610s idle`).
- */
-function extractCompactionLayerTag(content: string): string {
-  const match = /^\[([a-z_-]+)\]/.exec(content);
-  return match?.[1] ?? "unknown";
-}
-
-/**
- * Phase I wire-up: wrap a provider call with reactive compaction.
- *
- * When the provider returns a `LLMContextWindowExceededError` (HTTP
- * 413 or provider-specific prompt-too-long error), invoke
- * `applyReactiveCompact` on `ctx.messages` to drop the oldest
- * messages, update the state, and retry the call. Repeat up to the
- * reactive-compact layer's internal limit (3 attempts by default;
- * `applyReactiveCompact` returns `"exhausted"` after that).
- *
- * Mirrors the runtime's reactive compaction recovery path.
- */
-async function callModelWithReactiveCompact(
-  ctx: ExecutionContext,
-  callbacks: ToolLoopCallbacks,
-  phase: ChatCallUsageRecord["phase"],
-  buildInput: () => Parameters<ToolLoopCallbacks["callModelForPhase"]>[1],
-): Promise<LLMResponse | undefined> {
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    try {
-      return await callbacks.callModelForPhase(ctx, buildInput());
-    } catch (err) {
-      if (!(err instanceof LLMContextWindowExceededError)) {
-        throw err;
-      }
-      sealPendingToolProtocol(ctx, callbacks, "reactive_compact_retry");
-      const reactiveState =
-        ctx.perIterationCompaction.reactiveCompact ?? {
-          attemptIndex: 0,
-          lastTriggerMs: null,
-        };
-      const result = applyReactiveCompact({
-        messages: ctx.messages,
-        state: reactiveState,
-        nowMs: Date.now(),
-      });
-      if (result.action === "exhausted" || result.action === "noop") {
-        // Give up and bubble the original 413 — the caller's error
-        // handling decides what to surface to the user.
-        throw err;
-      }
-      ctx.messages = [...result.messages];
-      ctx.perIterationCompaction = {
-        ...ctx.perIterationCompaction,
-        reactiveCompact: result.state,
-      };
-      if (result.boundary && typeof result.boundary.content === "string") {
-        callbacks.emitExecutionTrace(ctx, {
-          type: "compaction_triggered",
-          phase,
-          callIndex: ctx.callIndex,
-          payload: {
-            layer: "reactive-compact",
-            boundary: result.boundary.content,
-            messagesAfter: ctx.messages.length,
-            attempt: result.state.attemptIndex,
-          },
-        });
-      }
-      // Loop back and retry with trimmed history.
-    }
-  }
-}
-
 export async function executeToolCallLoop(
   ctx: ExecutionContext,
   config: ToolLoopConfig,
