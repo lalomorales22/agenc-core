@@ -2343,22 +2343,42 @@ export function createDaemonCommandRegistry(
       if (jsonArgs) {
         const query =
           typeof jsonArgs.query === "string" ? jsonArgs.query.trim() : "";
+        if (query.length > 0) {
+          const globArgs: Record<string, unknown> = {
+            pattern: `**/*${query}*`,
+          };
+          if (typeof jsonArgs.path === "string") globArgs.path = jsonArgs.path;
+          if (typeof jsonArgs.maxResults === "number") {
+            globArgs.maxResults = jsonArgs.maxResults;
+          }
+          const result = await executeStructuredTool(
+            baseToolHandler,
+            "system.glob",
+            globArgs,
+          );
+          await cmdCtx.replyResult({
+            text: formatSearchFilesReply(result),
+            viewKind: "files",
+            data: {
+              kind: "files",
+              mode: "search",
+              query,
+              result,
+            },
+          });
+          return;
+        }
         const result = await executeStructuredTool(
           baseToolHandler,
-          query.length > 0 ? "system.searchFiles" : "system.repoInventory",
+          "system.repoInventory",
           jsonArgs,
         );
-        const text =
-          query.length > 0
-            ? formatSearchFilesReply(result)
-            : formatRepoInventoryReply(result);
         await cmdCtx.replyResult({
-          text,
+          text: formatRepoInventoryReply(result),
           viewKind: "files",
           data: {
             kind: "files",
-            mode: query.length > 0 ? "search" : "inventory",
-            ...(query.length > 0 ? { query } : {}),
+            mode: "inventory",
             result,
           },
         });
@@ -2385,17 +2405,17 @@ export function createDaemonCommandRegistry(
         });
         return;
       }
+      const customGlobs = parseCsvFlag(cmdCtx.argv, "glob");
       const result = await executeStructuredTool(
         baseToolHandler,
-        "system.searchFiles",
+        "system.glob",
         {
-          query,
+          pattern:
+            customGlobs && customGlobs.length > 0
+              ? customGlobs[0]!
+              : `**/*${query}*`,
           ...(parseInlineFlag(cmdCtx.argv, "path")
             ? { path: parseInlineFlag(cmdCtx.argv, "path") }
-            : {}),
-          ...(hasInlineFlag(cmdCtx.argv, "regex") ? { regex: true } : {}),
-          ...(parseCsvFlag(cmdCtx.argv, "glob")
-            ? { filePatterns: parseCsvFlag(cmdCtx.argv, "glob") }
             : {}),
           ...(parseIntegerFlag(cmdCtx.argv, "max")
             ? { maxResults: parseIntegerFlag(cmdCtx.argv, "max") }

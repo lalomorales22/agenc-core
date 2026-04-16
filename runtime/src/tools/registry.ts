@@ -259,7 +259,6 @@ function inferToolFamily(name: string): string {
   if (
     name === "system.grep" ||
     name === "system.glob" ||
-    name === "system.searchFiles" ||
     name === "system.repoInventory" ||
     name === "system.symbolSearch" ||
     name === "system.symbolDefinition" ||

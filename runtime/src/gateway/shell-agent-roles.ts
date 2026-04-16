@@ -324,7 +324,6 @@ function resolveToolBundleToolNames(params: {
           "system.appendFile",
           "system.editFile",
           "system.applyPatch",
-          "system.searchFiles",
           "system.grep",
           "system.searchTools",
         ]),
@@ -341,7 +340,6 @@ function resolveToolBundleToolNames(params: {
         ...collectNamedTools(availableToolNames, [
           "system.readFile",
           "system.listDir",
-          "system.searchFiles",
           "system.grep",
           "system.symbolSearch",
           "system.symbolDefinition",
@@ -358,7 +356,6 @@ function resolveToolBundleToolNames(params: {
         "system.readFile",
         "system.listDir",
         "system.stat",
-        "system.searchFiles",
         "system.grep",
         "task.list",
         "task.get",
@@ -389,7 +386,6 @@ function resolveToolBundleToolNames(params: {
       [
         "system.readFile",
         "system.listDir",
-        "system.searchFiles",
         "system.grep",
         "system.searchTools",
       ],
@@ -402,7 +398,6 @@ function resolveToolBundleToolNames(params: {
       [
         "system.readFile",
         "system.listDir",
-        "system.searchFiles",
         "system.grep",
         "system.searchTools",
       ],

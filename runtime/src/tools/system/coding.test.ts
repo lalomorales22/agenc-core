@@ -229,7 +229,7 @@ describe("createCodingTools", () => {
     expect(refsResult.references.some((entry) => entry.filePath === "src/app.ts")).toBe(true);
   });
 
-  it("supports grep, searchFiles, and glob outside git repositories", async () => {
+  it("supports grep and glob outside git repositories", async () => {
     const root = await createWorkspaceFixture();
     createdRoots.push(root);
     const tools = createCodingTools({
@@ -238,10 +238,8 @@ describe("createCodingTools", () => {
     });
 
     const grepTool = tools.find(byName("system.grep"));
-    const searchFilesTool = tools.find(byName("system.searchFiles"));
     const globTool = tools.find(byName("system.glob"));
     expect(grepTool).toBeDefined();
-    expect(searchFilesTool).toBeDefined();
     expect(globTool).toBeDefined();
 
     const grepResult = JSON.parse(
@@ -249,18 +247,13 @@ describe("createCodingTools", () => {
     ) as { matches: Array<{ filePath: string; line: number }> };
     expect(grepResult.matches.some((match) => match.filePath === "src/app.ts")).toBe(true);
 
-    const searchResult = JSON.parse(
-      (await searchFilesTool!.execute({ query: "app", path: root })).content,
-    ) as { matches: string[] };
-    expect(searchResult.matches).toContain("src/app.ts");
-
     const globResult = JSON.parse(
       (await globTool!.execute({ pattern: "**/*.ts", path: root })).content,
     ) as { matches: string[] };
     expect(globResult.matches).toContain("src/app.ts");
   });
 
-  it("keeps grep and file search scoped to the requested subpath", async () => {
+  it("keeps grep scoped to the requested subpath", async () => {
     const root = await createRepoFixture();
     createdRoots.push(root);
     await mkdir(join(root, "docs"), { recursive: true });
@@ -271,19 +264,12 @@ describe("createCodingTools", () => {
       persistenceRootDir: root,
     });
     const grepTool = tools.find(byName("system.grep"));
-    const searchFilesTool = tools.find(byName("system.searchFiles"));
     expect(grepTool).toBeDefined();
-    expect(searchFilesTool).toBeDefined();
 
     const grepResult = JSON.parse(
       (await grepTool!.execute({ pattern: "docs", path: join(root, "src") })).content,
     ) as { matches: Array<{ filePath: string }> };
     expect(grepResult.matches).toHaveLength(0);
-
-    const searchResult = JSON.parse(
-      (await searchFilesTool!.execute({ query: "notes", path: join(root, "src") })).content,
-    ) as { matches: string[] };
-    expect(searchResult.matches).toHaveLength(0);
   });
 
   it("supports additive grep output modes and structured regex failures", async () => {
@@ -331,22 +317,4 @@ describe("createCodingTools", () => {
     expect(invalidRegexResult.content).toContain("error");
   });
 
-  it("returns a structured error for invalid searchFiles regex input", async () => {
-    const root = await createWorkspaceFixture();
-    createdRoots.push(root);
-    const tools = createCodingTools({
-      allowedPaths: [root],
-      persistenceRootDir: root,
-    });
-    const searchFilesTool = tools.find(byName("system.searchFiles"));
-    expect(searchFilesTool).toBeDefined();
-
-    const result = await searchFilesTool!.execute({
-      query: "(",
-      path: root,
-      regex: true,
-    });
-    expect(result.isError).toBe(true);
-    expect(result.content).toContain("Invalid regex pattern");
-  });
 });

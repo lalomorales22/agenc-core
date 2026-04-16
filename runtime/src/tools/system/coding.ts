@@ -313,39 +313,6 @@ async function listSearchTargetFiles(params: {
   };
 }
 
-function passesFileFilters(filePath: string, params: {
-  readonly repoRoot: string;
-  readonly globPatterns?: readonly string[];
-  readonly query?: string;
-  readonly regex?: RegExp;
-}): boolean {
-  const relativePath = toRelativeWorkspacePath(params.repoRoot, filePath);
-  if (params.globPatterns && params.globPatterns.length > 0) {
-    const matched = params.globPatterns.some((pattern) =>
-      matchGlob(pattern, relativePath) ||
-      matchGlob(pattern, basename(relativePath))
-    );
-    if (!matched) return false;
-  }
-  if (params.query) {
-    const lower = params.query.toLowerCase();
-    if (
-      !basename(relativePath).toLowerCase().includes(lower) &&
-      !relativePath.toLowerCase().includes(lower)
-    ) {
-      return false;
-    }
-  }
-  if (params.regex && !params.regex.test(relativePath)) {
-    params.regex.lastIndex = 0;
-    return false;
-  }
-  if (params.regex) {
-    params.regex.lastIndex = 0;
-  }
-  return true;
-}
-
 async function readTextFile(path: string): Promise<string | undefined> {
   const fileStat = await stat(path).catch(() => undefined);
   if (!fileStat?.isFile() || fileStat.size > TEXT_FILE_SIZE_LIMIT) {
@@ -915,69 +882,6 @@ export function createCodingTools(config: CodingToolConfig): readonly Tool[] {
           0,
           normalizePositiveInteger(args.maxResults, 100, MAX_RESULTS),
         ),
-      });
-    },
-  };
-
-  const searchFilesTool: Tool = {
-    name: "system.searchFiles",
-    description:
-      "Search path-scoped files by basename or relative path. Prefer this over raw shell find/fd for coding discovery.",
-    metadata: metadata("system.searchFiles"),
-    inputSchema: {
-      type: "object",
-      properties: {
-        query: { type: "string" },
-        regex: { type: "boolean" },
-        path: { type: "string" },
-        glob: {
-          anyOf: [
-            { type: "string" },
-            { type: "array", items: { type: "string" } },
-          ],
-        },
-        filePatterns: { type: "array", items: { type: "string" } },
-        maxResults: { type: "integer", minimum: 1, maximum: MAX_RESULTS },
-      },
-      required: ["query"],
-      additionalProperties: false,
-    },
-    async execute(args) {
-      const query = toOptionalString(args.query);
-      if (!query) return errorResult("query must be a non-empty string");
-      const target = await resolveSearchTarget({ config, args, pathArgKeys: ["path"] });
-      if ("error" in target) return errorResult(target.error);
-      let regex: RegExp | undefined;
-      if (args.regex === true) {
-        try {
-          regex = new RegExp(query, "i");
-        } catch (error) {
-          return errorResult(
-            `Invalid regex pattern: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
-      }
-      const listed = await listSearchTargetFiles({
-        target,
-        globPatterns: resolveSearchGlobPatterns(args),
-      });
-      if ("error" in listed) return errorResult(listed.error);
-      const matched = listed.matches
-        .filter((filePath) =>
-          passesFileFilters(resolvePath(listed.searchRoot, filePath), {
-            repoRoot: listed.searchRoot,
-            query: args.regex === true ? undefined : query,
-            regex,
-          })
-        )
-        .slice(0, normalizePositiveInteger(args.maxResults, 100, MAX_RESULTS));
-      return okResult({
-        repoRoot: listed.searchRoot,
-        searchRoot: listed.searchRoot,
-        searchPath: listed.searchPath,
-        query,
-        regex: args.regex === true,
-        matches: matched,
       });
     },
   };
@@ -1705,7 +1609,6 @@ export function createCodingTools(config: CodingToolConfig): readonly Tool[] {
   return [
     grepTool,
     globTool,
-    searchFilesTool,
     repoInventoryTool,
     gitStatusTool,
     gitDiffTool,

@@ -82,7 +82,6 @@ const LOCAL_INSPECTION_TOOL_NAMES = new Set([
   "desktop.text_editor",
   "system.readFile",
   "system.listDir",
-  "system.searchFiles",
   "system.grep",
   "system.symbolSearch",
   "system.symbolDefinition",

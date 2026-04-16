@@ -139,7 +139,6 @@ export const SAFE_TOOL_RETRY_TOOLS = new Set([
   "system.readFile",
   "system.grep",
   "system.glob",
-  "system.searchFiles",
   "system.repoInventory",
   "system.gitStatus",
   "system.gitDiff",

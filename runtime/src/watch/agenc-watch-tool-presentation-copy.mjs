@@ -64,7 +64,7 @@ export function createWatchToolPresentationCopyBuilder(dependencies = {}) {
     if (/path does not exist|file not found|enoent/i.test(text)) {
       return "File not found";
     }
-    if (toolName === "system.grep" || toolName === "system.searchFiles") {
+    if (toolName === "system.grep") {
       return `Search failed: ${truncate(text, 180)}`;
     }
     if (toolName === "system.readFile" || toolName === "system.readFileRange") {
