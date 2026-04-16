@@ -152,33 +152,44 @@ export interface ToolCallRecord {
   readonly failureBudgetExempt?: boolean;
 }
 
-type ChatExecutionTraceEventType =
-  | "continuation_evaluated"
-  | "continuation_started"
-  | "continuation_stopped"
-  | "completion_validator_finished"
-  | "completion_validator_started"
-  | "completion_validation_finished"
-  | "completion_validation_started"
-  | "compaction_triggered"
-  | "context_injected"
-  | "model_call_prepared"
-  | "recovery_hints_injected"
-  | "route_expanded"
-  | "runtime_contract_snapshot"
-  | "stop_hook_blocked"
-  | "stop_hook_execution_finished"
-  | "stop_hook_exhausted"
-  | "stop_hook_retry_requested"
-  | "stop_gate_intervention"
-  | "tool_arguments_invalid"
-  | "tool_dispatch_finished"
-  | "tool_dispatch_started"
-  | "tool_protocol_opened"
-  | "tool_protocol_repaired"
-  | "tool_protocol_result_recorded"
-  | "tool_protocol_violation"
-  | "tool_rejected";
+/**
+ * Complete inventory of runtime-emitted chat execution trace event
+ * types. Exposed as a readonly tuple so field-inventory snapshot tests
+ * can assert the exact set without reflecting on a compile-time-only
+ * union. Any event type added to or removed from this list changes
+ * the public trace contract; update consumers and tests deliberately.
+ */
+export const CHAT_EXECUTION_TRACE_EVENT_TYPES = [
+  "continuation_evaluated",
+  "continuation_started",
+  "continuation_stopped",
+  "completion_validator_finished",
+  "completion_validator_started",
+  "completion_validation_finished",
+  "completion_validation_started",
+  "compaction_triggered",
+  "context_injected",
+  "model_call_prepared",
+  "recovery_hints_injected",
+  "route_expanded",
+  "runtime_contract_snapshot",
+  "stop_hook_blocked",
+  "stop_hook_execution_finished",
+  "stop_hook_exhausted",
+  "stop_hook_retry_requested",
+  "stop_gate_intervention",
+  "tool_arguments_invalid",
+  "tool_dispatch_finished",
+  "tool_dispatch_started",
+  "tool_protocol_opened",
+  "tool_protocol_repaired",
+  "tool_protocol_result_recorded",
+  "tool_protocol_violation",
+  "tool_rejected",
+] as const;
+
+export type ChatExecutionTraceEventType =
+  (typeof CHAT_EXECUTION_TRACE_EVENT_TYPES)[number];
 
 export interface ChatExecutionTraceEvent {
   readonly type: ChatExecutionTraceEventType;
