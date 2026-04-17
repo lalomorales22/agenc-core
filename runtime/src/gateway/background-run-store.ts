@@ -390,6 +390,8 @@ export interface PersistedBackgroundRun {
    */
   readonly mutatingEditsSinceLastVerifierSpawn?: number;
   readonly assistantTurnsSinceLastVerifyReminder?: number;
+  readonly cyclesSinceTaskTool: number;
+  readonly consecutiveNudgeCycles: number;
   readonly anchorFiles: readonly PersistedAnchorFileSnapshot[];
   readonly nextCheckAt?: number;
   readonly nextHeartbeatAt?: number;
@@ -2334,6 +2336,12 @@ function coerceRun(value: unknown): PersistedBackgroundRun | undefined {
   const cycleCount = raw.cycleCount as number;
   const stableWorkingCycles = raw.stableWorkingCycles as number;
   const consecutiveErrorCycles = raw.consecutiveErrorCycles as number;
+  const cyclesSinceTaskTool =
+    typeof raw.cyclesSinceTaskTool === "number" ? raw.cyclesSinceTaskTool : 0;
+  const consecutiveNudgeCycles =
+    typeof raw.consecutiveNudgeCycles === "number"
+      ? raw.consecutiveNudgeCycles
+      : 0;
   const anchorFiles = coerceAnchorFiles(raw.anchorFiles);
   const lineage = coerceRunLineage(raw.lineage);
   const durableState = coerceRunDurableState({
@@ -2359,6 +2367,8 @@ function coerceRun(value: unknown): PersistedBackgroundRun | undefined {
     cycleCount,
     stableWorkingCycles,
     consecutiveErrorCycles,
+    cyclesSinceTaskTool,
+    consecutiveNudgeCycles,
     anchorFiles,
     nextCheckAt:
       typeof raw.nextCheckAt === "number" ? raw.nextCheckAt : undefined,

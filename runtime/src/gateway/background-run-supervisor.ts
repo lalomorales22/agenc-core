@@ -1983,6 +1983,8 @@ export class BackgroundRunSupervisor {
       // Infinity so the first verify_reminder is eligible to fire as
       // soon as the edit threshold is reached on a fresh run.
       assistantTurnsSinceLastVerifyReminder: Number.POSITIVE_INFINITY,
+      cyclesSinceTaskTool: 0,
+      consecutiveNudgeCycles: 0,
       anchorFiles: initialAnchorFiles,
       lastVerifiedAt: undefined,
       lastUserUpdate: undefined,

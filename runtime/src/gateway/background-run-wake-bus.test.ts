@@ -31,6 +31,8 @@ function makeRun(
     cycleCount: 1,
     stableWorkingCycles: 0,
     consecutiveErrorCycles: 0,
+    cyclesSinceTaskTool: 0,
+    consecutiveNudgeCycles: 0,
     anchorFiles: [],
     nextCheckAt: 5_000,
     nextHeartbeatAt: 3_000,
