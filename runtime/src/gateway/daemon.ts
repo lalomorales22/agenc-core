@@ -5533,6 +5533,9 @@ export class DaemonManager {
     }
     const session = this._webSessionManager?.get(sessionId);
     const stateful = session ? buildSessionStatefulOptions(session) : undefined;
+
+    const totalTokens = executor.getSessionTokenUsage(sessionId);
+
     const usageSnapshot = buildCurrentContextUsageSnapshot({
       messages: buildCurrentApiView({
         baseSystemPrompt: this._systemPrompt,
@@ -5544,7 +5547,7 @@ export class DaemonManager {
     });
     const payload = buildChatUsagePayload({
       sessionId,
-      totalTokens: executor.getSessionTokenUsage(sessionId),
+      totalTokens,
       sessionTokenBudget: resolveSessionTokenBudget(
         effectiveLlmConfig,
         contextWindowTokens,
@@ -5554,17 +5557,37 @@ export class DaemonManager {
       model: effectiveLlmConfig?.model,
       contextWindowTokens,
     });
+    // The web session's history only has the initial prompt (~2.6K
+    // tokens). During a background run, the real context grows with
+    // every model call but session.history doesn't reflect that.
+    // Use the higher of the snapshot estimate and the executor's
+    // tracked total so the TUI's "current" number moves.
+    const effectivePromptTokens = Math.max(
+      usageSnapshot.currentTokens,
+      totalTokens,
+    );
+    const effectivePercentUsed =
+      usageSnapshot.effectiveContextWindowTokens
+        ? effectivePromptTokens / usageSnapshot.effectiveContextWindowTokens
+        : usageSnapshot.percentUsed;
+    const effectiveFreeTokens =
+      usageSnapshot.effectiveContextWindowTokens
+        ? Math.max(
+            0,
+            usageSnapshot.effectiveContextWindowTokens - effectivePromptTokens,
+          )
+        : usageSnapshot.freeTokens;
     return {
       ...payload,
-      promptTokens: usageSnapshot.currentTokens,
+      promptTokens: effectivePromptTokens,
       ...(usageSnapshot.effectiveContextWindowTokens
         ? {
             effectiveContextWindowTokens:
               usageSnapshot.effectiveContextWindowTokens,
             autocompactThresholdTokens:
               usageSnapshot.autocompactThresholdTokens,
-            contextPercentUsed: usageSnapshot.percentUsed,
-            freeTokens: usageSnapshot.freeTokens,
+            contextPercentUsed: effectivePercentUsed,
+            freeTokens: effectiveFreeTokens,
           }
         : {}),
       sections: usageSnapshot.sections,
