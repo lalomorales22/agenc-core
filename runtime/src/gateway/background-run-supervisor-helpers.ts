@@ -71,6 +71,7 @@ import {
   UNTIL_STOP_RE,
   CONTINUOUS_RE,
   BACKGROUND_RE,
+  EXHAUSTIVE_INTENT_RE,
 } from "./background-run-supervisor-constants.js";
 
 // ---------------------------------------------------------------------------
@@ -1465,6 +1466,55 @@ export function applyRepeatedErrorGuard(
   };
 }
 
+export function applyZeroToolCompletionGuard(
+  run: ActiveBackgroundRun,
+  actorResult: ChatExecutorResult,
+  decision: BackgroundRunDecision,
+): BackgroundRunDecision {
+  if (decision.state !== "completed") return decision;
+  const successfulToolCalls = actorResult.toolCalls.filter(
+    (toolCall) => !toolCall.isError,
+  );
+  if (successfulToolCalls.length > 0) return decision;
+  if (!run.lastToolEvidence) return decision;
+  // Explicit completion-progress signal: trust the actor only when it
+  // emits a workflow-tracker result stating completion with no
+  // remaining requirements. Without that, a text-only cycle after
+  // earlier tool work is treated as narration, not completion.
+  const progress = actorResult.completionProgress;
+  if (
+    progress &&
+    progress.completionState === "completed" &&
+    progress.remainingRequirements.length === 0
+  ) {
+    return decision;
+  }
+  return {
+    state: "working",
+    userUpdate: truncate(
+      actorResult.content ||
+        "Background run had no tool calls this cycle; verifying completion.",
+      MAX_USER_UPDATE_CHARS,
+    ),
+    internalSummary:
+      "Downgraded premature completion: cycle produced no tool calls and no explicit completion-progress signal. " +
+      "Actor must run verification tools or emit completion progress.",
+    nextCheckMs: MIN_POLL_INTERVAL_MS,
+    shouldNotifyUser: true,
+  };
+}
+
+function resolveRequiresUserStop(
+  objective: string | undefined,
+  plannedValue: boolean | undefined,
+  kind: BackgroundRunContract["kind"],
+): boolean {
+  const base =
+    typeof plannedValue === "boolean" ? plannedValue : kind === "until_stopped";
+  if (base) return true;
+  return typeof objective === "string" && EXHAUSTIVE_INTENT_RE.test(objective);
+}
+
 // ---------------------------------------------------------------------------
 // Prompt builders
 // ---------------------------------------------------------------------------
@@ -1680,10 +1730,13 @@ export function parseContract(
       parsed.blockedCriteria,
       "Block when required tools, permissions, or external preconditions are missing.",
     );
-    const requiresUserStop =
+    const requiresUserStop = resolveRequiresUserStop(
+      objective,
       typeof parsed.requiresUserStop === "boolean"
         ? parsed.requiresUserStop
-        : kind === "until_stopped";
+        : undefined,
+      kind,
+    );
     const normalizedManagedProcessPolicy =
       managedProcessPolicy !== undefined
         ? {
@@ -1728,12 +1781,18 @@ export function parseContract(
 export function buildFallbackContract(objective: string): BackgroundRunContract {
   const untilStopped = UNTIL_STOP_RE.test(objective);
   const continuous = CONTINUOUS_RE.test(objective) || BACKGROUND_RE.test(objective);
+  const kind: BackgroundRunContract["kind"] = untilStopped
+    ? "until_stopped"
+    : continuous
+      ? "until_condition"
+      : "finite";
+  const requiresUserStop = resolveRequiresUserStop(objective, undefined, kind);
   const managedProcessPolicyMode = inferManagedProcessPolicyMode(objective);
   const successCriteria = [
     "Use tools to make measurable progress and verify the result.",
   ];
   const completionCriteria = [
-    untilStopped
+    requiresUserStop
       ? "Do not complete until the user explicitly stops the run."
       : "Only complete once tool evidence shows the objective is satisfied.",
   ];
@@ -1760,20 +1819,16 @@ export function buildFallbackContract(objective: string): BackgroundRunContract 
       successCriteria,
       completionCriteria,
       blockedCriteria,
-      requiresUserStop: untilStopped,
+      requiresUserStop,
       managedProcessPolicy,
     }),
-    kind: untilStopped
-      ? "until_stopped"
-      : continuous
-        ? "until_condition"
-        : "finite",
+    kind,
     successCriteria,
     completionCriteria,
     blockedCriteria,
     nextCheckMs: DEFAULT_POLL_INTERVAL_MS,
     heartbeatMs: continuous ? HEARTBEAT_MIN_DELAY_MS : undefined,
-    requiresUserStop: untilStopped,
+    requiresUserStop,
     managedProcessPolicy,
   };
 }

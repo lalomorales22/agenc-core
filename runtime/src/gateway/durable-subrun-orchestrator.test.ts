@@ -175,6 +175,7 @@ function makeParentRun(
     cycleCount: 1,
     stableWorkingCycles: 0,
     consecutiveErrorCycles: 0,
+    anchorFiles: [],
     nextCheckAt: 10,
     nextHeartbeatAt: 12,
     lastVerifiedAt: 1,

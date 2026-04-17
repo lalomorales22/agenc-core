@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
 
 import type { LLMMessage } from "../llm/types.js";
 import {
@@ -15,6 +16,17 @@ import type { SessionReadSeedEntry } from "../tools/system/filesystem.js";
 
 const AT_MENTION_MAX_SIZE_BYTES = 256 * 1024;
 
+export interface AnchorFileRegistration {
+  readonly path: string;
+  readonly mtimeMs: number;
+  readonly sizeBytes: number;
+  readonly sha256: string;
+  readonly content: string;
+  readonly source: "user_mention";
+  readonly lineStart?: number;
+  readonly lineEnd?: number;
+}
+
 interface AtMentionedFileLines {
   filename: string;
   lineStart?: number;
@@ -25,6 +37,7 @@ export interface ResolvedAtMentionAttachments {
   readonly historyPrelude: readonly LLMMessage[];
   readonly sourceArtifacts: readonly string[];
   readonly readSeeds: readonly SessionReadSeedEntry[];
+  readonly anchorRegistrations: readonly AnchorFileRegistration[];
   readonly executionEnvelope?: ExecutionEnvelope;
 }
 
@@ -106,6 +119,7 @@ export async function resolveAtMentionAttachments(params: {
       historyPrelude: [],
       sourceArtifacts: [],
       readSeeds: [],
+      anchorRegistrations: [],
     };
   }
 
@@ -115,12 +129,14 @@ export async function resolveAtMentionAttachments(params: {
       historyPrelude: [],
       sourceArtifacts: [],
       readSeeds: [],
+      anchorRegistrations: [],
     };
   }
 
   const historyPrelude: LLMMessage[] = [];
   const sourceArtifacts: string[] = [];
   const readSeeds: SessionReadSeedEntry[] = [];
+  const anchorRegistrations: AnchorFileRegistration[] = [];
   const seenArtifactKeys = new Set<string>();
 
   for (let index = 0; index < mentions.length; index += 1) {
@@ -184,11 +200,22 @@ export async function resolveAtMentionAttachments(params: {
           },
         }),
       );
+      const selectedText = selected.join("\n");
       readSeeds.push({
         path: canonicalPath,
-        content: selected.join("\n"),
+        content: selectedText,
         timestamp: fileStats.mtimeMs,
         viewKind: "partial",
+      });
+      anchorRegistrations.push({
+        path: canonicalPath,
+        mtimeMs: fileStats.mtimeMs,
+        sizeBytes: Buffer.byteLength(selectedText, "utf8"),
+        sha256: createHash("sha256").update(selectedText).digest("hex"),
+        content: selectedText,
+        source: "user_mention",
+        lineStart: startLine,
+        lineEnd: endLine,
       });
     } else {
       historyPrelude.push(
@@ -212,6 +239,14 @@ export async function resolveAtMentionAttachments(params: {
         timestamp: fileStats.mtimeMs,
         viewKind: "full",
       });
+      anchorRegistrations.push({
+        path: canonicalPath,
+        mtimeMs: fileStats.mtimeMs,
+        sizeBytes: fileStats.size,
+        sha256: createHash("sha256").update(text).digest("hex"),
+        content: text,
+        source: "user_mention",
+      });
     }
 
     if (!sourceArtifacts.includes(canonicalPath)) {
@@ -223,6 +258,7 @@ export async function resolveAtMentionAttachments(params: {
     historyPrelude,
     sourceArtifacts,
     readSeeds,
+    anchorRegistrations,
     executionEnvelope: createExecutionEnvelope({
       workspaceRoot,
       allowedReadRoots: [workspaceRoot],

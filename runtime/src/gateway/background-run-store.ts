@@ -356,6 +356,20 @@ export interface BackgroundRunRecentSnapshot {
   readonly verifierStage?: RuntimeVerifierStage;
 }
 
+export interface PersistedAnchorFileSnapshot {
+  readonly path: string;
+  readonly mtimeMs: number;
+  readonly sizeBytes: number;
+  readonly sha256: string;
+  readonly source: "user_mention";
+  readonly lineStart?: number;
+  readonly lineEnd?: number;
+  readonly content: string;
+  readonly truncated: boolean;
+  readonly diskPath?: string;
+  readonly snapshotTakenAt: number;
+}
+
 export interface PersistedBackgroundRun {
   readonly version: typeof AGENT_RUN_SCHEMA_VERSION;
   readonly id: string;
@@ -370,6 +384,7 @@ export interface PersistedBackgroundRun {
   readonly cycleCount: number;
   readonly stableWorkingCycles: number;
   readonly consecutiveErrorCycles: number;
+  readonly anchorFiles: readonly PersistedAnchorFileSnapshot[];
   readonly nextCheckAt?: number;
   readonly nextHeartbeatAt?: number;
   readonly lastVerifiedAt?: number;
@@ -2151,6 +2166,52 @@ function coerceRunDurableState(params: {
   };
 }
 
+function coerceAnchorFiles(value: unknown): PersistedAnchorFileSnapshot[] {
+  if (!Array.isArray(value)) return [];
+  const result: PersistedAnchorFileSnapshot[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") continue;
+    const raw = entry as Record<string, unknown>;
+    const path = typeof raw.path === "string" ? raw.path : undefined;
+    const mtimeMs = typeof raw.mtimeMs === "number" ? raw.mtimeMs : undefined;
+    const sizeBytes = typeof raw.sizeBytes === "number" ? raw.sizeBytes : undefined;
+    const sha256 = typeof raw.sha256 === "string" ? raw.sha256 : undefined;
+    const content = typeof raw.content === "string" ? raw.content : undefined;
+    const snapshotTakenAt =
+      typeof raw.snapshotTakenAt === "number" ? raw.snapshotTakenAt : undefined;
+    if (
+      path === undefined ||
+      mtimeMs === undefined ||
+      sizeBytes === undefined ||
+      sha256 === undefined ||
+      content === undefined ||
+      snapshotTakenAt === undefined
+    ) {
+      continue;
+    }
+    const source = raw.source === "user_mention" ? "user_mention" : "user_mention";
+    const truncated = raw.truncated === true;
+    const lineStart =
+      typeof raw.lineStart === "number" ? raw.lineStart : undefined;
+    const lineEnd = typeof raw.lineEnd === "number" ? raw.lineEnd : undefined;
+    const diskPath = typeof raw.diskPath === "string" ? raw.diskPath : undefined;
+    result.push({
+      path,
+      mtimeMs,
+      sizeBytes,
+      sha256,
+      source,
+      content,
+      truncated,
+      snapshotTakenAt,
+      ...(lineStart !== undefined ? { lineStart } : {}),
+      ...(lineEnd !== undefined ? { lineEnd } : {}),
+      ...(diskPath !== undefined ? { diskPath } : {}),
+    });
+  }
+  return result;
+}
+
 function coerceRunLineage(value: unknown): BackgroundRunLineage | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return undefined;
@@ -2268,6 +2329,7 @@ function coerceRun(value: unknown): PersistedBackgroundRun | undefined {
   const cycleCount = raw.cycleCount as number;
   const stableWorkingCycles = raw.stableWorkingCycles as number;
   const consecutiveErrorCycles = raw.consecutiveErrorCycles as number;
+  const anchorFiles = coerceAnchorFiles(raw.anchorFiles);
   const lineage = coerceRunLineage(raw.lineage);
   const durableState = coerceRunDurableState({
     raw,
@@ -2292,6 +2354,7 @@ function coerceRun(value: unknown): PersistedBackgroundRun | undefined {
     cycleCount,
     stableWorkingCycles,
     consecutiveErrorCycles,
+    anchorFiles,
     nextCheckAt:
       typeof raw.nextCheckAt === "number" ? raw.nextCheckAt : undefined,
     nextHeartbeatAt:

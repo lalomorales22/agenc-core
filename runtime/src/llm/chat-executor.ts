@@ -392,6 +392,7 @@ export class ChatExecutor {
       allowedTools: this.allowedTools,
       defaultRunClass: this.defaultRunClass,
       sessionTokens: this.sessionTokens,
+      lastCallInputTokens: this.lastCallInputTokens,
       sessionTokenBudget: this.sessionTokenBudget,
       sessionCompactionThreshold: this.sessionCompactionThreshold,
       maxTrackedSessions: this.maxTrackedSessions,
