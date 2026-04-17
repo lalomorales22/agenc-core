@@ -43,6 +43,8 @@ export function createWatchFrameController(dependencies = {}) {
     currentPhaseLabel,
     currentSurfaceToolLabel,
     hasActiveSurfaceRun,
+    isTerminalRunPhase,
+    currentTerminalRunPhase,
     bootstrapPending,
     shouldShowWatchSplash,
     buildWatchLayout,
@@ -639,7 +641,12 @@ export function createWatchFrameController(dependencies = {}) {
       `${color.fog}▸ phase${color.reset} ${color.ink}${truncate(sanitizeInlineText(overview.phaseLabel, "idle"), 22)}${color.reset}`,
     ];
     const latestTool = sanitizeInlineText(overview.latestTool, "");
-    if (latestTool && latestTool !== "idle") {
+    const terminalPhase = currentTerminalRunPhase();
+    if (terminalPhase) {
+      parts.push(
+        `${color.fog}▸ tool${color.reset} ${color.softInk}—${color.reset}`,
+      );
+    } else if (latestTool && latestTool !== "idle") {
       parts.push(
         `${color.fog}▸ tool${color.reset} ${color.softInk}${truncate(latestTool, 26)}${color.reset}`,
       );
@@ -3751,6 +3758,25 @@ export function createWatchFrameController(dependencies = {}) {
     }
 
     if (activeRun) {
+      const terminalPhase = currentTerminalRunPhase();
+      if (terminalPhase) {
+        const terminalText =
+          terminalPhase === "background_blocked"
+            ? "idle · type to resume"
+            : terminalPhase === "background_completed"
+              ? "done · type to start a new run"
+              : "failed · see logs for details";
+        const rightStatusText = `${color.fog}${truncate(rightText, Math.max(18, Math.floor(width * 0.32)))}${color.reset}`;
+        return [
+          "",
+          flexBetween(
+            `${color.fog}${terminalText}${color.reset}`,
+            rightStatusText,
+            width,
+          ),
+          "",
+        ];
+      }
       const footerBrand = currentThinkingFooterBrand(summary);
       const rightStatusText = `${color.fog}${truncate(rightText, Math.max(18, Math.floor(width * 0.32)))}${color.reset}`;
       // 1-char rotating braille spinner + verb on a single row. Wrapped

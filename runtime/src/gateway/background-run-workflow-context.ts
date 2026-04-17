@@ -8,7 +8,10 @@ import type { ImplementationCompletionContract } from "../workflow/completion-co
 import { normalizeWorkspaceRoot } from "../workflow/path-normalization.js";
 import type { WorkflowRequestMilestone } from "../workflow/request-completion.js";
 import type { WorkflowVerificationContract } from "../workflow/verification-obligations.js";
-import { resolveAtMentionAttachments } from "./at-mention-attachments.js";
+import {
+  resolveAtMentionAttachments,
+  type AnchorFileRegistration,
+} from "./at-mention-attachments.js";
 
 const FULL_IMPLEMENTATION_RE =
   /\b(?:implement|complete|finish|build)\b[\s\S]{0,160}\b(?:in full|fully|entirely|the full plan|all phases|every phase)\b/i;
@@ -34,6 +37,7 @@ export interface BackgroundRunWorkflowContext {
   readonly historyPrelude: readonly LLMMessage[];
   readonly runtimeContext?: ChatExecuteParams["runtimeContext"];
   readonly requiredToolEvidence?: ChatExecuteParams["requiredToolEvidence"];
+  readonly anchorRegistrations: readonly AnchorFileRegistration[];
 }
 
 export function shouldPromoteImplementationBackgroundRun(
@@ -65,6 +69,7 @@ export async function buildBackgroundRunWorkflowContext(params: {
       })
     : {
         historyPrelude: [] as const,
+        anchorRegistrations: [] as const,
         executionEnvelope: undefined,
       };
   const requestMilestones = workspaceRoot
@@ -87,6 +92,7 @@ export async function buildBackgroundRunWorkflowContext(params: {
 
   return {
     historyPrelude: atMentionAttachments.historyPrelude,
+    anchorRegistrations: atMentionAttachments.anchorRegistrations ?? [],
     runtimeContext: workspaceRoot ? { workspaceRoot } : undefined,
     requiredToolEvidence:
       verificationContract || completionContract || atMentionAttachments.executionEnvelope

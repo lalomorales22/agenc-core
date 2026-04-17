@@ -5568,10 +5568,19 @@ export class DaemonManager {
     });
     const effectivePromptTokens = lastCallTokens > 0
       ? lastCallTokens
-      : Math.max(usageSnapshot.currentTokens, totalTokens);
+      : usageSnapshot.currentTokens;
     const effectivePercentUsed =
-      usageSnapshot.effectiveContextWindowTokens
-        ? effectivePromptTokens / usageSnapshot.effectiveContextWindowTokens
+      usageSnapshot.effectiveContextWindowTokens &&
+      usageSnapshot.effectiveContextWindowTokens > 0
+        ? Math.max(
+            0,
+            Math.min(
+              100,
+              (effectivePromptTokens /
+                usageSnapshot.effectiveContextWindowTokens) *
+                100,
+            ),
+          )
         : usageSnapshot.percentUsed;
     const effectiveFreeTokens =
       usageSnapshot.effectiveContextWindowTokens

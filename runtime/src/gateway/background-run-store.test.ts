@@ -43,6 +43,7 @@ function makeRun(
     cycleCount: 1,
     stableWorkingCycles: 0,
     consecutiveErrorCycles: 0,
+    anchorFiles: [],
     nextCheckAt: 5_000,
     nextHeartbeatAt: 3_000,
     lastVerifiedAt: 1,

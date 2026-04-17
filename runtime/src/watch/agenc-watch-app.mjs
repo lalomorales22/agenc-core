@@ -1018,6 +1018,8 @@ const {
   effectiveModelRoute,
   effectiveSurfacePhaseLabel,
   hasActiveSurfaceRun,
+  isTerminalRunPhase,
+  currentTerminalRunPhase,
   modelRouteTone,
   normalizeModelRoute,
 } = surfaceState;
@@ -2548,6 +2550,8 @@ watchFrameController = createWatchFrameController({
   currentPhaseLabel,
   currentSurfaceToolLabel,
   hasActiveSurfaceRun,
+  isTerminalRunPhase,
+  currentTerminalRunPhase,
   bootstrapPending,
   shouldShowWatchSplash,
   buildWatchLayout,

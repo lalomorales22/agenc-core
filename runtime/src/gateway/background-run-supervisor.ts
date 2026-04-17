@@ -119,6 +119,12 @@ import {
   STATUS_REQUEST_RE,
   HISTORY_COMPACTION_THRESHOLD,
 } from "./background-run-supervisor-constants.js";
+import {
+  formatAnchorFilesSection,
+  mergeAnchorRegistrations,
+  refreshAnchorFiles,
+} from "./background-run-anchor-files.js";
+import { resolveAtMentionAttachments } from "./at-mention-attachments.js";
 
 // --- Re-export from extracted types ---
 export type {
@@ -193,6 +199,7 @@ import {
   groundDecision,
   computeConsecutiveErrorCycles,
   applyRepeatedErrorGuard,
+  applyZeroToolCompletionGuard,
   buildDecisionPrompt,
   buildContractPrompt,
   buildCarryForwardPrompt,
@@ -255,6 +262,8 @@ function buildActorPrompt(run: ActiveBackgroundRun): string {
   const recentToolEvidence = run.lastToolEvidence
     ? `Latest tool evidence:\n${run.lastToolEvidence}\n`
     : "";
+  const anchorFilesText = formatAnchorFilesSection(run.anchorFiles);
+  const anchorFilesSection = anchorFilesText ? `${anchorFilesText}\n` : "";
   const carryForward = formatCarryForwardState(run.carryForward);
   const carryForwardSection = carryForward
     ? `Carry-forward state:\n${carryForward}\n`
@@ -293,6 +302,7 @@ function buildActorPrompt(run: ActiveBackgroundRun): string {
     completionProgressText +
     signalSection +
     observedTargetSection +
+    anchorFilesSection +
     recentHistory +
     recentToolEvidence +
     firstCycleGuidance +
@@ -1835,6 +1845,24 @@ export class BackgroundRunSupervisor {
         params.objective,
         params.sessionId,
       );
+    const initialShellProfile =
+      params.options?.shellProfile ??
+      params.options?.lineage?.shellProfile ??
+      DEFAULT_SESSION_SHELL_PROFILE;
+    const initialExecutionContext = await this.resolveExecutionContext?.({
+      sessionId: params.sessionId,
+      objective: params.objective,
+      shellProfile: initialShellProfile,
+      history: [],
+    });
+    const initialAnchorFiles = initialExecutionContext?.anchorRegistrations?.length
+      ? await mergeAnchorRegistrations({
+          sessionId: params.sessionId,
+          existing: [],
+          registrations: initialExecutionContext.anchorRegistrations,
+          now,
+        })
+      : [];
     const run: ActiveBackgroundRun = {
       version: AGENT_RUN_SCHEMA_VERSION,
       id: `bg-${now.toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
@@ -1853,6 +1881,7 @@ export class BackgroundRunSupervisor {
       cycleCount: 0,
       stableWorkingCycles: 0,
       consecutiveErrorCycles: 0,
+      anchorFiles: initialAnchorFiles,
       lastVerifiedAt: undefined,
       lastUserUpdate: undefined,
       lastToolEvidence: undefined,
@@ -1979,6 +2008,33 @@ export class BackgroundRunSupervisor {
 
     const type = params.type ?? "user_input";
     const now = this.now();
+
+    // Merge any new `@mention` anchors from the inbound signal so the
+    // next cycle's actor has the referenced files pinned without
+    // depending on rolling-history survival. Failures here must not
+    // block signal delivery — anchor freshness is a best-effort
+    // augmentation on top of the wake path.
+    try {
+      const workspaceRoot = resolveRunWorkspaceRoot(run);
+      if (workspaceRoot) {
+        const resolution = await resolveAtMentionAttachments({
+          content,
+          workspaceRoot,
+        });
+        if (resolution.anchorRegistrations.length > 0) {
+          const mergedAnchors = await mergeAnchorRegistrations({
+            sessionId: params.sessionId,
+            existing: run.anchorFiles,
+            registrations: resolution.anchorRegistrations,
+            now,
+          });
+          run.anchorFiles = mergedAnchors;
+        }
+      }
+    } catch {
+      // Do not fail signal delivery when anchor refresh hits a fs or
+      // resolution error. The existing wake path still proceeds.
+    }
     await this.wakeBus.enqueue({
       sessionId: params.sessionId,
       runId: run.id,
@@ -3937,6 +3993,7 @@ export class BackgroundRunSupervisor {
       run.consecutiveErrorCycles = consecutiveErrorCycles;
       decision = groundDecision(run, actorResult, decision);
       decision = applyRepeatedErrorGuard(decision, consecutiveErrorCycles);
+      decision = applyZeroToolCompletionGuard(run, actorResult, decision);
       run.pendingSignals = dropSyntheticInternalSignals(run.pendingSignals);
       recordRunActivity(
         run,
@@ -4031,6 +4088,13 @@ export class BackgroundRunSupervisor {
     if (run.state === "paused") return;
     const cycleToolHandler = await this.prepareCycleRun(run, sessionId);
     if (!cycleToolHandler) return;
+    if (run.anchorFiles.length > 0) {
+      run.anchorFiles = await refreshAnchorFiles({
+        sessionId,
+        anchors: run.anchorFiles,
+        now: this.now(),
+      });
+    }
     return {
       run,
       sessionId,
@@ -4822,8 +4886,14 @@ export class BackgroundRunSupervisor {
     const latencyMs = Math.max(0, run.updatedAt - run.createdAt);
     const durationSec = Math.max(1, Math.round(latencyMs / 1000));
     const completionDetail = decision.userUpdate || run.lastUserUpdate || "";
+    const terminalPhase =
+      decision.state === "completed"
+        ? "background_completed"
+        : decision.state === "failed"
+          ? "background_failed"
+          : "idle";
     this.onStatus?.(run.sessionId, {
-      phase: "idle",
+      phase: terminalPhase,
       detail: completionDetail.length > 0
         ? `Background run ${decision.state} (${run.cycleCount} cycles, ${durationSec}s). ${completionDetail}`
         : `Background run ${decision.state} (${run.cycleCount} cycles, ${durationSec}s)`,

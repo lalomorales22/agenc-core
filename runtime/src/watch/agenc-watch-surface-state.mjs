@@ -177,6 +177,19 @@ export function createWatchSurfaceStateController(dependencies = {}) {
     return effectiveSurfacePhaseLabel() !== "idle";
   }
 
+  function isTerminalRunPhase(phase) {
+    return (
+      phase === "background_blocked" ||
+      phase === "background_completed" ||
+      phase === "background_failed"
+    );
+  }
+
+  function currentTerminalRunPhase() {
+    const phase = watchState.runPhase;
+    return isTerminalRunPhase(phase) ? phase : null;
+  }
+
   function currentDisplayObjective(fallback = "No active objective") {
     const liveStep = currentPlanFocusStep();
     const candidate = sanitizeInlineText(
@@ -303,6 +316,8 @@ export function createWatchSurfaceStateController(dependencies = {}) {
     effectiveModelRoute,
     effectiveSurfacePhaseLabel,
     hasActiveSurfaceRun,
+    isTerminalRunPhase,
+    currentTerminalRunPhase,
     modelRouteTone,
     normalizeModelRoute,
   };

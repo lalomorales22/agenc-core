@@ -116,6 +116,30 @@ export interface BackgroundRunDecision {
   readonly shouldNotifyUser: boolean;
 }
 
+/**
+ * Snapshot of a user-referenced file that the run keeps pinned across
+ * cycles, independent of rolling-history compaction.
+ *
+ * Populated from `@mention` resolution (`source: "user_mention"`) and
+ * refreshed by the supervisor between cycles when the file's mtime
+ * changes. Oversized files are stored as a truncated preview plus a
+ * side-car at `~/.agenc/anchors/<sessionId>/<sha>.txt` that the actor
+ * can re-read via `system.readFile`.
+ */
+export interface AnchorFileSnapshot {
+  readonly path: string;
+  readonly mtimeMs: number;
+  readonly sizeBytes: number;
+  readonly sha256: string;
+  readonly source: "user_mention";
+  readonly lineStart?: number;
+  readonly lineEnd?: number;
+  readonly content: string;
+  readonly truncated: boolean;
+  readonly diskPath?: string;
+  readonly snapshotTakenAt: number;
+}
+
 export interface ActiveBackgroundRun {
   version: typeof AGENT_RUN_SCHEMA_VERSION;
   id: string;
@@ -131,6 +155,7 @@ export interface ActiveBackgroundRun {
   cycleCount: number;
   stableWorkingCycles: number;
   consecutiveErrorCycles: number;
+  anchorFiles: AnchorFileSnapshot[];
   nextCheckAt?: number;
   nextHeartbeatAt?: number;
   lastVerifiedAt?: number;
@@ -187,6 +212,7 @@ export interface BackgroundRunSupervisorConfig {
   }) => Promise<{
     readonly runtimeContext?: ChatExecuteParams["runtimeContext"];
     readonly requiredToolEvidence?: ChatExecuteParams["requiredToolEvidence"];
+    readonly anchorRegistrations?: readonly import("./at-mention-attachments.js").AnchorFileRegistration[];
   } | undefined>;
   readonly buildToolRoutingDecision?: (
     sessionId: string,
@@ -323,6 +349,7 @@ export function toPersistedRun(run: ActiveBackgroundRun): PersistedBackgroundRun
     cycleCount: run.cycleCount,
     stableWorkingCycles: run.stableWorkingCycles,
     consecutiveErrorCycles: run.consecutiveErrorCycles,
+    anchorFiles: [...run.anchorFiles],
     nextCheckAt: run.nextCheckAt,
     nextHeartbeatAt: run.nextHeartbeatAt,
     lastVerifiedAt: run.lastVerifiedAt,
@@ -406,6 +433,7 @@ export function toActiveRun(run: PersistedBackgroundRun): ActiveBackgroundRun {
     cycleCount: run.cycleCount,
     stableWorkingCycles: run.stableWorkingCycles,
     consecutiveErrorCycles: run.consecutiveErrorCycles,
+    anchorFiles: [...run.anchorFiles],
     nextCheckAt: run.nextCheckAt,
     nextHeartbeatAt: run.nextHeartbeatAt,
     lastVerifiedAt: run.lastVerifiedAt,
