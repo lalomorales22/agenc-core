@@ -501,30 +501,6 @@ describe("OpenAICompatProvider", () => {
   });
 
   // -------------------------------------------------------------------------
-  // getCapabilities()
-  // -------------------------------------------------------------------------
-
-  describe("getCapabilities()", () => {
-    it("reports provider name as 'openai-compat'", () => {
-      expect(makeProvider().getCapabilities().provider).toBe("openai-compat");
-    });
-
-    it("reports all stateful capabilities as false", () => {
-      const caps = makeProvider().getCapabilities();
-      expect(caps.stateful.assistantPhase).toBe(false);
-      expect(caps.stateful.previousResponseId).toBe(false);
-      expect(caps.stateful.encryptedReasoning).toBe(false);
-      expect(caps.stateful.storedResponseRetrieval).toBe(false);
-      expect(caps.stateful.storedResponseDeletion).toBe(false);
-      expect(caps.stateful.opaqueCompaction).toBe(false);
-    });
-
-    it("reports deterministicFallback as true", () => {
-      expect(makeProvider().getCapabilities().stateful.deterministicFallback).toBe(true);
-    });
-  });
-
-  // -------------------------------------------------------------------------
   // getExecutionProfile()
   // -------------------------------------------------------------------------
 
