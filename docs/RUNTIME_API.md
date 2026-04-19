@@ -63,6 +63,7 @@ const program = createProgram(provider);
 | `llm/grok/` | `GrokProvider` | xAI Grok adapter (via `openai` SDK) | `GrokProviderConfig` |
 | `llm/anthropic/` | `AnthropicProvider` | Anthropic adapter | `AnthropicProviderConfig` |
 | `llm/ollama/` | `OllamaProvider` | Ollama local adapter | `OllamaProviderConfig` |
+| `llm/openai-compat/` | `OpenAICompatProvider` | OpenAI-compatible local adapter (LM Studio, llama.cpp, vLLM) | `OpenAICompatProviderConfig` |
 | `tools/` | `ToolRegistry` | MCP-compatible tool management | `ToolRegistryConfig` |
 | `memory/` | `InMemoryBackend` | Zero-dep memory storage | `InMemoryBackendConfig` |
 | `memory/sqlite/` | `SqliteBackend` | SQLite-backed storage | `SqliteBackendConfig` |
@@ -116,6 +117,16 @@ const anthropic = new AnthropicProvider({ apiKey: '...', model: 'claude-sonnet-4
 
 // Ollama (requires: npm install ollama + local Ollama server)
 const ollama = new OllamaProvider({ model: 'llama3', tools });
+
+// OpenAI-compatible local server (LM Studio, llama.cpp, vLLM)
+// baseUrl is validated on startup to be a local/LAN address
+const local = new OpenAICompatProvider({
+  model: 'google_gemma-4-26b-a4b-it',
+  baseUrl: 'http://127.0.0.1:1234/v1',
+  apiKey: 'local',             // not validated by local servers
+  contextWindowTokens: 32768,  // required — local servers don't expose this
+  tools,
+});
 ```
 
 All providers implement `LLMProvider`: `chat()`, `chatStream()`, `healthCheck()`.
@@ -335,8 +346,41 @@ Provider-specific additions:
 - **GrokProviderConfig**: `apiKey` (required), `baseURL`, `webSearch`, `searchMode`
 - **AnthropicProviderConfig**: `apiKey` (required)
 - **OllamaProviderConfig**: `baseURL` (default: `http://localhost:11434`)
+- **OpenAICompatProviderConfig**: `baseUrl` (required, must be local/LAN), `apiKey` (required, any string), `contextWindowTokens` (required)
 
 When `GrokProviderConfig.webSearch=true`, the runtime can route provider-native `web_search` into Grok Responses calls without exposing a client-executed tool in the gateway registry. `searchMode="auto"` prefers `web_search` for research/docs/reference comparisons while preserving browser MCP tools for interactive validation; delegated research evidence can be satisfied by provider citations surfaced as `providerEvidence.citations`. This path is model-gated: unsupported Grok models such as `grok-code-fast-1` must suppress `web_search` even when the config flag is set.
+
+### Local Inference (openai-compat)
+
+Use `openai-compat` for any server that exposes the OpenAI `/v1/chat/completions`
+interface locally — LM Studio, llama.cpp server, vLLM, or any compatible runner.
+This provider does **not** require xAI credentials and does not enforce a model
+catalog: the server's `GET /v1/models` response is the authoritative source of truth.
+
+**Startup validation** runs three checks before the provider is returned:
+1. `baseUrl` resolves to a local or LAN address (`127.x`, `10.x`, `192.168.x`, `172.16-31.x`, `localhost`)
+2. `GET {baseUrl}/models` is reachable within 5 seconds
+3. The configured `model` appears in the `/v1/models` response
+
+```json
+{
+  "llm": {
+    "provider": "openai-compat",
+    "model": "google_gemma-4-26b-a4b-it",
+    "baseUrl": "http://127.0.0.1:1234/v1",
+    "apiKey": "local",
+    "contextWindowTokens": 32768,
+    "maxTokens": 4096
+  }
+}
+```
+
+**Notes:**
+- `contextWindowTokens` is required — local servers do not expose context window size via API. The AgenC system prompt alone requires more than 14K tokens, so 32768 is the recommended minimum. Values below 16384 will likely cause failures before the user sends a single message.
+- `apiKey` is passed in the `Authorization` header but is not validated by local servers. Any non-empty string works.
+- When running untrusted models, set `workspace.hostPath` to a neutral directory to prevent autonomous file access during initial context loading.
+- LM Studio: set the context window in the model settings to match `contextWindowTokens`. The LM Studio default of 4096 is too small for most system prompts.
+- Use `provider: "ollama"` instead when using Ollama with its native SDK; `openai-compat` is the right choice when Ollama is running in OpenAI-compatibility mode or when using LM Studio / llama.cpp.
 
 ### LLMTaskExecutorConfig
 
