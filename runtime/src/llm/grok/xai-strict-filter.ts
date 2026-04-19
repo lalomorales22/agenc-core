@@ -162,12 +162,12 @@ const SERVER_SIDE_TOOL_CALL_OUTPUT_TYPES: ReadonlySet<string> = new Set([
  * compatibility rule for undocumented 200s.
  */
 const DOCUMENTED_XAI_MODEL_IDS: ReadonlySet<string> = new Set([
-  // Grok 4 family — current
-  "grok-4.20-beta-0309-reasoning",
-  "grok-4.20-beta-0309-non-reasoning",
+  // Grok 4 family — current (xAI dropped the -beta- infix in Apr 2026)
+  "grok-4.20-0309-reasoning",
+  "grok-4.20-0309-non-reasoning",
   "grok-4-1-fast-reasoning",
   "grok-4-1-fast-non-reasoning",
-  "grok-4.20-multi-agent-beta-0309",
+  "grok-4.20-multi-agent-0309",
   "grok-4-0709",
   // Grok 3 family — still in xAI catalog per release notes (April 2025)
   "grok-3",
@@ -196,22 +196,22 @@ const DOCUMENTED_XAI_MODEL_IDS: ReadonlySet<string> = new Set([
  */
 const DOCUMENTED_XAI_MODEL_ALIASES: ReadonlyMap<string, string> = new Map([
   // bare names → canonical
-  ["grok-4.20-reasoning", "grok-4.20-beta-0309-reasoning"],
-  ["grok-4.20-non-reasoning", "grok-4.20-beta-0309-non-reasoning"],
-  ["grok-4.20-multi-agent", "grok-4.20-multi-agent-beta-0309"],
+  ["grok-4.20-reasoning", "grok-4.20-0309-reasoning"],
+  ["grok-4.20-non-reasoning", "grok-4.20-0309-non-reasoning"],
+  ["grok-4.20-multi-agent", "grok-4.20-multi-agent-0309"],
   ["grok-4-fast-reasoning", "grok-4-1-fast-reasoning"],
   ["grok-4-fast-non-reasoning", "grok-4-1-fast-non-reasoning"],
   // -latest aliases → canonical
-  ["grok-4.20-reasoning-latest", "grok-4.20-beta-0309-reasoning"],
-  ["grok-4.20-non-reasoning-latest", "grok-4.20-beta-0309-non-reasoning"],
-  ["grok-4.20-multi-agent-latest", "grok-4.20-multi-agent-beta-0309"],
-  ["grok-4.20-beta-latest-reasoning", "grok-4.20-beta-0309-reasoning"],
-  ["grok-4.20-beta-latest-non-reasoning", "grok-4.20-beta-0309-non-reasoning"],
-  ["grok-4.20-multi-agent-beta-latest", "grok-4.20-multi-agent-beta-0309"],
-  // Previous non-beta spelling seen in local autocomplete before xAI exposed beta IDs.
-  ["grok-4.20-0309-reasoning", "grok-4.20-beta-0309-reasoning"],
-  ["grok-4.20-0309-non-reasoning", "grok-4.20-beta-0309-non-reasoning"],
-  ["grok-4.20-multi-agent-0309", "grok-4.20-multi-agent-beta-0309"],
+  ["grok-4.20-reasoning-latest", "grok-4.20-0309-reasoning"],
+  ["grok-4.20-non-reasoning-latest", "grok-4.20-0309-non-reasoning"],
+  ["grok-4.20-multi-agent-latest", "grok-4.20-multi-agent-0309"],
+  // Legacy beta-infixed IDs from earlier xAI catalog — remap to current canonical
+  ["grok-4.20-beta-0309-reasoning", "grok-4.20-0309-reasoning"],
+  ["grok-4.20-beta-0309-non-reasoning", "grok-4.20-0309-non-reasoning"],
+  ["grok-4.20-multi-agent-beta-0309", "grok-4.20-multi-agent-0309"],
+  ["grok-4.20-beta-latest-reasoning", "grok-4.20-0309-reasoning"],
+  ["grok-4.20-beta-latest-non-reasoning", "grok-4.20-0309-non-reasoning"],
+  ["grok-4.20-multi-agent-beta-latest", "grok-4.20-multi-agent-0309"],
   ["grok-4-1-fast-reasoning-latest", "grok-4-1-fast-reasoning"],
   ["grok-4-1-fast-non-reasoning-latest", "grok-4-1-fast-non-reasoning"],
 ]);
@@ -251,7 +251,7 @@ export function modelSupportsFunctionCalling(canonicalModel: string): boolean {
  * automatically and **return an error** if `reasoning.effort` is sent.
  */
 export function modelSupportsReasoningEffort(canonicalModel: string): boolean {
-  return canonicalModel === "grok-4.20-multi-agent-beta-0309";
+  return canonicalModel === "grok-4.20-multi-agent-0309";
 }
 
 /**
@@ -314,7 +314,7 @@ export class XaiUnknownModelError extends LLMProviderError {
         `catalog (developers/models). xAI silently aliases unknown model IDs, ` +
         `which produces unverifiable behavior. Set llm.model in config.json to ` +
         `one of the documented IDs (e.g. "grok-4-1-fast-non-reasoning", ` +
-        `"grok-4.20-beta-0309-reasoning", "grok-4.20-multi-agent-beta-0309").`,
+        `"grok-4.20-0309-reasoning", "grok-4.20-multi-agent-0309").`,
       400,
     );
     this.name = "XaiUnknownModelError";
@@ -358,7 +358,7 @@ export class XaiUndocumentedFieldError extends LLMProviderError {
  *
  *   1. Undocumented or empty `model`.
  *   2. `reasoning` field on a model that doesn't accept `reasoning.effort`
- *      (everything except `grok-4.20-multi-agent-beta-0309`).
+ *      (everything except `grok-4.20-multi-agent-0309`).
  *   3. `presence_penalty` / `frequency_penalty` / `stop` on a reasoning
  *      variant.
  *   4. Any top-level field not in
@@ -388,7 +388,7 @@ export function validateXaiRequestPreFlight(
   if ("reasoning" in params && !modelSupportsReasoningEffort(canonicalModel)) {
     throw new XaiUndocumentedFieldError(
       "reasoning",
-      `is only supported on grok-4.20-multi-agent-beta-0309 (where it controls ` +
+      `is only supported on grok-4.20-multi-agent-0309 (where it controls ` +
         `agent count); current model is ${canonicalModel}, which reasons ` +
         `automatically and returns an error if reasoning.effort is sent`,
     );

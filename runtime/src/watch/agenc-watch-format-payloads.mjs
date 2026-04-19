@@ -240,6 +240,12 @@ export function summarizeUsage(payload) {
   const parts = [];
   const prompt = formatCompactNumber(payload.promptTokens);
   const sessionTotal = formatCompactNumber(payload.totalTokens);
+  const sessionCost =
+    typeof payload.sessionCostUsd === "number" &&
+    Number.isFinite(payload.sessionCostUsd) &&
+    payload.sessionCostUsd >= 0
+      ? formatSessionCostUsd(payload.sessionCostUsd)
+      : null;
   const effectiveWindow = formatCompactNumber(
     payload.effectiveContextWindowTokens ?? payload.contextWindowTokens,
   );
@@ -251,11 +257,21 @@ export function summarizeUsage(payload) {
   const maxOutput = formatCompactNumber(payload.maxOutputTokens);
   if (prompt) parts.push(`${prompt} current`);
   if (sessionTotal) parts.push(`${sessionTotal} session total`);
+  if (sessionCost) parts.push(`${sessionCost} session`);
   if (effectiveWindow) parts.push(`${effectiveWindow} effective`);
   if (percentUsed) parts.push(percentUsed);
   if (maxOutput) parts.push(`${maxOutput} max out`);
   if (payload.compacted) parts.push("compacted");
   return parts.length > 0 ? parts.join(" / ") : null;
+}
+
+function formatSessionCostUsd(value) {
+  // Below 1¢: show micro-dollar precision so early session activity is
+  // visible (e.g. "$0.0042"). At 1¢ or more: round to the cent.
+  if (value < 0.01) {
+    return `$${value.toFixed(4)}`;
+  }
+  return `$${value.toFixed(2)}`;
 }
 
 export function firstMeaningfulLine(value) {

@@ -877,6 +877,10 @@ export class VoiceBridge {
         payload: buildChatUsagePayload({
           sessionId,
           totalTokens: chatExecutor.getSessionTokenUsage(sessionId),
+          sessionCostUsd:
+            typeof chatExecutor.getSessionCostUsd === "function"
+              ? chatExecutor.getSessionCostUsd(sessionId)
+              : undefined,
           sessionTokenBudget: this.config.sessionTokenBudget ?? 0,
           compacted: result.compacted ?? false,
           contextWindowTokens: this.config.contextWindowTokens,
