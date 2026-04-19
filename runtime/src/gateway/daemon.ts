@@ -2511,7 +2511,7 @@ export class DaemonManager {
           {
             const effectiveProfile = this.resolveEffectiveShellProfile({
               sessionId,
-              metadata: sessionMgr.get(sessionId)?.metadata ?? {},
+              metadata: sessionMgr.getByIdOrSenderId(sessionId)?.metadata ?? {},
               preferred: shellProfile,
             });
             return buildStaticToolRoutingDecision({
@@ -2527,7 +2527,7 @@ export class DaemonManager {
                   : DEFAULT_SESSION_SHELL_PROFILE,
                 this.getDiscoveredToolNamesForSession(sessionId),
                 resolveSessionWorkflowState(
-                  sessionMgr.get(sessionId)?.metadata ?? {},
+                  sessionMgr.getByIdOrSenderId(sessionId)?.metadata ?? {},
                 ).stage,
               ),
               shellProfile: effectiveProfile,
@@ -2543,13 +2543,13 @@ export class DaemonManager {
             }).allowed
               ? this.resolveEffectiveShellProfile({
                   sessionId,
-                  metadata: sessionMgr.get(sessionId)?.metadata ?? {},
+                  metadata: sessionMgr.getByIdOrSenderId(sessionId)?.metadata ?? {},
                   preferred: shellProfile,
                 })
               : DEFAULT_SESSION_SHELL_PROFILE,
             discoveredToolNames,
             resolveSessionWorkflowState(
-              sessionMgr.get(sessionId)?.metadata ?? {},
+              sessionMgr.getByIdOrSenderId(sessionId)?.metadata ?? {},
             ).stage,
           ),
         seedHistoryForSession: (sessionId) =>
@@ -7579,17 +7579,17 @@ export class DaemonManager {
               }).allowed
                 ? this.resolveEffectiveShellProfile({
                     sessionId,
-                    metadata: sessionMgr.get(sessionId)?.metadata ?? {},
+                    metadata: sessionMgr.getByIdOrSenderId(sessionId)?.metadata ?? {},
                   })
                 : DEFAULT_SESSION_SHELL_PROFILE,
               this.getDiscoveredToolNamesForSession(sessionId),
               resolveSessionWorkflowState(
-                sessionMgr.get(sessionId)?.metadata ?? {},
+                sessionMgr.getByIdOrSenderId(sessionId)?.metadata ?? {},
               ).stage,
             ),
             shellProfile: this.resolveEffectiveShellProfile({
               sessionId,
-              metadata: sessionMgr.get(sessionId)?.metadata ?? {},
+              metadata: sessionMgr.getByIdOrSenderId(sessionId)?.metadata ?? {},
             }),
           }),
         resolveAdvertisedToolNames: (sessionId, shellProfile, discoveredToolNames) =>
@@ -7603,13 +7603,13 @@ export class DaemonManager {
                 }).allowed
                 ? this.resolveEffectiveShellProfile({
                     sessionId,
-                    metadata: sessionMgr.get(sessionId)?.metadata ?? {},
+                    metadata: sessionMgr.getByIdOrSenderId(sessionId)?.metadata ?? {},
                   })
                 : DEFAULT_SESSION_SHELL_PROFILE
               : shellProfile,
             discoveredToolNames,
             resolveSessionWorkflowState(
-              sessionMgr.get(sessionId)?.metadata ?? {},
+              sessionMgr.getByIdOrSenderId(sessionId)?.metadata ?? {},
             ).stage,
           ),
         recordToolRoutingOutcome: () => {
