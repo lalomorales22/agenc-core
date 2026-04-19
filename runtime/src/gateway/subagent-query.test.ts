@@ -201,14 +201,7 @@ describe("runSubagentToLegacyResult (Phase K)", () => {
           finishReason: "tool_calls",
         })
         .mockResolvedValueOnce({
-          content: "Next I will continue with the remaining work.",
-          toolCalls: [],
-          usage: { promptTokens: 20, completionTokens: 100, totalTokens: 120 },
-          model: "mock-model",
-          finishReason: "stop",
-        })
-        .mockResolvedValueOnce({
-          content: "Bootstrap complete. Continuing.",
+          content: "Bootstrap complete.",
           toolCalls: [],
           usage: { promptTokens: 20, completionTokens: 100, totalTokens: 120 },
           model: "mock-model",
@@ -238,12 +231,11 @@ describe("runSubagentToLegacyResult (Phase K)", () => {
       },
     });
 
-    expect(result.legacyResult?.content).toBe("Bootstrap complete. Continuing.");
+    expect(result.legacyResult?.content).toBe("Bootstrap complete.");
     expect(result.legacyResult?.callUsage.map((entry) => entry.phase)).toEqual([
       "initial",
       "tool_followup",
-      "tool_followup",
     ]);
-    expect((provider.chat as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(3);
+    expect((provider.chat as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(2);
   });
 });
