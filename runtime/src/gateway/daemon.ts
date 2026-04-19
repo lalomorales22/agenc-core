@@ -5591,6 +5591,10 @@ export class DaemonManager {
     const session = this._webSessionManager?.get(sessionId);
 
     const totalTokens = executor.getSessionTokenUsage(sessionId);
+    const sessionCostUsd =
+      typeof executor.getSessionCostUsd === "function"
+        ? executor.getSessionCostUsd(sessionId)
+        : undefined;
     // Show per-call context window occupancy (from the last model
     // response's input_tokens), not cumulative lifetime total. This
     // matches the reference runtime's getCurrentUsage() which reads
@@ -5613,6 +5617,7 @@ export class DaemonManager {
     const payload = buildChatUsagePayload({
       sessionId,
       totalTokens,
+      sessionCostUsd,
       sessionTokenBudget: resolveSessionTokenBudget(
         effectiveLlmConfig,
         contextWindowTokens,

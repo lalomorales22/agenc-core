@@ -8,15 +8,16 @@
 import { sanitizeInlineText } from "./agenc-watch-text-utils.mjs";
 
 const GROK_MODEL_ALIASES = new Map([
-  ["grok-4.20-0309-reasoning", "grok-4.20-beta-0309-reasoning"],
-  ["grok-4.20-0309-non-reasoning", "grok-4.20-beta-0309-non-reasoning"],
-  ["grok-4.20-multi-agent-0309", "grok-4.20-multi-agent-beta-0309"],
-  ["grok-4.20-reasoning", "grok-4.20-beta-0309-reasoning"],
-  ["grok-4.20-non-reasoning", "grok-4.20-beta-0309-non-reasoning"],
-  ["grok-4.20-multi-agent", "grok-4.20-multi-agent-beta-0309"],
-  ["grok-4.20-beta-latest-reasoning", "grok-4.20-beta-0309-reasoning"],
-  ["grok-4.20-beta-latest-non-reasoning", "grok-4.20-beta-0309-non-reasoning"],
-  ["grok-4.20-multi-agent-beta-latest", "grok-4.20-multi-agent-beta-0309"],
+  // Legacy beta-infixed IDs (pre-Apr 2026 xAI catalog) remap to current canonical.
+  ["grok-4.20-beta-0309-reasoning", "grok-4.20-0309-reasoning"],
+  ["grok-4.20-beta-0309-non-reasoning", "grok-4.20-0309-non-reasoning"],
+  ["grok-4.20-multi-agent-beta-0309", "grok-4.20-multi-agent-0309"],
+  ["grok-4.20-reasoning", "grok-4.20-0309-reasoning"],
+  ["grok-4.20-non-reasoning", "grok-4.20-0309-non-reasoning"],
+  ["grok-4.20-multi-agent", "grok-4.20-multi-agent-0309"],
+  ["grok-4.20-beta-latest-reasoning", "grok-4.20-0309-reasoning"],
+  ["grok-4.20-beta-latest-non-reasoning", "grok-4.20-0309-non-reasoning"],
+  ["grok-4.20-multi-agent-beta-latest", "grok-4.20-multi-agent-0309"],
 ]);
 
 function canonicalizeProviderModel(provider, model) {

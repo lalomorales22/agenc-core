@@ -112,44 +112,44 @@ function functionCallBlock(name: string, args: string): Record<string, unknown> 
 
 describe("resolveDocumentedXaiModel", () => {
   it("returns canonical ID for known catalog entries", () => {
-    expect(resolveDocumentedXaiModel("grok-4.20-beta-0309-reasoning")).toBe(
-      "grok-4.20-beta-0309-reasoning",
+    expect(resolveDocumentedXaiModel("grok-4.20-0309-reasoning")).toBe(
+      "grok-4.20-0309-reasoning",
     );
     expect(resolveDocumentedXaiModel("grok-4-1-fast-non-reasoning")).toBe(
       "grok-4-1-fast-non-reasoning",
     );
-    expect(resolveDocumentedXaiModel("grok-4.20-multi-agent-beta-0309")).toBe(
-      "grok-4.20-multi-agent-beta-0309",
+    expect(resolveDocumentedXaiModel("grok-4.20-multi-agent-0309")).toBe(
+      "grok-4.20-multi-agent-0309",
     );
   });
 
   it("resolves bare-name aliases to canonical", () => {
     expect(resolveDocumentedXaiModel("grok-4.20-reasoning")).toBe(
-      "grok-4.20-beta-0309-reasoning",
+      "grok-4.20-0309-reasoning",
     );
     expect(resolveDocumentedXaiModel("grok-4.20-multi-agent")).toBe(
-      "grok-4.20-multi-agent-beta-0309",
+      "grok-4.20-multi-agent-0309",
     );
   });
 
   it("resolves -latest aliases to canonical", () => {
     expect(resolveDocumentedXaiModel("grok-4.20-reasoning-latest")).toBe(
-      "grok-4.20-beta-0309-reasoning",
+      "grok-4.20-0309-reasoning",
     );
     expect(
       resolveDocumentedXaiModel("grok-4-1-fast-non-reasoning-latest"),
     ).toBe("grok-4-1-fast-non-reasoning");
   });
 
-  it("resolves stale non-beta 4.20 IDs to current beta catalog IDs", () => {
-    expect(resolveDocumentedXaiModel("grok-4.20-0309-reasoning")).toBe(
-      "grok-4.20-beta-0309-reasoning",
+  it("resolves legacy beta-infixed 4.20 IDs to current non-beta canonical IDs", () => {
+    expect(resolveDocumentedXaiModel("grok-4.20-beta-0309-reasoning")).toBe(
+      "grok-4.20-0309-reasoning",
     );
-    expect(resolveDocumentedXaiModel("grok-4.20-0309-non-reasoning")).toBe(
-      "grok-4.20-beta-0309-non-reasoning",
+    expect(resolveDocumentedXaiModel("grok-4.20-beta-0309-non-reasoning")).toBe(
+      "grok-4.20-0309-non-reasoning",
     );
-    expect(resolveDocumentedXaiModel("grok-4.20-multi-agent-0309")).toBe(
-      "grok-4.20-multi-agent-beta-0309",
+    expect(resolveDocumentedXaiModel("grok-4.20-multi-agent-beta-0309")).toBe(
+      "grok-4.20-multi-agent-0309",
     );
   });
 
@@ -192,10 +192,10 @@ describe("model capability flags", () => {
   });
 
   it("modelSupportsReasoningEffort: only multi-agent", () => {
-    expect(modelSupportsReasoningEffort("grok-4.20-multi-agent-beta-0309")).toBe(
+    expect(modelSupportsReasoningEffort("grok-4.20-multi-agent-0309")).toBe(
       true,
     );
-    expect(modelSupportsReasoningEffort("grok-4.20-beta-0309-reasoning")).toBe(false);
+    expect(modelSupportsReasoningEffort("grok-4.20-0309-reasoning")).toBe(false);
     expect(modelSupportsReasoningEffort("grok-4-1-fast-reasoning")).toBe(false);
     expect(modelSupportsReasoningEffort("grok-4-1-fast-non-reasoning")).toBe(
       false,
@@ -228,7 +228,7 @@ describe("validateXaiRequestPreFlight (pass cases)", () => {
     expect(() =>
       validateXaiRequestPreFlight(
         plainTextRequest({
-          model: "grok-4.20-multi-agent-beta-0309",
+          model: "grok-4.20-multi-agent-0309",
           reasoning: { effort: "high" },
         }),
       ),
@@ -240,7 +240,7 @@ describe("validateXaiRequestPreFlight (pass cases)", () => {
       expect(() =>
         validateXaiRequestPreFlight(
           plainTextRequest({
-            model: "grok-4.20-multi-agent-beta-0309",
+            model: "grok-4.20-multi-agent-0309",
             reasoning: { effort },
           }),
         ),
@@ -365,7 +365,7 @@ describe("validateXaiRequestPreFlight (reject cases)", () => {
     expect(() =>
       validateXaiRequestPreFlight(
         plainTextRequest({
-          model: "grok-4.20-multi-agent-beta-0309",
+          model: "grok-4.20-multi-agent-0309",
           frequency_penalty: 1.0,
         }),
       ),
@@ -902,7 +902,7 @@ describe("multi-agent specific restrictions", () => {
     expect(() =>
       validateXaiRequestPreFlight(
         plainTextRequest({
-          model: "grok-4.20-multi-agent-beta-0309",
+          model: "grok-4.20-multi-agent-0309",
           max_output_tokens: 1024,
         }),
       ),
@@ -924,7 +924,7 @@ describe("multi-agent specific restrictions", () => {
     expect(() =>
       validateXaiRequestPreFlight(
         plainTextRequest({
-          model: "grok-4.20-multi-agent-beta-0309",
+          model: "grok-4.20-multi-agent-0309",
           tools: [functionTool("system.bash")],
         }),
       ),
@@ -935,7 +935,7 @@ describe("multi-agent specific restrictions", () => {
     expect(() =>
       validateXaiRequestPreFlight(
         plainTextRequest({
-          model: "grok-4.20-multi-agent-beta-0309",
+          model: "grok-4.20-multi-agent-0309",
           tools: [{ type: "web_search" }, { type: "x_search" }],
         }),
       ),

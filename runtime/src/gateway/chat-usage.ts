@@ -23,6 +23,13 @@ interface ChatUsageSection {
 export interface ChatUsagePayload {
   readonly sessionId?: string;
   readonly totalTokens: number;
+  /**
+   * Cumulative USD cost for the current session, or `undefined` when
+   * the provider/model is not in the pricing table. Undefined is
+   * distinguished from zero so the TUI can skip the cost chip instead
+   * of falsely asserting "$0.0000" for unpriced providers.
+   */
+  readonly sessionCostUsd?: number;
   readonly budget: number;
   readonly compacted: boolean;
   readonly provider?: string;
@@ -56,6 +63,7 @@ export interface ChatUsagePayload {
 interface BuildChatUsagePayloadInput {
   readonly sessionId?: string;
   readonly totalTokens: number;
+  readonly sessionCostUsd?: number;
   readonly sessionTokenBudget: number;
   readonly compacted: boolean;
   readonly provider?: string;
@@ -118,6 +126,11 @@ export function buildChatUsagePayload(
   const payload: ChatUsagePayload = {
     ...(input.sessionId ? { sessionId: input.sessionId } : {}),
     totalTokens: normalizeNonNegativeInt(input.totalTokens),
+    ...(typeof input.sessionCostUsd === "number" &&
+    Number.isFinite(input.sessionCostUsd) &&
+    input.sessionCostUsd >= 0
+      ? { sessionCostUsd: Number(input.sessionCostUsd.toFixed(6)) }
+      : {}),
     budget: normalizeNonNegativeInt(input.sessionTokenBudget),
     compacted: input.compacted === true,
     ...(input.provider ? { provider: input.provider } : {}),

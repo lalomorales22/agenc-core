@@ -82,9 +82,9 @@ const VISION_MODELS_WITH_TOOLS = new Set([
   "grok-4-0709",
   "grok-4-1-fast-reasoning",
   "grok-4-1-fast-non-reasoning",
-  "grok-4.20-beta-0309-reasoning",
-  "grok-4.20-beta-0309-non-reasoning",
-  "grok-4.20-multi-agent-beta-0309",
+  "grok-4.20-0309-reasoning",
+  "grok-4.20-0309-non-reasoning",
+  "grok-4.20-multi-agent-0309",
 ]);
 
 const XAI_RESPONSES_TRIM_PRIORITY_TOOL_NAMES = new Set([

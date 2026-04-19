@@ -202,6 +202,7 @@ export class ChatExecutor {
 
   private readonly cooldowns = new Map<string, CooldownEntry>();
   private readonly sessionTokens = new Map<string, number>();
+  private readonly sessionCostUsd = new Map<string, number>();
   private readonly lastCallInputTokens = new Map<string, number>();
 
   private static normalizeRequestTimeoutMs(timeoutMs: number | undefined): number {
@@ -352,6 +353,7 @@ export class ChatExecutor {
       progressProvider: this.progressProvider,
       // Session state + thresholds
       sessionTokens: this.sessionTokens,
+      sessionCostUsd: this.sessionCostUsd,
       lastCallInputTokens: this.lastCallInputTokens,
       sessionTokenBudget: this.sessionTokenBudget,
       sessionCompactionThreshold: this.sessionCompactionThreshold,
@@ -391,6 +393,7 @@ export class ChatExecutor {
       allowedTools: this.allowedTools,
       defaultRunClass: this.defaultRunClass,
       sessionTokens: this.sessionTokens,
+      sessionCostUsd: this.sessionCostUsd,
       lastCallInputTokens: this.lastCallInputTokens,
       sessionTokenBudget: this.sessionTokenBudget,
       sessionCompactionThreshold: this.sessionCompactionThreshold,
@@ -482,6 +485,16 @@ export class ChatExecutor {
     return this.sessionTokens.get(sessionId) ?? 0;
   }
 
+  /**
+   * Get the accumulated USD cost for a session, or `undefined` when no
+   * priced call has been recorded yet. Undefined is distinguished from
+   * zero so the TUI can skip rendering the chip for unpriced providers
+   * instead of falsely asserting "$0.0000".
+   */
+  getSessionCostUsd(sessionId: string): number | undefined {
+    return this.sessionCostUsd.get(sessionId);
+  }
+
   /** Get the input token count from the most recent model call for a session. */
   getLastCallInputTokens(sessionId: string): number {
     return this.lastCallInputTokens.get(sessionId) ?? 0;
@@ -490,11 +503,13 @@ export class ChatExecutor {
   /** Reset token usage for a specific session. */
   resetSessionTokens(sessionId: string): void {
     this.sessionTokens.delete(sessionId);
+    this.sessionCostUsd.delete(sessionId);
   }
 
   /** Clear all session token tracking. */
   clearAllSessionTokens(): void {
     this.sessionTokens.clear();
+    this.sessionCostUsd.clear();
   }
 
   /** Clear all provider cooldowns. */

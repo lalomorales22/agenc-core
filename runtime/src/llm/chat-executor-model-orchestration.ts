@@ -59,6 +59,7 @@ import {
 } from "./run-budget.js";
 import { canonicalizeProviderModel } from "../gateway/model-route.js";
 import { trackTokenUsage } from "./chat-executor-state.js";
+import { computeGrokCallCostUsd } from "./grok/pricing.js";
 import type {
   ChatCallUsageRecord,
   CooldownEntry,
@@ -145,6 +146,7 @@ export interface CallModelForPhaseDependencies {
   readonly allowedTools: Set<string> | null;
   readonly defaultRunClass: RuntimeRunClass | undefined;
   readonly sessionTokens: Map<string, number>;
+  readonly sessionCostUsd?: Map<string, number>;
   readonly lastCallInputTokens?: Map<string, number>;
   readonly sessionTokenBudget: number | undefined;
   readonly sessionCompactionThreshold: number | undefined;
@@ -409,6 +411,19 @@ export async function callModelForPhase(
     next.response.usage.totalTokens,
     deps.maxTrackedSessions,
   );
+  if (deps.sessionCostUsd && next.providerName === "grok") {
+    const callCost = computeGrokCallCostUsd(
+      next.response.usage,
+      next.response.model,
+    );
+    if (typeof callCost === "number" && callCost > 0) {
+      const prior = deps.sessionCostUsd.get(ctx.sessionId) ?? 0;
+      deps.sessionCostUsd.set(
+        ctx.sessionId,
+        Number((prior + callCost).toFixed(6)),
+      );
+    }
+  }
   if (deps.lastCallInputTokens) {
     deps.lastCallInputTokens.set(
       ctx.sessionId,
