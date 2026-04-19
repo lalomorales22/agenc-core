@@ -734,6 +734,23 @@ export async function executeWebChatConversationTurn(
       await sessionMgr.compact(session.id);
     }
 
+    // One-shot plan-mode auto-exit MUST run before signalIdle so the
+    // agent.status emission (which reads live workflow stage via
+    // buildWorkflowStatusPayload) reflects the restored stage. If the
+    // restore happens after signalIdle, the TUI sees the turn end with
+    // workflowStage still pinned to "plan" even though metadata has
+    // already reverted by the next outbound event.
+    if (oneshotPlanActive) {
+      const validStages = new Set(["idle", "plan", "implement", "review", "verify"]);
+      const restoreStage = (
+        oneshotPlanPriorStage && validStages.has(oneshotPlanPriorStage)
+          ? oneshotPlanPriorStage
+          : "idle"
+      ) as SessionWorkflowStage;
+      updateSessionWorkflowState(session.metadata, { stage: restoreStage });
+      delete (session.metadata as Record<string, unknown>).__planOneshotPriorStage;
+    }
+
     signals.signalIdle(msg.sessionId);
     sessionMgr.appendMessage(session.id, {
       role: "user",
@@ -770,21 +787,6 @@ export async function executeWebChatConversationTurn(
           ]
         : []),
     ]);
-    // One-shot plan-mode auto-exit: if this turn was kicked off via
-    // `/plan {"oneshot":true}` (see capture above), restore the
-    // workflow stage to whatever it was before the flip so the user
-    // is not stuck in plan mode for every follow-up message. Runs
-    // before the persist so the restored stage is what gets stored.
-    if (oneshotPlanActive) {
-      const validStages = new Set(["idle", "plan", "implement", "review", "verify"]);
-      const restoreStage = (
-        oneshotPlanPriorStage && validStages.has(oneshotPlanPriorStage)
-          ? oneshotPlanPriorStage
-          : "idle"
-      ) as SessionWorkflowStage;
-      updateSessionWorkflowState(session.metadata, { stage: restoreStage });
-      delete (session.metadata as Record<string, unknown>).__planOneshotPriorStage;
-    }
     await persistWebSessionRuntimeState(memoryBackend, msg.sessionId, session);
 
     await webChat.send({
