@@ -169,6 +169,8 @@ export interface ActiveBackgroundRun {
    */
   mutatingEditsSinceLastVerifierSpawn: number;
   assistantTurnsSinceLastVerifyReminder: number;
+  cyclesSinceTaskTool: number;
+  consecutiveNudgeCycles: number;
   anchorFiles: AnchorFileSnapshot[];
   nextCheckAt?: number;
   nextHeartbeatAt?: number;
@@ -286,6 +288,18 @@ export interface BackgroundRunSupervisorConfig {
     sessionId: string,
   ) => Promise<
     readonly import("../llm/task-reminder.js").ReminderTaskView[]
+  >;
+  /**
+   * Optional hook returning the session's currently-open tasks, used by
+   * the cross-cycle task-staleness reminder in
+   * `background-run-continuation.ts`. When absent the task-staleness
+   * reminder is silently skipped (no half-working state).
+   */
+  readonly readOpenTasksForSession?: (
+    sessionId: string,
+    limit: number,
+  ) => Promise<
+    readonly import("./background-run-continuation.js").OpenTaskSummary[]
   >;
   readonly isSessionBusy?: (sessionId: string) => boolean;
   readonly onStatus?: (
@@ -424,6 +438,8 @@ export function toPersistedRun(run: ActiveBackgroundRun): PersistedBackgroundRun
       run.mutatingEditsSinceLastVerifierSpawn,
     assistantTurnsSinceLastVerifyReminder:
       run.assistantTurnsSinceLastVerifyReminder,
+    cyclesSinceTaskTool: run.cyclesSinceTaskTool,
+    consecutiveNudgeCycles: run.consecutiveNudgeCycles,
     anchorFiles: [...run.anchorFiles],
     nextCheckAt: run.nextCheckAt,
     nextHeartbeatAt: run.nextHeartbeatAt,
@@ -521,6 +537,14 @@ export function toActiveRun(run: PersistedBackgroundRun): ActiveBackgroundRun {
       typeof run.assistantTurnsSinceLastVerifyReminder === "number"
         ? run.assistantTurnsSinceLastVerifyReminder
         : Number.POSITIVE_INFINITY,
+    cyclesSinceTaskTool:
+      typeof run.cyclesSinceTaskTool === "number"
+        ? run.cyclesSinceTaskTool
+        : 0,
+    consecutiveNudgeCycles:
+      typeof run.consecutiveNudgeCycles === "number"
+        ? run.consecutiveNudgeCycles
+        : 0,
     anchorFiles: [...run.anchorFiles],
     nextCheckAt: run.nextCheckAt,
     nextHeartbeatAt: run.nextHeartbeatAt,

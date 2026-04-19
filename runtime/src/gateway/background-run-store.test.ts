@@ -42,6 +42,8 @@ function makeRun(
     cycleCount: 1,
     stableWorkingCycles: 0,
     consecutiveErrorCycles: 0,
+    cyclesSinceTaskTool: 0,
+    consecutiveNudgeCycles: 0,
     anchorFiles: [],
     nextCheckAt: 5_000,
     nextHeartbeatAt: 3_000,
@@ -654,6 +656,26 @@ describe("BackgroundRunStore", () => {
       "watch:managed_process:proc_watcher",
     );
     expect(migrated!.fenceToken).toBe(1);
+  });
+
+  it("defaults cross-cycle continuation counters to 0 on legacy records that lack them", async () => {
+    const backend = new InMemoryBackend();
+    const store = new BackgroundRunStore({ memoryBackend: backend });
+    const legacyRun = {
+      ...makeRun({ sessionId: "session-legacy-counters" }),
+    };
+    delete (legacyRun as Record<string, unknown>).cyclesSinceTaskTool;
+    delete (legacyRun as Record<string, unknown>).consecutiveNudgeCycles;
+
+    await backend.set(
+      "background-run:session:session-legacy-counters",
+      legacyRun,
+    );
+
+    const loaded = await store.loadRun("session-legacy-counters");
+    expect(loaded).toBeDefined();
+    expect(loaded!.cyclesSinceTaskTool).toBe(0);
+    expect(loaded!.consecutiveNudgeCycles).toBe(0);
   });
 
   it("quarantines incompatible schema versions instead of silently coercing them", async () => {

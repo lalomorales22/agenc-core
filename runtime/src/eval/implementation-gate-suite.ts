@@ -304,6 +304,8 @@ async function runResumeAfterPartialScenario(): Promise<PipelineImplementationGa
       cycleCount: 1,
       stableWorkingCycles: 0,
       consecutiveErrorCycles: 0,
+      cyclesSinceTaskTool: 0,
+      consecutiveNudgeCycles: 0,
       anchorFiles: [],
       nextCheckAt: 10,
       lastVerifiedAt: 1,

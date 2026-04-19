@@ -218,6 +218,7 @@ import {
   buildBackgroundRunTraceIds,
   toOperatorSummary,
 } from "./background-run-supervisor-helpers.js";
+import { evaluateCycleContinuationInjections } from "./background-run-continuation.js";
 import { isRuntimeLimitExceeded } from "../llm/runtime-limit-policy.js";
 
 // --- Re-export from extracted managed-process module ---
@@ -599,6 +600,7 @@ export class BackgroundRunSupervisor {
   private readonly seedHistoryForSession?: BackgroundRunSupervisorConfig["seedHistoryForSession"];
   private readonly readTodosForSession?: BackgroundRunSupervisorConfig["readTodosForSession"];
   private readonly readTasksForSession?: BackgroundRunSupervisorConfig["readTasksForSession"];
+  private readonly readOpenTasksForSession?: BackgroundRunSupervisorConfig["readOpenTasksForSession"];
   private readonly isSessionBusy?: BackgroundRunSupervisorConfig["isSessionBusy"];
   private readonly onStatus?: BackgroundRunSupervisorConfig["onStatus"];
   private readonly publishUpdate: BackgroundRunSupervisorConfig["publishUpdate"];
@@ -672,6 +674,7 @@ export class BackgroundRunSupervisor {
     this.seedHistoryForSession = config.seedHistoryForSession;
     this.readTodosForSession = config.readTodosForSession;
     this.readTasksForSession = config.readTasksForSession;
+    this.readOpenTasksForSession = config.readOpenTasksForSession;
     this.isSessionBusy = config.isSessionBusy;
     this.onStatus = config.onStatus;
     this.publishUpdate = config.publishUpdate;
@@ -1983,6 +1986,8 @@ export class BackgroundRunSupervisor {
       // Infinity so the first verify_reminder is eligible to fire as
       // soon as the edit threshold is reached on a fresh run.
       assistantTurnsSinceLastVerifyReminder: Number.POSITIVE_INFINITY,
+      cyclesSinceTaskTool: 0,
+      consecutiveNudgeCycles: 0,
       anchorFiles: initialAnchorFiles,
       lastVerifiedAt: undefined,
       lastUserUpdate: undefined,
@@ -4168,7 +4173,27 @@ export class BackgroundRunSupervisor {
       run.consecutiveErrorCycles = consecutiveErrorCycles;
       decision = groundDecision(run, actorResult, decision);
       decision = applyRepeatedErrorGuard(decision, consecutiveErrorCycles);
-      decision = applyZeroToolCompletionGuard(run, actorResult, decision);
+      const zeroToolGuardResult = applyZeroToolCompletionGuard(
+        run,
+        actorResult,
+        decision,
+      );
+      decision = zeroToolGuardResult.decision;
+      const zeroToolGuardFired = zeroToolGuardResult.guardFired;
+      const anyTaskToolCall = actorResult.toolCalls.some((toolCall) =>
+        toolCall.name.startsWith("task."),
+      );
+      run.cyclesSinceTaskTool = anyTaskToolCall
+        ? 0
+        : run.cyclesSinceTaskTool + 1;
+      const hasSuccessfulToolCalls = actorResult.toolCalls.some(
+        (toolCall) => !toolCall.isError,
+      );
+      if (hasSuccessfulToolCalls) {
+        run.consecutiveNudgeCycles = 0;
+      } else if (zeroToolGuardFired) {
+        run.consecutiveNudgeCycles += 1;
+      }
       run.pendingSignals = dropSyntheticInternalSignals(run.pendingSignals);
       recordRunActivity(
         run,
@@ -4311,6 +4336,32 @@ export class BackgroundRunSupervisor {
       attachments.messages.some((m) => messageContainsVerifyReminderPrefix(m))
     ) {
       run.assistantTurnsSinceLastVerifyReminder = 0;
+    }
+
+    const openTasks = this.readOpenTasksForSession
+      ? await this.readOpenTasksForSession(sessionId, 20)
+      : [];
+    const continuationInjections = evaluateCycleContinuationInjections({
+      cycleCount: run.cycleCount + 1,
+      consecutiveNudgeCycles: run.consecutiveNudgeCycles,
+      cyclesSinceTaskTool: run.cyclesSinceTaskTool,
+      lastToolEvidencePresent: Boolean(run.lastToolEvidence),
+      remainingRequirements:
+        run.completionProgress?.remainingRequirements ?? [],
+      history: run.internalHistory,
+      openTasks,
+    });
+    if (continuationInjections.length > 0) {
+      run.internalHistory.push(...continuationInjections);
+      // xAI stateful chain break: a fresh user-turn injection must not
+      // be paired with a prior `previous_response_id` or the provider
+      // will replay stale context. Mirrors Fix B from bf218e4.
+      if (run.carryForward) {
+        run.carryForward = {
+          ...run.carryForward,
+          providerContinuation: undefined,
+        };
+      }
     }
 
     return {
