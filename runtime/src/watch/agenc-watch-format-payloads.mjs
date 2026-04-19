@@ -239,6 +239,7 @@ export function summarizeUsage(payload) {
   }
   const parts = [];
   const prompt = formatCompactNumber(payload.promptTokens);
+  const sessionTotal = formatCompactNumber(payload.totalTokens);
   const effectiveWindow = formatCompactNumber(
     payload.effectiveContextWindowTokens ?? payload.contextWindowTokens,
   );
@@ -249,6 +250,7 @@ export function summarizeUsage(payload) {
       : null;
   const maxOutput = formatCompactNumber(payload.maxOutputTokens);
   if (prompt) parts.push(`${prompt} current`);
+  if (sessionTotal) parts.push(`${sessionTotal} session total`);
   if (effectiveWindow) parts.push(`${effectiveWindow} effective`);
   if (percentUsed) parts.push(percentUsed);
   if (maxOutput) parts.push(`${maxOutput} max out`);
