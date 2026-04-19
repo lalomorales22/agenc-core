@@ -25,9 +25,21 @@ export function preserveManualTranscriptViewport({
     0,
     Number(transcriptScrollOffset ?? 0) + (Number(afterRows ?? 0) - Number(beforeRows ?? 0)),
   );
+  // CRITICAL: do NOT auto-engage follow mode just because the row-delta
+  // adjustment landed at offset 0. The user actively scrolled up
+  // (that's why shouldFollow was false at entry); content shrinking
+  // under them — e.g. the streaming preview block disappearing on
+  // chat.message commit, or events being collapsed/coalesced — must
+  // not be interpreted as the user opting back into follow mode. If
+  // we flip mode to true here, the very next event arrives, sees
+  // shouldFollow=true via isTranscriptFollowing(), and snaps the
+  // viewport to the bottom — which is exactly the "scroll works for
+  // a second then breaks" symptom users see during long agent turns.
+  // Mode stays false; the user must scroll back to the bottom (or
+  // hit a follow shortcut) to re-engage following intentionally.
   return {
     transcriptScrollOffset: nextOffset,
-    transcriptFollowMode: nextOffset === 0,
+    transcriptFollowMode: false,
   };
 }
 
