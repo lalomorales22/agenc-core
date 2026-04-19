@@ -293,13 +293,11 @@ export async function evaluateTurnEndStopGate(
             ? "Max model recalls exceeded during artifact-evidence recovery turn"
             : "Max model recalls exceeded during stop-hook recovery turn",
         exhaustedDetail:
-          hookResult.reason === "narrated_future_tool_work"
-            ? "Stop-gate recovery exhausted: the model kept narrating future work instead of calling tools."
-            : (hookValidationCode === "missing_file_mutation_evidence" ||
-                  hookValidationCode === "missing_file_artifact_evidence") &&
-                hookResult.blockingMessage
-              ? hookResult.blockingMessage
-              : "Stop-gate recovery exhausted after the model continued to emit an invalid completion summary.",
+          (hookValidationCode === "missing_file_mutation_evidence" ||
+            hookValidationCode === "missing_file_artifact_evidence") &&
+          hookResult.blockingMessage
+            ? hookResult.blockingMessage
+            : "Stop-gate recovery exhausted after the model continued to emit an invalid completion summary.",
         validationCode: hookValidationCode,
         validatorId: "turn_end_stop_gate",
         stopHookResult: hookResult,

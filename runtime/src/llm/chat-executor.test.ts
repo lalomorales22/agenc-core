@@ -920,7 +920,9 @@ describe("ChatExecutor", () => {
         toolHandler,
         maxFailureBudgetPerRequest: 4,
       });
-      const result = await executor.execute(createParams());
+      const result = await executor.execute(
+        createParams({ turnOutputTokenBudget: 2_000 }),
+      );
 
       expect(result.stopReason).toBe("completed");
       expect(result.content).toBe("Finished the remaining implementation details.");
