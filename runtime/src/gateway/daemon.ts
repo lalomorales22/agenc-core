@@ -2526,6 +2526,9 @@ export class DaemonManager {
                   ? effectiveProfile
                   : DEFAULT_SESSION_SHELL_PROFILE,
                 this.getDiscoveredToolNamesForSession(sessionId),
+                resolveSessionWorkflowState(
+                  sessionMgr.get(sessionId)?.metadata ?? {},
+                ).stage,
               ),
               shellProfile: effectiveProfile,
             });
@@ -2545,6 +2548,9 @@ export class DaemonManager {
                 })
               : DEFAULT_SESSION_SHELL_PROFILE,
             discoveredToolNames,
+            resolveSessionWorkflowState(
+              sessionMgr.get(sessionId)?.metadata ?? {},
+            ).stage,
           ),
         seedHistoryForSession: (sessionId) =>
           sessionMgr.get(sessionId)?.history ?? [],
@@ -3630,6 +3636,7 @@ export class DaemonManager {
                 ? effectiveProfile
                 : DEFAULT_SESSION_SHELL_PROFILE,
               this.getDiscoveredToolNamesForSession(sessionId),
+              this.resolveSessionWorkflowStage(sessionId),
             ),
             shellProfile: effectiveProfile,
           });
@@ -3648,6 +3655,7 @@ export class DaemonManager {
               })
             : DEFAULT_SESSION_SHELL_PROFILE,
           discoveredToolNames,
+          this.resolveSessionWorkflowStage(sessionId),
         ),
       recordToolRoutingOutcome: () => {
         /* no-op: static routing, nothing to record */
@@ -6493,6 +6501,23 @@ export class DaemonManager {
     return interactiveState?.discoveredToolNames ?? [];
   }
 
+  /**
+   * Resolve the current workflow stage for a session so the tool
+   * catalog filter can apply plan-mode restrictions. Returns
+   * `undefined` when the session is unknown, letting callers pass the
+   * value through to `getAdvertisedToolNames` (which treats
+   * `undefined` as "no plan-mode filtering"). Mirrors how the text
+   * channel paths already read the stage at their call sites.
+   */
+  private resolveSessionWorkflowStage(
+    sessionId: string | undefined,
+  ): SessionWorkflowStage | undefined {
+    if (!sessionId) return undefined;
+    const metadata = this._webSessionManager?.get(sessionId)?.metadata;
+    if (!metadata) return undefined;
+    return resolveSessionWorkflowState(metadata).stage;
+  }
+
   private getAdvertisedToolNames(
     toolNames?: readonly string[],
     shellProfile: SessionShellProfile = DEFAULT_SESSION_SHELL_PROFILE,
@@ -6964,6 +6989,7 @@ export class DaemonManager {
         undefined,
         advertisedShellProfile,
         this.getDiscoveredToolNamesForSession(sessionId),
+        this.resolveSessionWorkflowStage(sessionId),
       ),
       defaultWorkingDirectory: this._hostWorkspacePath ?? undefined,
       workspaceAliasRoot: this._hostWorkspacePath ?? undefined,
@@ -7090,6 +7116,7 @@ export class DaemonManager {
         undefined,
         advertisedShellProfile,
         this.getDiscoveredToolNamesForSession(sessionId),
+        this.resolveSessionWorkflowStage(sessionId),
       ),
       defaultWorkingDirectory: this._hostWorkspacePath ?? undefined,
       workspaceAliasRoot: this._hostWorkspacePath ?? undefined,
